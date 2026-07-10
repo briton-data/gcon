@@ -62,7 +62,7 @@ class PresentationLayer:
         """
         Return workflow information.
         """
-        return []
+        return self.coordinator.get_workflows()
     
     def get_metrics(self):
         """
@@ -81,6 +81,7 @@ class PresentationLayer:
             formatted.append({
                 "timestamp": event.timestamp.strftime("%H:%M:%S"),
                 "message": self._format_event_message(event),
+                "event_type": event.event_type,
             })
 
         # Most recent first
