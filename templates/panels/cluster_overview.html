@@ -1,0 +1,63 @@
+<div class="gcon-panel">
+
+    <div class="gcon-panel-header">
+        <h5 class="mb-0">Coordinator Summary</h5>
+    </div>
+
+    <div class="gcon-panel-body">
+
+        <div class="row gy-3">
+
+            <div class="col-6">
+
+                <small class="text-secondary">
+                    Coordinator
+                </small>
+
+                <div class="fw-bold">
+                    Coordinator-1
+                </div>
+
+            </div>
+
+            <div class="col-6">
+
+                <small class="text-secondary">
+                    Registered Nodes
+                </small>
+
+                <div class="fw-bold" id="overview-registered-nodes">
+                    {{ dashboard.metrics.total_nodes }}
+                </div>
+
+            </div>
+
+            <div class="col-6">
+
+                <small class="text-secondary">
+                    Active Jobs
+                </small>
+
+                <div class="fw-bold" id="overview-active-jobs">
+                    {{ dashboard.metrics.running_jobs }}
+                </div>
+
+            </div>
+
+            <div class="col-6">
+
+                <small class="text-secondary">
+                    Receipts
+                </small>
+
+                <div class="fw-bold" id="overview-receipts">
+                    {{ dashboard.receipts_count | default(0) }}
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>

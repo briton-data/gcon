@@ -1,0 +1,19 @@
+<div class="d-grid gap-3">
+
+    {% with badge_class="bg-success", text="Coordinator Online" %}
+        {% include "components/status_badge.html" %}
+    {% endwith %}
+
+    {% with badge_class="bg-success", text="Cluster Healthy" %}
+        {% include "components/status_badge.html" %}
+    {% endwith %}
+
+    {% with badge_class="bg-success", text="Event System Running" %}
+        {% include "components/status_badge.html" %}
+    {% endwith %}
+
+    {% with badge_class="bg-success", text="Storage Connected" %}
+        {% include "components/status_badge.html" %}
+    {% endwith %}
+
+</div>

@@ -1,0 +1,131 @@
+<div class="gcon-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+
+        <h5 class="mb-0">
+            Registered Nodes
+        </h5>
+
+        <button class="btn btn-sm btn-outline-light">
+            Refresh
+        </button>
+
+    </div>
+
+    <div class="gcon-panel-body">
+
+        <div class="table-responsive">
+
+            <table class="table table-dark table-hover align-middle gcon-table">
+
+                <thead>
+
+                    <tr>
+
+                        <th>Node ID</th>
+
+                        <th>Status</th>
+
+                        <th>Running Jobs</th>
+
+                        <th>CPU</th>
+
+                        <th>Memory</th>
+
+                        <th>Last Seen</th>
+
+                    </tr>
+
+                </thead>
+
+              <tbody id="nodes-body">
+
+{% if dashboard.nodes %}
+
+    {% for node in dashboard.nodes %}
+
+    <tr>
+
+        <td>
+
+            {{ node.node_id }}
+
+        </td>
+
+        <td>
+
+            {% if node.status == "healthy" %}
+
+                <span class="badge bg-success">
+                    Healthy
+                </span>
+
+            {% elif node.status == "offline" %}
+
+                <span class="badge bg-secondary">
+                    Idle
+                </span>
+
+            {% else %}
+
+                <span class="badge bg-secondary">
+
+                    {{ node.status }}
+
+                </span>
+
+            {% endif %}
+
+        </td>
+
+        <td>
+
+            {{ node.running_jobs }}
+
+        </td>
+
+        <td>
+
+            {{ node.cpu }}
+
+        </td>
+
+        <td>
+
+            {{ node.memory }}
+
+        </td>
+
+        <td>
+
+            {{ node.last_seen }}
+
+        </td>
+
+    </tr>
+
+    {% endfor %}
+
+{% else %}
+
+<tr>
+
+    <td colspan="6" class="text-center text-secondary">
+
+        No registered nodes.
+
+    </td>
+
+</tr>
+
+{% endif %}
+
+</tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+</div>
