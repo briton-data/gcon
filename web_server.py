@@ -65,6 +65,53 @@ class WebServer:
         @self.app.get("/events")
         def events():
             return self.presentation.get_events()
+
+        # ---- Cluster Visualization ----
+
+        @self.app.get("/topology")
+        def topology():
+            return self.presentation.get_topology()
+
+        # ---- Explorer views ----
+
+        @self.app.get("/receipts")
+        def receipts():
+            return self.presentation.get_receipts()
+
+        @self.app.get("/artifacts")
+        def artifacts():
+            return self.presentation.get_artifacts()
+
+        # ---- Real-Time Monitoring ----
+
+        @self.app.get("/system-metrics")
+        def system_metrics():
+            return self.presentation.get_system_metrics()
+
+        # ---- Analytics & History ----
+
+        @self.app.get("/analytics")
+        def analytics():
+            return self.presentation.get_analytics()
+
+        # ---- Administration ----
+
+        @self.app.get("/admin/config")
+        def admin_config():
+            return self.presentation.get_admin_config()
+
+        @self.app.post("/admin/scale-up")
+        def admin_scale_up():
+            return self.presentation.scale_up()
+
+        @self.app.post("/admin/scale-down")
+        def admin_scale_down():
+            return self.presentation.scale_down()
+
+        @self.app.post("/admin/nodes/{node_id}/deregister")
+        def admin_deregister_node(node_id: str):
+            self.presentation.deregister_node(node_id)
+            return self.presentation.get_admin_config()
        
             
   

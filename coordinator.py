@@ -502,11 +502,17 @@ class GCONCoordinator:
             ),
         }
 
-    def get_events(self):
+    def get_events(self,limit=20):
         """
         Return recent cluster events.
         """
-        return self.event_bus.get_recent_events()
+        return self.event_bus.get_recent_events(limit)
+    
+    def get_all_events(self):
+        """
+        Return the full event history (used by analytics/diagnostics).
+        """
+        return self.event_bus.get_events()
 
     def get_nodes(self):
         """
@@ -591,15 +597,13 @@ class GCONCoordinator:
 
         artifacts = []
 
-        for artifact_id, artifact in self.artifacts.items():
-
+        for artifact in self.artifact_registry.list_artifacts():
             artifacts.append({
-                "artifact_id": artifact_id,
-                "job_id": artifact.get("job_id"),
-                "type": artifact.get("type", "unknown"),
-                "size": artifact.get("size", "N/A"),
-                "location": artifact.get("location", "N/A"),
-                "created_at": artifact.get("created_at", "N/A")
+                "artifact_id": artifact.artifact_id,
+                "filename": artifact.filename,
+                "sha256": artifact.sha256,
+                "size": artifact.size,
+                "uploaded_at": artifact.uploaded_at,
         })
 
         return artifacts
