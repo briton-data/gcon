@@ -193,7 +193,16 @@ class WebServer:
         def admin_deregister_node(node_id: str):
             self.presentation.deregister_node(node_id)
             return self.presentation.get_admin_config()
-       
+        
+        @self.app.get("/users", response_class=HTMLResponse)
+        def users(request: Request):
+
+            return self.templates.TemplateResponse(
+                request=request,
+                name="users.html",
+                context={}
+    )
+
             
   
     def start(self):
