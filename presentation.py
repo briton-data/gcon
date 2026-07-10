@@ -226,6 +226,9 @@ class PresentationLayer:
         Return all registered artifacts.
         """
         return self.coordinator.get_artifacts()
+    
+    def get_cluster_health(self):
+        return self.coordinator.get_cluster_health()
 
     # ------------------------------------------------------------------
     # Real-Time Monitoring
