@@ -12,6 +12,8 @@ let currentTab = "control-center";
 let explorerView = "jobs";
 let explorerData = [];
 let isPaused = false;
+let lastSuccessfulRefresh = null;
+let refreshInProgress = false;
 
 // ---------------------------------------------------------------
 // Helpers
@@ -29,32 +31,21 @@ function statusBadge(status) {
     const normalized = (status || "").toLowerCase();
 
     const classMap = {
-        healthy: "bg-success",
-        idle: "bg-success",
-        offline: "bg-danger",
-        busy: "bg-primary",
-        running: "bg-primary",
-        completed: "bg-success",
-        failed: "bg-danger",
-        pending: "bg-warning text-dark",
-        verified: "bg-success",
+        healthy: "bg-success", idle: "bg-secondary", offline: "bg-secondary",
+        running: "bg-primary", completed: "bg-success", failed: "bg-danger",
+        pending: "bg-warning text-dark", verified: "bg-success",
+        active: "bg-success", suspended: "bg-warning text-dark",
+        disabled: "bg-secondary", revoked: "bg-danger", expired: "bg-secondary",
     };
-
     const labelMap = {
-        healthy: "Healthy",
-        idle: "Idle",
-        offline: "Offline",
-        busy: "Busy",
-        running: "Running",
-        completed: "Completed",
-        failed: "Failed",
-        pending: "Pending",
-        verified: "Verified",
+        healthy: "Healthy", idle: "Idle", offline: "Idle", running: "Running",
+        completed: "Completed", failed: "Failed", pending: "Pending", verified: "Verified",
+        active: "Active", suspended: "Suspended", disabled: "Disabled",
+        revoked: "Revoked", expired: "Expired",
     };
 
     const cls = classMap[normalized] || "bg-secondary";
     const label = labelMap[normalized] || escapeHtml(status || "Unknown");
-
     return `<span class="badge ${cls}">${label}</span>`;
 }
 
@@ -62,54 +53,6 @@ function setText(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
 }
-
-const _counterAnimations = new Map();
-
-function setCounter(id, value) {
-    const el = document.getElementById(id);
-    if (!el) return;
-
-    const target = Number(value);
-
-    if (!Number.isFinite(target)) {
-        el.textContent = value;
-        return;
-    }
-
-    const start = Number(el.dataset.rawValue ?? el.textContent) || 0;
-
-    if (start === target) {
-        el.dataset.rawValue = String(target);
-        return;
-    }
-
-    const existing = _counterAnimations.get(id);
-
-    if (existing) cancelAnimationFrame(existing);
-
-    const durationMs = 500;
-    const startTime = performance.now();
-
-    function step(now) {
-        const progress = Math.min(1, (now - startTime) / durationMs);
-        const eased = 1 - Math.pow(1 - progress, 3);
-
-        const current = Math.round(start + (target - start) * eased);
-
-        el.textContent = current;
-
-        if (progress < 1) {
-            _counterAnimations.set(id, requestAnimationFrame(step));
-        } else {
-            el.textContent = target;
-            el.dataset.rawValue = String(target);
-            _counterAnimations.delete(id);
-        }
-    }
-
-    _counterAnimations.set(id, requestAnimationFrame(step));
-}
-
 
 function formatUptime(seconds) {
     if (seconds === undefined || seconds === null) return "--";
@@ -170,6 +113,13 @@ const TAB_TITLES = {
     "monitoring": "Real-Time Monitoring",
     "analytics": "Analytics & History",
     "admin": "Administration",
+    "users": "Users",
+    "organizations": "Organizations",
+    "teams": "Teams",
+    "api-keys": "API Keys",
+    "permissions": "Permissions",
+    "audit-logs": "Audit Logs",
+    "notifications": "Notifications",
 };
 
 function switchTab(tab) {
@@ -179,7 +129,7 @@ function switchTab(tab) {
     const target = document.getElementById(`tab-${tab}`);
     if (target) target.classList.remove("d-none");
 
-    document.querySelectorAll("#tab-nav a, #tab-nav-top a").forEach(el => {
+    document.querySelectorAll("#tab-nav a, #tab-nav-top a, #tab-nav-mgmt a").forEach(el => {
         el.classList.toggle("active", el.dataset.tab === tab);
     });
 
@@ -188,7 +138,7 @@ function switchTab(tab) {
 }
 
 function setupTabNav() {
-    document.querySelectorAll("#tab-nav a, #tab-nav-top a").forEach(el => {
+    document.querySelectorAll("#tab-nav a, #tab-nav-top a, #tab-nav-mgmt a").forEach(el => {
         el.addEventListener("click", (e) => {
             e.preventDefault();
             switchTab(el.dataset.tab);
@@ -203,6 +153,13 @@ function loadActiveTab() {
     else if (currentTab === "monitoring") loadMonitoring();
     else if (currentTab === "analytics") loadAnalytics();
     else if (currentTab === "admin") loadAdmin();
+    else if (currentTab === "users") loadUsersTab();
+    else if (currentTab === "organizations") loadOrganizationsTab();
+    else if (currentTab === "teams") loadTeamsTab();
+    else if (currentTab === "api-keys") loadApiKeysTab();
+    else if (currentTab === "permissions") loadPermissionsTab();
+    else if (currentTab === "audit-logs") loadAuditLogsTab();
+    else if (currentTab === "notifications") loadNotificationsTab();
 }
 
 // ---------------------------------------------------------------
@@ -212,86 +169,17 @@ function loadActiveTab() {
 async function loadCluster() {
     try {
         const cluster = await fetchJson("/cluster");
-        applyClusterSnapshot(cluster);
+        setText("metric-total-nodes", cluster.total_nodes);
+        setText("metric-running-jobs", cluster.running_jobs);
+        setText("metric-completed-jobs", cluster.completed_jobs);
+        setText("metric-failed-jobs", cluster.failed_jobs);
+        setText("overview-registered-nodes", cluster.total_nodes);
+        setText("overview-active-jobs", cluster.running_jobs);
+        setText("cc-node-summary", `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`);
     } catch (err) {
         console.error("Failed to load cluster state:", err);
         setConnectionStatus(false);
     }
-    
-}
-
-function applyClusterSnapshot(cluster) {
-    setCounter("metric-total-nodes", cluster.total_nodes);
-    setCounter("metric-running-jobs", cluster.running_jobs);
-    setCounter("metric-completed-jobs", cluster.completed_jobs);
-    setCounter("metric-failed-jobs", cluster.failed_jobs);
-
-    setCounter("overview-registered-nodes", cluster.total_nodes);
-    setCounter("overview-active-jobs", cluster.running_jobs);
-
-    setText(
-        "cc-node-summary",
-        `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`
-    );
-
-    updateHealthIndicators(cluster);
-}
-
-function updateHealthIndicators(cluster) {
-    const hasFailures = cluster.failed_jobs > 0;
-
-    setBadge(
-        "health-coordinator",
-        true,
-        "Coordinator Online",
-        "Coordinator Unreachable"
-    );
-
-    if (cluster.total_nodes === 0) {
-        setBadge(
-            "health-cluster",
-            false,
-            "Cluster Healthy",
-            "No Nodes Registered",
-            "bg-warning text-dark"
-        );
-    } else if (hasFailures) {
-        setBadge(
-            "health-cluster",
-            false,
-            "Cluster Healthy",
-            `${cluster.failed_jobs} Failed Job(s)`,
-            "bg-warning text-dark"
-        );
-    } else {
-        setBadge(
-            "health-cluster",
-            true,
-            "Cluster Healthy",
-            "Cluster Degraded"
-        );
-    }
-
-    setBadge(
-        "health-events",
-        true,
-        "Event System Running",
-        "Event System Idle"
-    );
-}
-
-function setBadge(id, healthy, okText, badText, badClass) {
-    const el = document.getElementById(id);
-
-    if (!el) return;
-
-    el.className =
-        `gcon-status-badge ${
-            healthy ? "bg-success" : (badClass || "bg-danger")
-        }`;
-
-    el.textContent =
-        `● ${healthy ? okText : badText}`;
 }
 
 async function loadNodes() {
@@ -530,10 +418,8 @@ async function loadMonitoring() {
         const metrics = await fetchJson("/system-metrics");
         setText("sm-avg-cpu", `${metrics.avg_cpu}%`);
         setText("sm-avg-memory", `${metrics.avg_memory}%`);
-
-        setCounter("sm-running", metrics.running_jobs);
-        setCounter("sm-event-count", metrics.event_count);
-
+        setText("sm-running", metrics.running_jobs);
+        setText("sm-event-count", metrics.event_count);
         setText("sm-uptime", formatUptime(metrics.uptime_seconds));
         setText("sm-connection", "Live");
 
@@ -578,9 +464,9 @@ async function loadAnalytics() {
     try {
         const data = await fetchJson("/analytics");
         setText("an-success-rate", `${data.success_rate}%`);
-        setCounter("an-completed", data.totals.completed);
-        setCounter("an-failed", data.totals.failed);
-        setCounter("an-pending", data.totals.pending);
+        setText("an-completed", data.totals.completed);
+        setText("an-failed", data.totals.failed);
+        setText("an-pending", data.totals.pending);
         renderBarChart(data.totals);
         renderFeed("analytics-timeline", data.timeline);
     } catch (err) {
@@ -597,13 +483,11 @@ async function loadAdminConfig() {
     try {
         const config = await fetchJson("/admin/config");
         setText("admin-min-nodes", config.min_nodes);
-
-        setCounter("admin-total-nodes", config.total_nodes);
-        setCounter("admin-idle-nodes", config.idle_nodes);
-        setCounter("admin-pending-jobs", config.pending_jobs);
-        setCounter("admin-subscribers", config.subscriber_count);
-        setCounter("admin-event-count", config.event_count);
-
+        setText("admin-total-nodes", config.total_nodes);
+        setText("admin-idle-nodes", config.idle_nodes);
+        setText("admin-pending-jobs", config.pending_jobs);
+        setText("admin-subscribers", config.subscriber_count);
+        setText("admin-event-count", config.event_count);
         setText("admin-uptime", formatUptime(config.uptime_seconds));
     } catch (err) {
         console.error("Failed to load admin config:", err);
@@ -673,9 +557,43 @@ async function triggerScale(direction) {
 // ---------------------------------------------------------------
 
 async function refreshDashboard() {
-    loadActiveTab();
-    setText("last-updated", new Date().toLocaleTimeString());
+    
+    if (refreshInProgress) return;
+
+    refreshInProgress = true;
+
+    const refreshBtn = document.getElementById("refresh-now-btn");
+    const icon = refreshBtn ? refreshBtn.querySelector("i") : null;
+
+    if (refreshBtn) refreshBtn.disabled = true;
+    if (icon) icon.classList.add("spin");
+
+    try {
+
+        await loadActiveTab();
+        await loadHealthBadge();
+        await refreshNotifBadge();
+
+        lastSuccessfulRefresh = new Date();
+
+        setText(
+            "last-updated",
+            lastSuccessfulRefresh.toLocaleTimeString()
+        );
+
+    } catch (err) {
+
+        console.error("Dashboard refresh failed:", err);
+
+    } finally {
+
+        if (refreshBtn) refreshBtn.disabled = false;
+        if (icon) icon.classList.remove("spin");
+
+        refreshInProgress = false;
+    }
 }
+
 
 function updateClock() {
     const clock = document.getElementById("clock");
@@ -687,12 +605,14 @@ function setupControls() {
     if (refreshBtn) refreshBtn.addEventListener("click", refreshDashboard);
 
     const pauseBtn = document.getElementById("pause-btn");
+
+
     if (pauseBtn) {
         pauseBtn.addEventListener("click", () => {
             isPaused = !isPaused;
             pauseBtn.innerHTML = isPaused
-                ? '<i class="bi bi-play-fill"></i>'
-                : '<i class="bi bi-pause-fill"></i>';
+                ? '<i class="bi bi-play-fill me-1"></i>'
+                : '<i class="bi bi-pause-fill me-1"></i>';
             pauseBtn.title = isPaused ? "Resume live updates" : "Pause live updates";
         });
     }
@@ -707,47 +627,658 @@ function setupControls() {
     });
 }
 
-let eventSource = null;
 
-function connectStream() {
-    if (typeof EventSource === "undefined") {
+    const rediscoverBtn = document.getElementById("rediscover-btn");
+    if (rediscoverBtn) {
+        rediscoverBtn.addEventListener("click", async () => {
+            try {
+                await fetchJson("/admin/rediscover", {
+                    method: "POST"
+            });
+                refreshDashboard();
+        }       catch (err) {
+                    console.error("Rediscover failed:", err);
+        }
+    });
+
+
+    const clearCompletedBtn = document.getElementById("clear-completed-btn");
+if (clearCompletedBtn) {
+    clearCompletedBtn.addEventListener("click", async () => {
+        try {
+            await fetchJson("/admin/jobs/clear-completed", {
+                method: "POST"
+            });
+            refreshDashboard();
+        } catch (err) {
+            console.error("Clear completed failed:", err);
+        }
+    });
+}
+}
+// ---------------------------------------------------------------
+// Management: Users
+// ---------------------------------------------------------------
+
+let usersData = [];
+let usersStatusFilter = "all";
+
+async function loadUsersTab() {
+    try {
+        const [cards, users] = await Promise.all([
+            fetchJson("/management/dashboard-cards"),
+            fetchJson("/management/users"),
+        ]);
+
+        setText("uc-total-users", cards.total_users);
+        setText("uc-active-users", cards.active_users);
+        setText("uc-organizations", cards.organizations);
+        setText("uc-api-keys", cards.api_keys);
+        setText("uc-active-sessions", cards.active_sessions);
+        setText("uc-total-workflows", cards.total_workflows);
+
+        usersData = users;
+        renderUsersTable();
+    } catch (err) {
+        console.error("Failed to load users tab:", err);
+        setConnectionStatus(false);
+    }
+}
+
+function renderUsersTable() {
+    const body = document.getElementById("users-body");
+    if (!body) return;
+
+    const search = document.getElementById("users-search");
+    const query = search ? search.value.toLowerCase() : "";
+
+    let rows = usersData;
+    if (usersStatusFilter !== "all") {
+        rows = rows.filter(u => u.status === usersStatusFilter);
+    }
+    if (query) {
+        rows = rows.filter(u =>
+            u.name.toLowerCase().includes(query) ||
+            u.email.toLowerCase().includes(query) ||
+            u.role.toLowerCase().includes(query)
+        );
+    }
+
+    if (rows.length === 0) {
+        body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">No users found.</td></tr>`;
         return;
     }
 
-    eventSource = new EventSource("/stream");
+    let html = "";
+    for (const u of rows) {
+        html += `
+            <tr data-user-id="${escapeHtml(u.user_id)}">
+                <td><span class="gcon-avatar">${escapeHtml(u.avatar_initials)}</span></td>
+                <td class="gcon-row-link" data-open-user="${escapeHtml(u.user_id)}">${escapeHtml(u.name)}</td>
+                <td>${escapeHtml(u.email)}</td>
+                <td>${escapeHtml(u.role)}</td>
+                <td>${statusBadge(u.status)}</td>
+                <td>${escapeHtml(new Date(u.last_active).toLocaleString())}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-light user-view-btn" data-user-id="${escapeHtml(u.user_id)}">View</button>
+                    <button class="btn btn-sm btn-outline-danger user-delete-btn" data-user-id="${escapeHtml(u.user_id)}">Delete</button>
+                </td>
+            </tr>
+        `;
+    }
+    body.innerHTML = html;
 
-    eventSource.addEventListener("open", () => setConnectionStatus(true));
-    eventSource.addEventListener("error", () => setConnectionStatus(false));
+    document.querySelectorAll(".gcon-row-link[data-open-user], .user-view-btn").forEach(el => {
+        el.addEventListener("click", () => openUserDrawer(el.dataset.userId || el.dataset.openUser));
+    });
+    document.querySelectorAll(".user-delete-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            if (!confirm("Delete this user?")) return;
+            try {
+                await fetchJson(`/management/users/${btn.dataset.userId}`, { method: "DELETE" });
+                await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to delete user:", err);
+            }
+        });
+    });
+}
 
-    const handleSnapshot = (e) => {
-        if (isPaused) return;
+function setupUsersTab() {
+    const search = document.getElementById("users-search");
+    if (search) search.addEventListener("input", renderUsersTable);
 
-        try {
-            applyClusterSnapshot(JSON.parse(e.data));
-        } catch (err) {
-            console.error("Bad snapshot frame:", err);
+    document.querySelectorAll("#users-status-filters button").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll("#users-status-filters button").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            usersStatusFilter = btn.dataset.filter;
+            renderUsersTable();
+        });
+    });
+
+    const addBtn = document.getElementById("users-add-btn");
+    if (addBtn) {
+        addBtn.addEventListener("click", () => {
+            new bootstrap.Modal(document.getElementById("addUserModal")).show();
+        });
+    }
+
+    const submitBtn = document.getElementById("add-user-submit");
+    if (submitBtn) {
+        submitBtn.addEventListener("click", async () => {
+            const name = document.getElementById("add-user-name").value.trim();
+            const email = document.getElementById("add-user-email").value.trim();
+            const role = document.getElementById("add-user-role").value;
+            if (!name || !email) return;
+
+            try {
+                await fetchJson("/management/users", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, email, role }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("addUserModal")).hide();
+                document.getElementById("add-user-name").value = "";
+                document.getElementById("add-user-email").value = "";
+                await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to create user:", err);
+            }
+        });
+    }
+
+    const exportCsv = document.getElementById("users-export-csv");
+    if (exportCsv) exportCsv.addEventListener("click", () => window.open("/management/export/users?format=csv"));
+
+    const exportJson = document.getElementById("users-export-json");
+    if (exportJson) exportJson.addEventListener("click", () => window.open("/management/export/users?format=json"));
+}
+
+async function openUserDrawer(userId) {
+    const user = usersData.find(u => u.user_id === userId) || await fetchJson(`/management/users/${userId}`);
+
+    let auditEntries = [];
+    try {
+        const allAudit = await fetchJson("/management/audit-logs");
+        auditEntries = allAudit.filter(a => a.actor === user.name || a.target === user.name);
+    } catch (err) { /* non-fatal */ }
+
+    let apiKeys = [];
+    try {
+        const allKeys = await fetchJson("/management/api-keys");
+        apiKeys = allKeys.filter(k => k.owner_user_id === user.user_id);
+    } catch (err) { /* non-fatal */ }
+
+    const permissions = ROLE_PERMISSIONS_CACHE[user.role] || [];
+
+    const body = document.getElementById("drawer-body");
+    setText("drawer-title", user.name);
+
+    body.innerHTML = `
+        <div class="d-flex align-items-center gap-3 mb-3">
+            <span class="gcon-avatar gcon-avatar-lg">${escapeHtml(user.avatar_initials)}</span>
+            <div>
+                <div class="fw-bold">${escapeHtml(user.name)}</div>
+                <div class="text-secondary small">${escapeHtml(user.email)}</div>
+                <div class="mt-1">${statusBadge(user.status)} <span class="badge bg-dark">${escapeHtml(user.role)}</span></div>
+            </div>
+        </div>
+
+        <ul class="nav nav-pills gcon-drawer-tabs mb-3" id="user-drawer-tabs">
+            <li class="nav-item"><a class="nav-link active" data-udtab="overview" href="#">Overview</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="jobs" href="#">Jobs</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="workflows" href="#">Workflows</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="activity" href="#">Activity</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="apikeys" href="#">API Keys</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="permissions" href="#">Permissions</a></li>
+            <li class="nav-item"><a class="nav-link" data-udtab="settings" href="#">Settings</a></li>
+        </ul>
+
+        <div id="ud-overview" class="ud-pane">
+            <div class="row gy-2">
+                <div class="col-6"><small class="text-secondary">Login Count</small><div class="fw-bold">${user.stats.login_count}</div></div>
+                <div class="col-6"><small class="text-secondary">API Requests</small><div class="fw-bold">${user.stats.api_requests}</div></div>
+                <div class="col-6"><small class="text-secondary">CPU Usage</small><div class="fw-bold">${user.stats.cpu_usage}%</div></div>
+                <div class="col-6"><small class="text-secondary">Storage Usage</small><div class="fw-bold">${user.stats.storage_usage_gb} GB</div></div>
+                <div class="col-6"><small class="text-secondary">Member Since</small><div class="fw-bold">${new Date(user.created_at).toLocaleDateString()}</div></div>
+                <div class="col-6"><small class="text-secondary">Last Active</small><div class="fw-bold">${new Date(user.last_active).toLocaleString()}</div></div>
+            </div>
+            <p class="text-secondary small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Usage figures are illustrative demo data — GCON does not yet attribute real jobs to individual users.</p>
+        </div>
+
+        <div id="ud-jobs" class="ud-pane d-none">
+            <div class="row gy-2">
+                <div class="col-6"><small class="text-secondary">Submitted</small><div class="fw-bold">${user.stats.jobs_submitted}</div></div>
+                <div class="col-6"><small class="text-secondary">Running</small><div class="fw-bold">${user.stats.jobs_running}</div></div>
+                <div class="col-6"><small class="text-secondary">Completed</small><div class="fw-bold">${user.stats.jobs_completed}</div></div>
+                <div class="col-6"><small class="text-secondary">Failed</small><div class="fw-bold">${user.stats.jobs_failed}</div></div>
+            </div>
+        </div>
+
+        <div id="ud-workflows" class="ud-pane d-none">
+            <div><small class="text-secondary">Workflows Created</small><div class="fw-bold">${user.stats.workflows_created}</div></div>
+        </div>
+
+        <div id="ud-activity" class="ud-pane d-none">
+            ${auditEntries.length ? auditEntries.map(a => `
+                <div class="gcon-activity-item">
+                    <div class="gcon-activity-time">${new Date(a.timestamp).toLocaleTimeString()}</div>
+                    <div class="gcon-activity-message">${escapeHtml(a.actor)} ${escapeHtml(a.action)}${a.target ? " — " + escapeHtml(a.target) : ""}</div>
+                </div>
+            `).join("") : `<div class="text-secondary">No recorded activity.</div>`}
+        </div>
+
+        <div id="ud-apikeys" class="ud-pane d-none">
+            ${apiKeys.length ? apiKeys.map(k => `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span>${escapeHtml(k.name)}</span>
+                    ${statusBadge(k.status)}
+                </div>
+            `).join("") : `<div class="text-secondary">No API keys owned by this user.</div>`}
+        </div>
+
+        <div id="ud-permissions" class="ud-pane d-none">
+            ${permissions.length ? permissions.map(p => `<div><i class="bi bi-check-circle text-success me-2"></i>${escapeHtml(p)}</div>`).join("") : `<div class="text-secondary">No permissions.</div>`}
+        </div>
+
+        <div id="ud-settings" class="ud-pane d-none">
+            <div class="mb-3">
+                <label class="form-label">Status</label>
+                <select class="form-select" id="ud-status-select">
+                    ${["Active", "Pending", "Suspended", "Disabled"].map(s => `<option value="${s}" ${s === user.status ? "selected" : ""}>${s}</option>`).join("")}
+                </select>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Role</label>
+                <select class="form-select" id="ud-role-select">
+                    ${["Owner", "Administrator", "Operator", "Developer", "Viewer"].map(r => `<option value="${r}" ${r === user.role ? "selected" : ""}>${r}</option>`).join("")}
+                </select>
+            </div>
+            <button class="btn btn-primary btn-sm" id="ud-save-btn">Save Changes</button>
+        </div>
+    `;
+
+    document.querySelectorAll("#user-drawer-tabs a").forEach(el => {
+        el.addEventListener("click", (e) => {
+            e.preventDefault();
+            document.querySelectorAll("#user-drawer-tabs a").forEach(a => a.classList.remove("active"));
+            el.classList.add("active");
+            document.querySelectorAll(".ud-pane").forEach(p => p.classList.add("d-none"));
+            document.getElementById(`ud-${el.dataset.udtab}`).classList.remove("d-none");
+        });
+    });
+
+    const saveBtn = document.getElementById("ud-save-btn");
+    if (saveBtn) {
+        saveBtn.addEventListener("click", async () => {
+            const status = document.getElementById("ud-status-select").value;
+            const role = document.getElementById("ud-role-select").value;
+            try {
+                await fetchJson(`/management/users/${user.user_id}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ status, role }),
+                });
+                closeDrawer();
+                if (currentTab === "users") await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to update user:", err);
+            }
+        });
+    }
+
+    openDrawer();
+}
+
+// ---------------------------------------------------------------
+// Management: Organizations & Teams
+// ---------------------------------------------------------------
+
+async function loadOrganizationsTab() {
+    const body = document.getElementById("organizations-body");
+    if (!body) return;
+    try {
+        const orgs = await fetchJson("/management/organizations");
+        if (orgs.length === 0) {
+            body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">No organizations.</td></tr>`;
+            return;
         }
-    };
+        body.innerHTML = orgs.map(o => `
+            <tr>
+                <td>${escapeHtml(o.name)}</td>
+                <td><span class="badge bg-dark">${escapeHtml(o.plan)}</span></td>
+                <td>${escapeHtml(o.member_count)}</td>
+                <td>${escapeHtml(o.team_count)}</td>
+                <td>${escapeHtml(o.storage_used_gb)} GB</td>
+            </tr>
+        `).join("");
+    } catch (err) {
+        console.error("Failed to load organizations:", err);
+        setConnectionStatus(false);
+    }
+}
 
-    eventSource.addEventListener("snapshot", handleSnapshot);
-    eventSource.addEventListener("heartbeat", handleSnapshot);
+async function loadTeamsTab() {
+    const body = document.getElementById("teams-body");
+    if (!body) return;
+    try {
+        const [teams, orgs] = await Promise.all([
+            fetchJson("/management/teams"),
+            fetchJson("/management/organizations"),
+        ]);
+        const orgName = {};
+        orgs.forEach(o => orgName[o.org_id] = o.name);
 
-    eventSource.addEventListener("event", (e) => {
-        if (isPaused) return;
+        if (teams.length === 0) {
+            body.innerHTML = `<tr><td colspan="4" class="text-center text-secondary">No teams.</td></tr>`;
+            return;
+        }
+        body.innerHTML = teams.map(t => `
+            <tr>
+                <td>${escapeHtml(t.name)}</td>
+                <td>${escapeHtml(orgName[t.org_id] || "-")}</td>
+                <td>${escapeHtml(t.member_count)}</td>
+                <td>${escapeHtml(t.admin_user_id || "Unassigned")}</td>
+            </tr>
+        `).join("");
+    } catch (err) {
+        console.error("Failed to load teams:", err);
+        setConnectionStatus(false);
+    }
+}
 
-        try {
-            JSON.parse(e.data);
-        } catch (err) {
-            console.error("Bad event frame:", err);
+// ---------------------------------------------------------------
+// Management: API Keys
+// ---------------------------------------------------------------
+
+async function loadApiKeysTab() {
+    const body = document.getElementById("apikeys-body");
+    if (!body) return;
+    try {
+        const keys = await fetchJson("/management/api-keys");
+
+        if (keys.length === 0) {
+            body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">No API keys.</td></tr>`;
             return;
         }
 
-        if (currentTab === "control-center") {
-            loadEvents();
-            loadNodes();
-            loadJobs();
+        body.innerHTML = keys.map(k => `
+            <tr>
+                <td><code>${escapeHtml(k.secret)}</code><div class="text-secondary small">${escapeHtml(k.name)}</div></td>
+                <td>${new Date(k.created_at).toLocaleDateString()}</td>
+                <td>${k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "Never"}</td>
+                <td>${k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "Never"}</td>
+                <td>${(k.scopes || []).map(s => `<span class="badge bg-dark me-1">${escapeHtml(s)}</span>`).join("")}</td>
+                <td>${statusBadge(k.status)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-danger apikey-revoke-btn" data-key-id="${escapeHtml(k.key_id)}" ${k.status !== "Active" ? "disabled" : ""}>Revoke</button>
+                    <button class="btn btn-sm btn-outline-light apikey-regen-btn" data-key-id="${escapeHtml(k.key_id)}">Regenerate</button>
+                </td>
+            </tr>
+        `).join("");
+
+        document.querySelectorAll(".apikey-revoke-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                await fetchJson(`/management/api-keys/${btn.dataset.keyId}/revoke`, { method: "POST" });
+                await loadApiKeysTab();
+            });
+        });
+        document.querySelectorAll(".apikey-regen-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const result = await fetchJson(`/management/api-keys/${btn.dataset.keyId}/regenerate`, { method: "POST" });
+                showKeyReveal(result.secret);
+                await loadApiKeysTab();
+            });
+        });
+    } catch (err) {
+        console.error("Failed to load API keys:", err);
+        setConnectionStatus(false);
+    }
+}
+
+function showKeyReveal(secret) {
+    const reveal = document.getElementById("apikeys-reveal");
+    if (!reveal) return;
+    reveal.classList.remove("d-none");
+    reveal.innerHTML = `<i class="bi bi-exclamation-triangle me-2"></i>Copy this secret now — it won't be shown again: <code>${escapeHtml(secret)}</code>`;
+}
+
+async function setupApiKeysTab() {
+    const createBtn = document.getElementById("apikeys-create-btn");
+    if (createBtn) {
+        createBtn.addEventListener("click", async () => {
+            try {
+                const users = await fetchJson("/management/users");
+                const select = document.getElementById("create-key-owner");
+                select.innerHTML = users.map(u => `<option value="${escapeHtml(u.user_id)}">${escapeHtml(u.name)}</option>`).join("");
+            } catch (err) { /* non-fatal */ }
+            new bootstrap.Modal(document.getElementById("createKeyModal")).show();
+        });
+    }
+
+    const submitBtn = document.getElementById("create-key-submit");
+    if (submitBtn) {
+        submitBtn.addEventListener("click", async () => {
+            const name = document.getElementById("create-key-name").value.trim();
+            const owner = document.getElementById("create-key-owner").value;
+            const expires = parseInt(document.getElementById("create-key-expires").value, 10) || 0;
+            if (!name || !owner) return;
+
+            try {
+                const result = await fetchJson("/management/api-keys", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, owner_user_id: owner, expires_in_days: expires || null }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("createKeyModal")).hide();
+                document.getElementById("create-key-name").value = "";
+                showKeyReveal(result.secret);
+                await loadApiKeysTab();
+            } catch (err) {
+                console.error("Failed to create API key:", err);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------
+// Management: Permissions
+// ---------------------------------------------------------------
+
+let ROLE_PERMISSIONS_CACHE = {};
+
+async function loadPermissionsTab() {
+    const thead = document.getElementById("permissions-thead");
+    const body = document.getElementById("permissions-body");
+    if (!thead || !body) return;
+
+    try {
+        const matrix = await fetchJson("/management/permission-matrix");
+        const allPerms = await fetchJson("/management/permissions");
+
+        ROLE_PERMISSIONS_CACHE = {};
+        matrix.forEach(row => {
+            ROLE_PERMISSIONS_CACHE[row.role] = Object.keys(row.permissions).filter(p => row.permissions[p]);
+        });
+
+        thead.innerHTML = `<tr><th>Role</th>${allPerms.map(p => `<th>${escapeHtml(p)}</th>`).join("")}</tr>`;
+
+        body.innerHTML = matrix.map(row => `
+            <tr>
+                <td class="fw-bold">${escapeHtml(row.role)}</td>
+                ${allPerms.map(p => `<td>${row.permissions[p] ? '<i class="bi bi-check-circle-fill text-success"></i>' : '<i class="bi bi-dash text-secondary"></i>'}</td>`).join("")}
+            </tr>
+        `).join("");
+    } catch (err) {
+        console.error("Failed to load permissions:", err);
+        setConnectionStatus(false);
+    }
+}
+
+// ---------------------------------------------------------------
+// Management: Audit Logs & Notifications
+// ---------------------------------------------------------------
+
+async function loadAuditLogsTab() {
+    const feed = document.getElementById("audit-log-feed");
+    if (!feed) return;
+    try {
+        const entries = await fetchJson("/management/audit-logs");
+        if (entries.length === 0) {
+            feed.innerHTML = `<div class="text-secondary">No audit entries.</div>`;
+            return;
+        }
+        feed.innerHTML = entries.map(e => `
+            <div class="gcon-activity-item">
+                <div class="gcon-activity-time">${new Date(e.timestamp).toLocaleString()}</div>
+                <div class="gcon-activity-message">${escapeHtml(e.actor)} ${escapeHtml(e.action)}${e.target ? " — <strong>" + escapeHtml(e.target) + "</strong>" : ""}</div>
+            </div>
+        `).join("");
+    } catch (err) {
+        console.error("Failed to load audit logs:", err);
+        setConnectionStatus(false);
+    }
+}
+
+const NOTIF_ICONS = {
+    user_registered: "bi-person-plus", invitation_accepted: "bi-envelope-check",
+    password_changed: "bi-shield-lock", api_key_created: "bi-key",
+    workflow_completed: "bi-check-circle", node_failure: "bi-exclamation-triangle",
+    storage_warning: "bi-hdd",
+};
+
+async function loadNotificationsTab() {
+    const list = document.getElementById("notifications-list");
+    try {
+        const entries = await fetchJson("/management/notifications");
+        await refreshNotifBadge();
+
+        if (!list) return;
+        if (entries.length === 0) {
+            list.innerHTML = `<div class="text-secondary">No notifications.</div>`;
+            return;
+        }
+        list.innerHTML = entries.map(n => `
+            <div class="gcon-activity-item ${n.read ? "" : "gcon-notif-unread"}">
+                <div class="gcon-activity-time"><i class="bi ${NOTIF_ICONS[n.type] || "bi-bell"} me-1"></i>${new Date(n.timestamp).toLocaleTimeString()}</div>
+                <div class="gcon-activity-message">${escapeHtml(n.message)}</div>
+            </div>
+        `).join("");
+    } catch (err) {
+        console.error("Failed to load notifications:", err);
+        setConnectionStatus(false);
+    }
+}
+
+async function refreshNotifBadge() {
+    try {
+        const entries = await fetchJson("/management/notifications");
+        const unread = entries.filter(n => !n.read).length;
+        const badge = document.getElementById("notif-count-badge");
+        if (badge) badge.textContent = unread > 0 ? unread : "";
+    } catch (err) { /* non-fatal */ }
+}
+
+// ---------------------------------------------------------------
+// Global search
+// ---------------------------------------------------------------
+
+function setupGlobalSearch() {
+    const input = document.getElementById("global-search");
+    const results = document.getElementById("global-search-results");
+    if (!input || !results) return;
+
+    let debounceTimer;
+    input.addEventListener("input", () => {
+        clearTimeout(debounceTimer);
+        const query = input.value.trim();
+        if (!query) {
+            results.classList.add("d-none");
+            return;
+        }
+        debounceTimer = setTimeout(async () => {
+            try {
+                const data = await fetchJson(`/management/search?q=${encodeURIComponent(query)}`);
+                renderSearchResults(data);
+            } catch (err) {
+                console.error("Search failed:", err);
+            }
+        }, 250);
+    });
+
+    document.addEventListener("click", (e) => {
+        if (!results.contains(e.target) && e.target !== input) {
+            results.classList.add("d-none");
         }
     });
+}
+
+function renderSearchResults(data) {
+    const results = document.getElementById("global-search-results");
+    if (!results) return;
+
+    const sections = [
+        ["Users", data.users, u => `${u.name} · ${u.email}`],
+        ["Organizations", data.organizations, o => o.name],
+        ["API Keys", data.api_keys, k => k.name],
+        ["Jobs", data.jobs, j => `${j.job_id} · ${j.status}`],
+        ["Nodes", data.nodes, n => `${n.node_id} · ${n.status}`],
+    ];
+
+    let html = "";
+    let hasAny = false;
+    for (const [label, items, formatter] of sections) {
+        if (!items || items.length === 0) continue;
+        hasAny = true;
+        html += `<div class="gcon-search-group-label">${label}</div>`;
+        for (const item of items.slice(0, 5)) {
+            html += `<div class="gcon-search-result-item">${escapeHtml(formatter(item))}</div>`;
+        }
+    }
+
+    results.innerHTML = hasAny ? html : `<div class="gcon-search-result-item text-secondary">No matches.</div>`;
+    results.classList.remove("d-none");
+}
+
+// ---------------------------------------------------------------
+// Detail drawer (shared)
+// ---------------------------------------------------------------
+
+function openDrawer() {
+    document.getElementById("detail-drawer").classList.add("gcon-drawer-open");
+    document.getElementById("drawer-backdrop").classList.remove("d-none");
+}
+
+function closeDrawer() {
+    document.getElementById("detail-drawer").classList.remove("gcon-drawer-open");
+    document.getElementById("drawer-backdrop").classList.add("d-none");
+}
+
+function setupDrawer() {
+    const closeBtn = document.getElementById("drawer-close-btn");
+    if (closeBtn) closeBtn.addEventListener("click", closeDrawer);
+
+    const backdrop = document.getElementById("drawer-backdrop");
+    if (backdrop) backdrop.addEventListener("click", closeDrawer);
+}
+
+// ---------------------------------------------------------------
+// Cluster health badge (navbar, always live)
+// ---------------------------------------------------------------
+
+async function loadHealthBadge() {
+    try {
+        const health = await fetchJson("/health");
+        const badge = document.getElementById("cluster-health-badge");
+        if (!badge) return;
+        const classMap = { healthy: "bg-success", degraded: "bg-warning text-dark", critical: "bg-danger" };
+        badge.className = `badge ${classMap[health.state] || "bg-secondary"} me-3`;
+        badge.textContent = `● ${health.state.charAt(0).toUpperCase() + health.state.slice(1)}`;
+        badge.title = health.reason;
+    } catch (err) {
+        setConnectionStatus(false);
+    }
 }
 
 // ---------------------------------------------------------------
@@ -757,14 +1288,17 @@ function connectStream() {
 setupTabNav();
 setupExplorerNav();
 setupControls();
-
+setupUsersTab();
+setupApiKeysTab();
+setupGlobalSearch();
+setupDrawer();
 
 refreshDashboard();
+loadHealthBadge();
+refreshNotifBadge();
 updateClock();
-connectStream();
 
-setInterval(() => {
-    if (!isPaused) refreshDashboard();
-}, REFRESH_INTERVAL_MS);
-
+setInterval(() => { if (!isPaused) refreshDashboard(); }, REFRESH_INTERVAL_MS);
+setInterval(loadHealthBadge, REFRESH_INTERVAL_MS);
+setInterval(refreshNotifBadge, REFRESH_INTERVAL_MS);
 setInterval(updateClock, 1000);
