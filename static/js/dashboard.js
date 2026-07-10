@@ -29,17 +29,32 @@ function statusBadge(status) {
     const normalized = (status || "").toLowerCase();
 
     const classMap = {
-        healthy: "bg-success", idle: "bg-secondary", offline: "bg-secondary",
-        running: "bg-primary", completed: "bg-success", failed: "bg-danger",
-        pending: "bg-warning text-dark", verified: "bg-success",
+        healthy: "bg-success",
+        idle: "bg-success",
+        offline: "bg-danger",
+        busy: "bg-primary",
+        running: "bg-primary",
+        completed: "bg-success",
+        failed: "bg-danger",
+        pending: "bg-warning text-dark",
+        verified: "bg-success",
     };
+
     const labelMap = {
-        healthy: "Healthy", idle: "Idle", offline: "Idle", running: "Running",
-        completed: "Completed", failed: "Failed", pending: "Pending", verified: "Verified",
+        healthy: "Healthy",
+        idle: "Idle",
+        offline: "Offline",
+        busy: "Busy",
+        running: "Running",
+        completed: "Completed",
+        failed: "Failed",
+        pending: "Pending",
+        verified: "Verified",
     };
 
     const cls = classMap[normalized] || "bg-secondary";
     const label = labelMap[normalized] || escapeHtml(status || "Unknown");
+
     return `<span class="badge ${cls}">${label}</span>`;
 }
 
@@ -47,6 +62,54 @@ function setText(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
 }
+
+const _counterAnimations = new Map();
+
+function setCounter(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+
+    const target = Number(value);
+
+    if (!Number.isFinite(target)) {
+        el.textContent = value;
+        return;
+    }
+
+    const start = Number(el.dataset.rawValue ?? el.textContent) || 0;
+
+    if (start === target) {
+        el.dataset.rawValue = String(target);
+        return;
+    }
+
+    const existing = _counterAnimations.get(id);
+
+    if (existing) cancelAnimationFrame(existing);
+
+    const durationMs = 500;
+    const startTime = performance.now();
+
+    function step(now) {
+        const progress = Math.min(1, (now - startTime) / durationMs);
+        const eased = 1 - Math.pow(1 - progress, 3);
+
+        const current = Math.round(start + (target - start) * eased);
+
+        el.textContent = current;
+
+        if (progress < 1) {
+            _counterAnimations.set(id, requestAnimationFrame(step));
+        } else {
+            el.textContent = target;
+            el.dataset.rawValue = String(target);
+            _counterAnimations.delete(id);
+        }
+    }
+
+    _counterAnimations.set(id, requestAnimationFrame(step));
+}
+
 
 function formatUptime(seconds) {
     if (seconds === undefined || seconds === null) return "--";
@@ -149,17 +212,86 @@ function loadActiveTab() {
 async function loadCluster() {
     try {
         const cluster = await fetchJson("/cluster");
-        setText("metric-total-nodes", cluster.total_nodes);
-        setText("metric-running-jobs", cluster.running_jobs);
-        setText("metric-completed-jobs", cluster.completed_jobs);
-        setText("metric-failed-jobs", cluster.failed_jobs);
-        setText("overview-registered-nodes", cluster.total_nodes);
-        setText("overview-active-jobs", cluster.running_jobs);
-        setText("cc-node-summary", `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`);
+        applyClusterSnapshot(cluster);
     } catch (err) {
         console.error("Failed to load cluster state:", err);
         setConnectionStatus(false);
     }
+    
+}
+
+function applyClusterSnapshot(cluster) {
+    setCounter("metric-total-nodes", cluster.total_nodes);
+    setCounter("metric-running-jobs", cluster.running_jobs);
+    setCounter("metric-completed-jobs", cluster.completed_jobs);
+    setCounter("metric-failed-jobs", cluster.failed_jobs);
+
+    setCounter("overview-registered-nodes", cluster.total_nodes);
+    setCounter("overview-active-jobs", cluster.running_jobs);
+
+    setText(
+        "cc-node-summary",
+        `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`
+    );
+
+    updateHealthIndicators(cluster);
+}
+
+function updateHealthIndicators(cluster) {
+    const hasFailures = cluster.failed_jobs > 0;
+
+    setBadge(
+        "health-coordinator",
+        true,
+        "Coordinator Online",
+        "Coordinator Unreachable"
+    );
+
+    if (cluster.total_nodes === 0) {
+        setBadge(
+            "health-cluster",
+            false,
+            "Cluster Healthy",
+            "No Nodes Registered",
+            "bg-warning text-dark"
+        );
+    } else if (hasFailures) {
+        setBadge(
+            "health-cluster",
+            false,
+            "Cluster Healthy",
+            `${cluster.failed_jobs} Failed Job(s)`,
+            "bg-warning text-dark"
+        );
+    } else {
+        setBadge(
+            "health-cluster",
+            true,
+            "Cluster Healthy",
+            "Cluster Degraded"
+        );
+    }
+
+    setBadge(
+        "health-events",
+        true,
+        "Event System Running",
+        "Event System Idle"
+    );
+}
+
+function setBadge(id, healthy, okText, badText, badClass) {
+    const el = document.getElementById(id);
+
+    if (!el) return;
+
+    el.className =
+        `gcon-status-badge ${
+            healthy ? "bg-success" : (badClass || "bg-danger")
+        }`;
+
+    el.textContent =
+        `● ${healthy ? okText : badText}`;
 }
 
 async function loadNodes() {
@@ -398,8 +530,10 @@ async function loadMonitoring() {
         const metrics = await fetchJson("/system-metrics");
         setText("sm-avg-cpu", `${metrics.avg_cpu}%`);
         setText("sm-avg-memory", `${metrics.avg_memory}%`);
-        setText("sm-running", metrics.running_jobs);
-        setText("sm-event-count", metrics.event_count);
+
+        setCounter("sm-running", metrics.running_jobs);
+        setCounter("sm-event-count", metrics.event_count);
+
         setText("sm-uptime", formatUptime(metrics.uptime_seconds));
         setText("sm-connection", "Live");
 
@@ -444,9 +578,9 @@ async function loadAnalytics() {
     try {
         const data = await fetchJson("/analytics");
         setText("an-success-rate", `${data.success_rate}%`);
-        setText("an-completed", data.totals.completed);
-        setText("an-failed", data.totals.failed);
-        setText("an-pending", data.totals.pending);
+        setCounter("an-completed", data.totals.completed);
+        setCounter("an-failed", data.totals.failed);
+        setCounter("an-pending", data.totals.pending);
         renderBarChart(data.totals);
         renderFeed("analytics-timeline", data.timeline);
     } catch (err) {
@@ -463,11 +597,13 @@ async function loadAdminConfig() {
     try {
         const config = await fetchJson("/admin/config");
         setText("admin-min-nodes", config.min_nodes);
-        setText("admin-total-nodes", config.total_nodes);
-        setText("admin-idle-nodes", config.idle_nodes);
-        setText("admin-pending-jobs", config.pending_jobs);
-        setText("admin-subscribers", config.subscriber_count);
-        setText("admin-event-count", config.event_count);
+
+        setCounter("admin-total-nodes", config.total_nodes);
+        setCounter("admin-idle-nodes", config.idle_nodes);
+        setCounter("admin-pending-jobs", config.pending_jobs);
+        setCounter("admin-subscribers", config.subscriber_count);
+        setCounter("admin-event-count", config.event_count);
+
         setText("admin-uptime", formatUptime(config.uptime_seconds));
     } catch (err) {
         console.error("Failed to load admin config:", err);
@@ -571,6 +707,49 @@ function setupControls() {
     });
 }
 
+let eventSource = null;
+
+function connectStream() {
+    if (typeof EventSource === "undefined") {
+        return;
+    }
+
+    eventSource = new EventSource("/stream");
+
+    eventSource.addEventListener("open", () => setConnectionStatus(true));
+    eventSource.addEventListener("error", () => setConnectionStatus(false));
+
+    const handleSnapshot = (e) => {
+        if (isPaused) return;
+
+        try {
+            applyClusterSnapshot(JSON.parse(e.data));
+        } catch (err) {
+            console.error("Bad snapshot frame:", err);
+        }
+    };
+
+    eventSource.addEventListener("snapshot", handleSnapshot);
+    eventSource.addEventListener("heartbeat", handleSnapshot);
+
+    eventSource.addEventListener("event", (e) => {
+        if (isPaused) return;
+
+        try {
+            JSON.parse(e.data);
+        } catch (err) {
+            console.error("Bad event frame:", err);
+            return;
+        }
+
+        if (currentTab === "control-center") {
+            loadEvents();
+            loadNodes();
+            loadJobs();
+        }
+    });
+}
+
 // ---------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------
@@ -579,8 +758,13 @@ setupTabNav();
 setupExplorerNav();
 setupControls();
 
+
 refreshDashboard();
 updateClock();
+connectStream();
 
-setInterval(() => { if (!isPaused) refreshDashboard(); }, REFRESH_INTERVAL_MS);
+setInterval(() => {
+    if (!isPaused) refreshDashboard();
+}, REFRESH_INTERVAL_MS);
+
 setInterval(updateClock, 1000);

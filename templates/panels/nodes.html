@@ -54,16 +54,22 @@
 
         <td>
 
-            {% if node.status == "healthy" %}
+            {% if node.status == "idle" %}
 
                 <span class="badge bg-success">
-                    Healthy
+                    Idle
+                </span>
+
+            {% elif node.status == "busy" %}
+
+                <span class="badge bg-primary">
+                    Busy
                 </span>
 
             {% elif node.status == "offline" %}
 
-                <span class="badge bg-secondary">
-                    Idle
+                <span class="badge bg-danger">
+                    Offline
                 </span>
 
             {% else %}
