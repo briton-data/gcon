@@ -15,6 +15,7 @@ from event import Event
 from event_types import EventType
 from event_bus import EventBus
 from datetime import datetime, UTC
+from workflow_engine import WorkflowEngine
 
 class GCONCoordinator:
     """
@@ -32,10 +33,11 @@ class GCONCoordinator:
         
         self.jobs = {}
         self.job_queue = Queue()
-        self.artifacts = {}
+        
         self.receipts = {}
         self.artifact_registry = ArtifactRegistry() 
         self.storage_manager = StorageManager()
+        self.workflow_engine = WorkflowEngine(self)
         
         self.scheduler_thread = threading.Thread(
                 target=self.scheduler_loop,                       
@@ -95,7 +97,7 @@ class GCONCoordinator:
         
         self.event_bus.publish(
             Event(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="JOB_SUBMITTED",
                 source="Coordinator",
                 payload={
@@ -117,6 +119,17 @@ class GCONCoordinator:
             raise ValueError(f"Job '{job_id}' does not exist.")
 
         job = self.jobs[job_id]
+        
+        if job["status"] != "pending":
+    # Already assigned/running/completed -- most likely a race
+    # with the background scheduler_loop thread, which also
+    # consumes the job queue. Assigning twice would run the
+    # same job on two nodes.
+            print(
+                f"[QUEUE] Job {job_id} is already '{job['status']}', "
+                "skipping re-assignment."
+    )
+            return
 
         node = self.scheduler.select_node()
 
@@ -143,7 +156,7 @@ class GCONCoordinator:
       
         self.event_bus.publish(
             Event(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="JOB_STARTED",
                 source="Scheduler",
                 payload={
@@ -467,7 +480,7 @@ class GCONCoordinator:
             
         self.event_bus.publish(
             Event(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="ARTIFACT_REGISTERED",
                 source="StorageManager",
                 payload={
@@ -513,6 +526,24 @@ class GCONCoordinator:
         Return the full event history (used by analytics/diagnostics).
         """
         return self.event_bus.get_events()
+
+    def submit_workflow(self, workflow):
+        """
+        Submit a workflow DAG for execution via the workflow engine.
+        """
+        return self.workflow_engine.submit_workflow(workflow)
+
+
+    def get_workflows(self):
+        """
+        Return a summary of every workflow the engine knows about.
+        Empty until a workflow has actually been submitted.
+        """
+        return [
+            state.summary()
+            for state in self.workflow_engine.states.values()
+    ]
+
 
     def get_nodes(self):
         """

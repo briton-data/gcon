@@ -1,14 +1,14 @@
 <div class="d-grid gap-3">
 
-    {% with badge_class="bg-success", text="Coordinator Online" %}
+    {% with badge_class="bg-success", text="Coordinator Online", elem_id="health-coordinator" %}
         {% include "components/status_badge.html" %}
     {% endwith %}
 
-    {% with badge_class="bg-success", text="Cluster Healthy" %}
+    {% with badge_class="bg-success", text="Cluster Healthy", elem_id="health-cluster" %}
         {% include "components/status_badge.html" %}
     {% endwith %}
 
-    {% with badge_class="bg-success", text="Event System Running" %}
+    {% with badge_class="bg-success", text="Event System Running", elem_id="health-events" %}
         {% include "components/status_badge.html" %}
     {% endwith %}
 
