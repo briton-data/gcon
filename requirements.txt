@@ -6,3 +6,4 @@ pytest-cov
 fastapi
 uvicorn
 jinja2
+websockets

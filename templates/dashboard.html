@@ -33,17 +33,32 @@
             <div class="gcon-tab" id="tab-control-center">
 
                 <div class="gcon-panel mb-4">
-                    <div class="gcon-panel-body d-flex flex-wrap gap-2 align-items-center">
-                        <span class="text-secondary me-2">Operations:</span>
-                        <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">
-                            <i class="bi bi-plus-circle me-1"></i>Scale Up
-                        </button>
-                        <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">
-                            <i class="bi bi-dash-circle me-1"></i>Scale Down
-                        </button>
-                        <span class="ms-auto badge bg-dark" id="cc-node-summary">-- nodes</span>
-                    </div>
-                </div>
+    <div class="gcon-panel-body d-flex flex-wrap gap-2 align-items-center">
+
+        <span class="text-secondary me-2">Operations:</span>
+
+        <button class="btn btn-sm btn-success" id="refresh-now-btn">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+
+        <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">
+            <i class="bi bi-plus-circle me-1"></i>Scale Up
+        </button>
+
+        <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">
+            <i class="bi bi-dash-circle me-1"></i>Scale Down
+        </button>
+
+        <button class="btn btn-sm btn-warning" id="pause-btn">
+            <i class="bi bi-pause-fill"></i> Pause
+        </button>
+
+        <span class="ms-auto badge bg-dark" id="cc-node-summary">
+            -- nodes
+        </span>
+
+    </div>
+</div>
 
                 <div class="row g-4 mb-4">
 
@@ -158,48 +173,85 @@
             <div class="gcon-tab d-none" id="tab-monitoring">
 
                 <div class="row g-4 mb-4">
-                    <div class="col-lg-2 col-md-4">
+                    <div class="col-lg-3 col-md-6">
                         {% with title="Avg CPU %", value="--", icon="bi-cpu", elem_id="sm-avg-cpu" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
+                        <div class="gcon-sparkline" id="spark-cpu"></div>
                     </div>
-                    <div class="col-lg-2 col-md-4">
+                    <div class="col-lg-3 col-md-6">
                         {% with title="Avg Memory %", value="--", icon="bi-memory", elem_id="sm-avg-memory" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
+                        <div class="gcon-sparkline" id="spark-memory"></div>
                     </div>
-                    <div class="col-lg-2 col-md-4">
-                        {% with title="Running", value="--", icon="bi-play-circle", elem_id="sm-running" %}
+                    <div class="col-lg-3 col-md-6">
+                        {% with title="Queue Depth", value="--", icon="bi-layers", elem_id="sm-queue-depth" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                        <div class="gcon-sparkline" id="spark-queue"></div>
+                    </div>
+                    <div class="col-lg-3 col-md-6">
+                        {% with title="Throughput (events/s)", value="--", icon="bi-speedometer", elem_id="sm-throughput" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                        <div class="gcon-sparkline" id="spark-throughput"></div>
+                    </div>
+                </div>
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-3 col-md-6">
+                        {% with title="Running Jobs", value="--", icon="bi-play-circle", elem_id="sm-running" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
                     </div>
-                    <div class="col-lg-2 col-md-4">
+                    <div class="col-lg-3 col-md-6">
                         {% with title="Events Seen", value="--", icon="bi-broadcast", elem_id="sm-event-count" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
                     </div>
-                    <div class="col-lg-2 col-md-4">
+                    <div class="col-lg-3 col-md-6">
                         {% with title="Uptime", value="--", icon="bi-clock-history", elem_id="sm-uptime" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
                     </div>
-                    <div class="col-lg-2 col-md-4">
+                    <div class="col-lg-3 col-md-6">
                         {% with title="Connection", value="Live", icon="bi-wifi", elem_id="sm-connection" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
                     </div>
                 </div>
 
-                <div class="gcon-panel">
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Event Stream</h5>
-                        <span class="badge bg-success">Live</span>
-                    </div>
-                    <div class="gcon-panel-body">
-                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="monitoring-activity-feed">
-                            <div class="text-secondary">No recent activity.</div>
+                <div class="row g-4">
+
+                    <div class="col-lg-7">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">Event Stream</h5>
+                                <span class="badge bg-success">Live</span>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div class="gcon-activity-feed gcon-activity-feed-lg" id="monitoring-activity-feed">
+                                    <div class="text-secondary">No recent activity.</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
+
+                    <div class="col-lg-5">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">Alert Center</h5>
+                                <span class="badge bg-danger" id="alert-count-badge">0</span>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div id="alert-list" class="gcon-alert-list">
+                                    <div class="text-secondary">No active alerts.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                 </div>
 
             </div>
@@ -310,11 +362,331 @@
 
             </div>
 
+            <!-- ================================================= -->
+            <!-- TAB: Users                                         -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-users">
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Total Users", value="--", icon="bi-people", elem_id="uc-total-users" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Active Users", value="--", icon="bi-person-check", elem_id="uc-active-users" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Organizations", value="--", icon="bi-building", elem_id="uc-organizations" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="API Keys", value="--", icon="bi-key", elem_id="uc-api-keys" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Active Sessions", value="--", icon="bi-broadcast-pin", elem_id="uc-active-sessions" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Total Workflows", value="--", icon="bi-diagram-2", elem_id="uc-total-workflows" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0">All Users</h5>
+                        <div class="d-flex gap-2 flex-wrap align-items-center">
+                            <input type="text" id="users-search" class="form-control form-control-sm w-auto" placeholder="Filter users...">
+                            <button class="btn btn-sm btn-outline-light" id="users-export-csv">
+                                <i class="bi bi-download me-1"></i>CSV
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="users-export-json">
+                                <i class="bi bi-download me-1"></i>JSON
+                            </button>
+                            <button class="btn btn-sm btn-primary" id="users-add-btn">
+                                <i class="bi bi-plus-circle me-1"></i>Add User
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="gcon-panel-body">
+
+                        <div class="d-flex flex-wrap gap-2 mb-3" id="users-status-filters">
+                            <button class="btn btn-sm btn-outline-secondary active" data-filter="all">All</button>
+                            <button class="btn btn-sm btn-outline-secondary" data-filter="Active">Active</button>
+                            <button class="btn btn-sm btn-outline-secondary" data-filter="Pending">Pending</button>
+                            <button class="btn btn-sm btn-outline-secondary" data-filter="Suspended">Suspended</button>
+                            <button class="btn btn-sm btn-outline-secondary" data-filter="Disabled">Disabled</button>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th>Name</th>
+                                        <th>Email</th>
+                                        <th>Role</th>
+                                        <th>Status</th>
+                                        <th>Last Active</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="users-body">
+                                    <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Organizations                                 -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-organizations">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0">Organizations</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Plan</th>
+                                        <th>Members</th>
+                                        <th>Teams</th>
+                                        <th>Storage Used</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="organizations-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Teams                                         -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-teams">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0">Teams</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead>
+                                    <tr>
+                                        <th>Team</th>
+                                        <th>Organization</th>
+                                        <th>Members</th>
+                                        <th>Admin</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="teams-body">
+                                    <tr><td colspan="4" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: API Keys                                      -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-api-keys">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">API Keys</h5>
+                        <button class="btn btn-sm btn-primary" id="apikeys-create-btn">
+                            <i class="bi bi-plus-circle me-1"></i>Create Key
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div id="apikeys-reveal" class="alert alert-warning d-none"></div>
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead>
+                                    <tr>
+                                        <th>Key</th>
+                                        <th>Created</th>
+                                        <th>Expires</th>
+                                        <th>Last Used</th>
+                                        <th>Permissions</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="apikeys-body">
+                                    <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Permissions                                   -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-permissions">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0">Role &amp; Permission Matrix</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table" id="permissions-table">
+                                <thead id="permissions-thead"></thead>
+                                <tbody id="permissions-body">
+                                    <tr><td class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Audit Logs                                    -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-audit-logs">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Audit Log</h5>
+                        <button class="btn btn-sm btn-outline-light" id="audit-export-csv">
+                            <i class="bi bi-download me-1"></i>Export CSV
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="audit-log-feed">
+                            <div class="text-secondary">No audit entries.</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Notifications                                 -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-notifications">
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0">Notifications</h5></div>
+                    <div class="gcon-panel-body">
+                        <div id="notifications-list" class="gcon-activity-feed gcon-activity-feed-lg">
+                            <div class="text-secondary">No notifications.</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
         </div>
         <!-- /Main Content -->
 
+
     </div>
 
+</div>
+
+<!-- Add User Modal -->
+<div class="modal fade" id="addUserModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Add User</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-control" id="add-user-name">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input type="email" class="form-control" id="add-user-email">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Role</label>
+                    <select class="form-select" id="add-user-role">
+                        <option>Owner</option>
+                        <option>Administrator</option>
+                        <option selected>Operator</option>
+                        <option>Developer</option>
+                        <option>Viewer</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="add-user-submit">Add User</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create API Key Modal -->
+<div class="modal fade" id="createKeyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Create API Key</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">Key Name</label>
+                    <input type="text" class="form-control" id="create-key-name">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Owner</label>
+                    <select class="form-select" id="create-key-owner"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Expires In (days, 0 = never)</label>
+                    <input type="number" class="form-control" id="create-key-expires" value="90">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="create-key-submit">Create Key</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Detail Drawer (Node / Job / Receipt inspector) -->
+<div id="drawer-backdrop" class="gcon-drawer-backdrop d-none"></div>
+<div id="detail-drawer" class="gcon-drawer">
+    <div class="gcon-drawer-header">
+        <h5 class="mb-0" id="drawer-title">Details</h5>
+        <button class="btn btn-sm btn-outline-light" id="drawer-close-btn">
+            <i class="bi bi-x-lg"></i>
+        </button>
+    </div>
+    <div class="gcon-drawer-body" id="drawer-body">
+    </div>
 </div>
 
 {% endblock %}

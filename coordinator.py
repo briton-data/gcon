@@ -665,3 +665,24 @@ class GCONCoordinator:
             "total_receipts": len(receipts),
             "total_artifacts": len(artifacts),
     }
+        
+        
+    def get_cluster_health(self):
+        cluster = self.get_cluster_state()
+
+        if cluster["total_nodes"] == 0:
+            state = "critical"
+            reason = "No registered nodes."
+
+        elif cluster["failed_jobs"] > 0:
+            state = "degraded"
+            reason = f'{cluster["failed_jobs"]} failed job(s).'
+
+        else:
+            state = "healthy"
+            reason = "Cluster operating normally."
+
+        return {
+            "state": state,
+            "reason": reason
+    }

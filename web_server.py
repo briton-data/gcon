@@ -1,13 +1,13 @@
-import asyncio
-import json
-
-
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
+import asyncio
 import uvicorn
+
+from management_layer import ManagementLayer
 
 """
 GCON Web Server
@@ -15,12 +15,6 @@ GCON Web Server
 Hosts the GCON Web Dashboard and exposes the Presentation Layer
 to external clients.
 """
-
-def _sse_frame(event_type: str, payload) -> str:
-    """
-    Format a single Server-Sent Events frame.
-    """
-    return f"event: {event_type}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
 class WebServer:
@@ -36,6 +30,7 @@ class WebServer:
         presentation: Active PresentationLayer instance.
         """
         self.presentation = presentation
+        self.management = ManagementLayer(coordinator=presentation.coordinator)
         self.app = FastAPI(title="GCON Dashboard")
         
         self.templates = Jinja2Templates(directory="templates")
@@ -75,83 +70,12 @@ class WebServer:
         @self.app.get("/events")
         def events():
             return self.presentation.get_events()
-        
-                # ---- Live updates (Dashboard 2.0) ----
-
-        @self.app.get("/stream")
-        async def stream(request: Request):
-            """
-            Server-Sent Events stream. Pushes a "snapshot" frame
-            (cluster state) whenever a real cluster event happens, plus
-            a heartbeat snapshot every ~2s so the UI stays fresh even
-            during quiet periods. This replaces polling /cluster and
-            /events every 5s with a single long-lived connection.
-            """
-            queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
-            event_bus = self.presentation.coordinator.event_bus
-
-            def on_event(event):
-                # Called synchronously from the coordinator's
-                # background threads -- hop back onto the asyncio loop
-                # thread-safely rather than touching the queue directly.
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, event.to_dict())
-                except RuntimeError:
-                    pass  # event loop already shutting down
-
-            event_bus.subscribe(on_event)
-
-            async def generator():
-                try:
-                    yield _sse_frame(
-                        "snapshot",
-                        self.presentation.get_cluster_state()
-                    )
-
-                    while True:
-                        if await request.is_disconnected():
-                            break
-
-                        try:
-                            raw_event = await asyncio.wait_for(
-                                queue.get(),
-                                timeout=2.0
-                            )
-
-                            yield _sse_frame("event", raw_event)
-                            yield _sse_frame(
-                                "snapshot",
-                                self.presentation.get_cluster_state()
-                            )
-
-                        except asyncio.TimeoutError:
-                            yield _sse_frame(
-                                "heartbeat",
-                                self.presentation.get_cluster_state()
-                            )
-
-                finally:
-                    event_bus.unsubscribe(on_event)
-
-            return StreamingResponse(
-                generator(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
 
         # ---- Cluster Visualization ----
 
         @self.app.get("/topology")
         def topology():
             return self.presentation.get_topology()
-        
-        @self.app.get("/workflows")
-        def workflows():
-            return self.presentation.get_workflows()
 
         # ---- Explorer views ----
 
@@ -168,6 +92,10 @@ class WebServer:
         @self.app.get("/system-metrics")
         def system_metrics():
             return self.presentation.get_system_metrics()
+
+        @self.app.get("/health")
+        def cluster_health():
+            return self.presentation.get_cluster_health()
 
         # ---- Analytics & History ----
 
@@ -193,18 +121,146 @@ class WebServer:
         def admin_deregister_node(node_id: str):
             self.presentation.deregister_node(node_id)
             return self.presentation.get_admin_config()
-        
-        @self.app.get("/users", response_class=HTMLResponse)
-        def users(request: Request):
 
-            return self.templates.TemplateResponse(
-                request=request,
-                name="users.html",
-                context={}
-    )
+        # ---- Live push (WebSocket) ----
 
-            
-  
+        @self.app.websocket("/ws")
+        async def ws_live(websocket: WebSocket):
+            await websocket.accept()
+            try:
+                while True:
+                    payload = {
+                        "cluster": self.presentation.get_cluster_state(),
+                        "nodes": self.presentation.get_nodes(),
+                        "jobs": self.presentation.get_jobs(),
+                        "events": self.presentation.get_events(),
+                        "health": self.presentation.get_cluster_health(),
+                        "system_metrics": self.presentation.get_system_metrics(),
+                    }
+                    await websocket.send_json(jsonable_encoder(payload))
+                    await asyncio.sleep(2)
+            except WebSocketDisconnect:
+                pass
+
+        # ---- Management: Users ----
+
+        @self.app.get("/management/users")
+        def mgmt_users():
+            return self.management.get_users()
+
+        @self.app.get("/management/users/{user_id}")
+        def mgmt_get_user(user_id: str):
+            return self.management.get_user(user_id)
+
+        @self.app.post("/management/users")
+        def mgmt_create_user(payload: dict):
+            return self.management.create_user(
+                name=payload["name"],
+                email=payload["email"],
+                role=payload["role"],
+                organization_id=payload.get("organization_id"),
+                status=payload.get("status", "Active"),
+            )
+
+        @self.app.put("/management/users/{user_id}")
+        def mgmt_update_user(user_id: str, payload: dict):
+            return self.management.update_user(user_id, **payload)
+
+        @self.app.delete("/management/users/{user_id}")
+        def mgmt_delete_user(user_id: str):
+            self.management.delete_user(user_id)
+            return {"deleted": user_id}
+
+        @self.app.post("/management/users/{user_id}/status")
+        def mgmt_set_user_status(user_id: str, payload: dict):
+            return self.management.set_user_status(user_id, payload["status"])
+
+        @self.app.get("/management/user-counts")
+        def mgmt_user_counts():
+            return self.management.get_user_counts()
+
+        # ---- Management: Organizations & Teams ----
+
+        @self.app.get("/management/organizations")
+        def mgmt_organizations():
+            return self.management.get_organizations()
+
+        @self.app.get("/management/teams")
+        def mgmt_teams():
+            return self.management.get_teams()
+
+        # ---- Management: RBAC ----
+
+        @self.app.get("/management/roles")
+        def mgmt_roles():
+            return self.management.get_roles()
+
+        @self.app.get("/management/permissions")
+        def mgmt_permissions():
+            return self.management.get_permissions()
+
+        @self.app.get("/management/permission-matrix")
+        def mgmt_permission_matrix():
+            return self.management.get_permission_matrix()
+
+        # ---- Management: API Keys ----
+
+        @self.app.get("/management/api-keys")
+        def mgmt_api_keys():
+            return self.management.get_api_keys()
+
+        @self.app.post("/management/api-keys")
+        def mgmt_create_api_key(payload: dict):
+            return self.management.create_api_key(
+                name=payload["name"],
+                owner_user_id=payload["owner_user_id"],
+                scopes=payload.get("scopes"),
+                expires_in_days=payload.get("expires_in_days", 90),
+            )
+
+        @self.app.post("/management/api-keys/{key_id}/revoke")
+        def mgmt_revoke_api_key(key_id: str):
+            return self.management.revoke_api_key(key_id)
+
+        @self.app.post("/management/api-keys/{key_id}/regenerate")
+        def mgmt_regenerate_api_key(key_id: str):
+            return self.management.regenerate_api_key(key_id)
+
+        # ---- Management: Audit log & notifications ----
+
+        @self.app.get("/management/audit-logs")
+        def mgmt_audit_logs():
+            return self.management.get_audit_logs()
+
+        @self.app.get("/management/notifications")
+        def mgmt_notifications():
+            return self.management.get_notifications()
+
+        @self.app.post("/management/notifications/{notification_id}/read")
+        def mgmt_mark_notification_read(notification_id: str):
+            return self.management.mark_notification_read(notification_id)
+
+        # ---- Management: dashboard cards & search ----
+
+        @self.app.get("/management/dashboard-cards")
+        def mgmt_dashboard_cards():
+            return self.management.get_dashboard_cards()
+
+        @self.app.get("/management/search")
+        def mgmt_search(q: str = ""):
+            return self.management.search(q)
+
+        # ---- Management: export ----
+
+        @self.app.get("/management/export/{entity}")
+        def mgmt_export(entity: str, format: str = "json"):
+            content, mime, filename = self.management.export(entity, format)
+            return Response(
+                content=content,
+                media_type=mime,
+                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            )
+
     def start(self):
         """
         Start the web server.
