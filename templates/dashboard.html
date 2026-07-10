@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}GCON Dashboard{% endblock %}
+
+{% block content %}
+
+{% include "layout/navbar.html" %}
+
+<div class="container-fluid">
+
+    <div class="row">
+
+        <!-- Sidebar -->
+        <div class="col-lg-2 p-0">
+
+            {% include "layout/sidebar.html" %}
+
+        </div>
+
+        <!-- Main Content -->
+        <div class="col-lg-10 p-4">
+
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="mb-0">Cluster Overview</h4>
+                <small class="text-secondary">
+                    Last updated: <span id="last-updated">--:--:--</span>
+                </small>
+            </div>
+
+            <!-- ================= Metrics ================= -->
+
+            <div class="row g-4 mb-4">
+
+                <div class="col-lg-3">
+
+                    {% with title="Total Nodes", value=dashboard.metrics.total_nodes, icon="bi-hdd-network", elem_id="metric-total-nodes" %}
+                    {% include "cards/metric_card.html" %}
+                    {% endwith %}
+
+                </div>
+
+                <div class="col-lg-3">
+
+                    {% with title="Running Jobs", value=dashboard.metrics.running_jobs, icon="bi-cpu-fill", elem_id="metric-running-jobs" %}
+                    {% include "cards/metric_card.html" %}
+                    {% endwith %}
+
+                </div>
+
+                <div class="col-lg-3">
+
+                    {% with title="Completed Jobs", value=dashboard.metrics.completed_jobs, icon="bi-check-circle-fill", elem_id="metric-completed-jobs" %}
+                    {% include "cards/metric_card.html" %}
+                    {% endwith %}
+
+                </div>
+
+                <div class="col-lg-3">
+
+                    {% with title="Failed Jobs", value=dashboard.metrics.failed_jobs, icon="bi-x-octagon-fill", elem_id="metric-failed-jobs" %}
+                    {% include "cards/metric_card.html" %}
+                    {% endwith %}
+
+                </div>
+
+            </div>
+
+            <!-- ================= Top Panels ================= -->
+
+            <div class="row mb-4">
+
+                <div class="col-lg-6">
+
+                    {% include "panels/cluster_overview.html" %}
+
+                </div>
+
+                <div class="col-lg-6">
+
+                    {% include "panels/cluster_health.html" %}
+
+                </div>
+
+            </div>
+
+            <!-- ================= Nodes ================= -->
+
+            <div class="row mb-4">
+
+                <div class="col-lg-12">
+
+                    {% include "panels/nodes.html" %}
+
+                </div>
+
+            </div>
+
+            <!-- ================= Bottom ================= -->
+
+            <div class="row">
+
+                <div class="col-lg-6">
+
+                    {% include "panels/jobs.html" %}
+
+                </div>
+
+                <div class="col-lg-6">
+
+                    {% include "panels/activity.html" %}
+
+                </div>
+
+            </div>
+
+        </div>
+        <!-- /Main Content -->
+
+    </div>
+
+</div>
+
+{% endblock %}

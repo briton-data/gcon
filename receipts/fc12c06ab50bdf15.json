@@ -1,0 +1,29 @@
+{
+  "receipt_id": "fc12c06ab50bdf15",
+  "job_id": "job-001",
+  "agent_id": "3f1bf330",
+  "status": "success",
+  "input_hash": "",
+  "output_hash": "94f4843cd0705652bd2af5debfa2f311e94b7069e66976f73dc9b851ccc6cb33",
+  "proof": {
+    "job_id": "job-001",
+    "gpu": "Unknown GPU",
+    "runtime_seconds": 0.7525370121002197,
+    "input_hash": "",
+    "output_hash": "94f4843cd0705652bd2af5debfa2f311e94b7069e66976f73dc9b851ccc6cb33",
+    "timestamp": "2026-07-02T11:25:20.018159+00:00",
+    "metrics": {
+      "job_id": "job-001",
+      "gpu_name": "Unknown GPU",
+      "gpu_memory_total": 0,
+      "gpu_memory_used": 0,
+      "cpu_percent": 40.7,
+      "memory_percent": 62.3,
+      "runtime_seconds": 10.466933012008667,
+      "timestamp": "2026-07-02T11:25:20.015690+00:00"
+    },
+    "signature": "c5318435ad4781b1139ff698c514cf6e713d515a82e07d2eb7be1616f046d5e8",
+    "verified": true
+  },
+  "issued_at": "2026-07-02T11:25:20.019459+00:00"
+}

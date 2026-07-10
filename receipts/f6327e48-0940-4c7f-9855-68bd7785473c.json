@@ -1,0 +1,18 @@
+{
+  "receipt_id": "f6327e48-0940-4c7f-9855-68bd7785473c",
+  "job_id": "agent-001",
+  "status": "success",
+  "issued_at": "2026-06-28T21:29:21.848736+00:00",
+  "proof": {
+    "gpu": "Unknown GPU",
+    "runtime_seconds": 10.811176538467407,
+    "cpu_percent": 17.2,
+    "memory_percent": 74.2,
+    "verified": false
+  },
+  "stdout": "Hello GCON\n",
+  "stderr": "",
+  "receipt_hash": "283f8f6e1ddee99b77d347ea26e4e6a06abbe995db57423491c4d091fba67fc5",
+  "signature": "XQNOerpY1czkYLomLqgpy0Tc/+ZFmXJHaTLqLKDeuY+XKJ0NC89ktPh0tB4G6LCIcQMGOM/iRS1LcqKcEZVPAw==",
+  "signer": "gcon-agent-001"
+}

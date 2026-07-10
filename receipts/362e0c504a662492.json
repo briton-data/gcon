@@ -1,0 +1,29 @@
+{
+  "receipt_id": "362e0c504a662492",
+  "job_id": "job-training-001",
+  "agent_id": "b2882e45",
+  "status": "failed",
+  "input_hash": "",
+  "output_hash": "",
+  "proof": {
+    "job_id": "job-training-001",
+    "gpu": "Unknown GPU",
+    "runtime_seconds": 2.8835957050323486,
+    "input_hash": "",
+    "output_hash": "",
+    "timestamp": "2026-07-01T16:45:12.504079+00:00",
+    "metrics": {
+      "job_id": "job-training-001",
+      "gpu_name": "Unknown GPU",
+      "gpu_memory_total": 0,
+      "gpu_memory_used": 0,
+      "cpu_percent": 50.0,
+      "memory_percent": 87.1,
+      "runtime_seconds": 1.6087684631347656,
+      "timestamp": "2026-07-01T16:45:11.227105+00:00"
+    },
+    "signature": "e74b6e15c7e926c91efd37de0ed3c50e1fed411b3a47a03177510c989ee7c08d",
+    "verified": true
+  },
+  "issued_at": "2026-07-01T16:45:12.505925+00:00"
+}
