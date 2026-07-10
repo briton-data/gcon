@@ -21,94 +21,291 @@
         <div class="col-lg-10 p-4">
 
             <div class="d-flex justify-content-between align-items-center mb-3">
-                <h4 class="mb-0">Cluster Overview</h4>
+                <h4 class="mb-0" id="tab-title">Control Center</h4>
                 <small class="text-secondary">
                     Last updated: <span id="last-updated">--:--:--</span>
                 </small>
             </div>
 
-            <!-- ================= Metrics ================= -->
+            <!-- ================================================= -->
+            <!-- TAB: Control Center                                -->
+            <!-- ================================================= -->
+            <div class="gcon-tab" id="tab-control-center">
 
-            <div class="row g-4 mb-4">
+                <div class="gcon-panel mb-4">
+                    <div class="gcon-panel-body d-flex flex-wrap gap-2 align-items-center">
+                        <span class="text-secondary me-2">Operations:</span>
+                        <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">
+                            <i class="bi bi-plus-circle me-1"></i>Scale Up
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">
+                            <i class="bi bi-dash-circle me-1"></i>Scale Down
+                        </button>
+                        <span class="ms-auto badge bg-dark" id="cc-node-summary">-- nodes</span>
+                    </div>
+                </div>
 
-                <div class="col-lg-3">
+                <div class="row g-4 mb-4">
 
-                    {% with title="Total Nodes", value=dashboard.metrics.total_nodes, icon="bi-hdd-network", elem_id="metric-total-nodes" %}
-                    {% include "cards/metric_card.html" %}
-                    {% endwith %}
+                    <div class="col-lg-3">
+                        {% with title="Total Nodes", value=dashboard.metrics.total_nodes, icon="bi-hdd-network", elem_id="metric-total-nodes" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+
+                    <div class="col-lg-3">
+                        {% with title="Running Jobs", value=dashboard.metrics.running_jobs, icon="bi-cpu-fill", elem_id="metric-running-jobs" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+
+                    <div class="col-lg-3">
+                        {% with title="Completed Jobs", value=dashboard.metrics.completed_jobs, icon="bi-check-circle-fill", elem_id="metric-completed-jobs" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+
+                    <div class="col-lg-3">
+                        {% with title="Failed Jobs", value=dashboard.metrics.failed_jobs, icon="bi-x-octagon-fill", elem_id="metric-failed-jobs" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
 
                 </div>
 
-                <div class="col-lg-3">
-
-                    {% with title="Running Jobs", value=dashboard.metrics.running_jobs, icon="bi-cpu-fill", elem_id="metric-running-jobs" %}
-                    {% include "cards/metric_card.html" %}
-                    {% endwith %}
-
+                <div class="row mb-4">
+                    <div class="col-lg-6">
+                        {% include "panels/cluster_overview.html" %}
+                    </div>
+                    <div class="col-lg-6">
+                        {% include "panels/cluster_health.html" %}
+                    </div>
                 </div>
 
-                <div class="col-lg-3">
-
-                    {% with title="Completed Jobs", value=dashboard.metrics.completed_jobs, icon="bi-check-circle-fill", elem_id="metric-completed-jobs" %}
-                    {% include "cards/metric_card.html" %}
-                    {% endwith %}
-
+                <div class="row mb-4">
+                    <div class="col-lg-12">
+                        {% include "panels/nodes.html" %}
+                    </div>
                 </div>
 
-                <div class="col-lg-3">
-
-                    {% with title="Failed Jobs", value=dashboard.metrics.failed_jobs, icon="bi-x-octagon-fill", elem_id="metric-failed-jobs" %}
-                    {% include "cards/metric_card.html" %}
-                    {% endwith %}
-
+                <div class="row">
+                    <div class="col-lg-6">
+                        {% include "panels/jobs.html" %}
+                    </div>
+                    <div class="col-lg-6">
+                        {% include "panels/activity.html" %}
+                    </div>
                 </div>
 
             </div>
 
-            <!-- ================= Top Panels ================= -->
+            <!-- ================================================= -->
+            <!-- TAB: Cluster Visualization                         -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-topology">
 
-            <div class="row mb-4">
-
-                <div class="col-lg-6">
-
-                    {% include "panels/cluster_overview.html" %}
-
-                </div>
-
-                <div class="col-lg-6">
-
-                    {% include "panels/cluster_health.html" %}
-
-                </div>
-
-            </div>
-
-            <!-- ================= Nodes ================= -->
-
-            <div class="row mb-4">
-
-                <div class="col-lg-12">
-
-                    {% include "panels/nodes.html" %}
-
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Live Topology</h5>
+                        <span class="badge bg-success">Live</span>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div id="topology-container" class="gcon-topology-container">
+                            <div class="text-secondary text-center py-5">Loading topology...</div>
+                        </div>
+                    </div>
                 </div>
 
             </div>
 
-            <!-- ================= Bottom ================= -->
+            <!-- ================================================= -->
+            <!-- TAB: Explorer                                      -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-explorer">
 
-            <div class="row">
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
 
-                <div class="col-lg-6">
+                        <div class="btn-group" id="explorer-subnav">
+                            <button class="btn btn-sm btn-primary" data-explorer="jobs">Jobs</button>
+                            <button class="btn btn-sm btn-outline-primary" data-explorer="nodes">Nodes</button>
+                            <button class="btn btn-sm btn-outline-primary" data-explorer="receipts">Receipts</button>
+                            <button class="btn btn-sm btn-outline-primary" data-explorer="artifacts">Artifacts</button>
+                        </div>
 
-                    {% include "panels/jobs.html" %}
+                        <input type="text" id="explorer-search" class="form-control form-control-sm w-auto"
+                               placeholder="Filter...">
 
+                    </div>
+
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead id="explorer-thead"></thead>
+                                <tbody id="explorer-body">
+                                    <tr><td class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="col-lg-6">
+            </div>
 
-                    {% include "panels/activity.html" %}
+            <!-- ================================================= -->
+            <!-- TAB: Real-Time Monitoring                          -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-monitoring">
 
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Avg CPU %", value="--", icon="bi-cpu", elem_id="sm-avg-cpu" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Avg Memory %", value="--", icon="bi-memory", elem_id="sm-avg-memory" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Running", value="--", icon="bi-play-circle", elem_id="sm-running" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Events Seen", value="--", icon="bi-broadcast", elem_id="sm-event-count" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Uptime", value="--", icon="bi-clock-history", elem_id="sm-uptime" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-2 col-md-4">
+                        {% with title="Connection", value="Live", icon="bi-wifi", elem_id="sm-connection" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Event Stream</h5>
+                        <span class="badge bg-success">Live</span>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="monitoring-activity-feed">
+                            <div class="text-secondary">No recent activity.</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Analytics & History                           -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-analytics">
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-3">
+                        {% with title="Success Rate", value="--%", icon="bi-trophy", elem_id="an-success-rate" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-3">
+                        {% with title="Completed", value="--", icon="bi-check-circle", elem_id="an-completed" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-3">
+                        {% with title="Failed", value="--", icon="bi-x-circle", elem_id="an-failed" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-3">
+                        {% with title="Pending", value="--", icon="bi-hourglass-split", elem_id="an-pending" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header"><h5 class="mb-0">Job Outcomes</h5></div>
+                            <div class="gcon-panel-body">
+                                <div id="analytics-bars" class="gcon-bar-chart"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header"><h5 class="mb-0">History Timeline</h5></div>
+                            <div class="gcon-panel-body">
+                                <div id="analytics-timeline" class="gcon-activity-feed gcon-activity-feed-lg">
+                                    <div class="text-secondary">No history yet.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Administration                                -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-admin">
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-12">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header"><h5 class="mb-0">Cluster Configuration</h5></div>
+                            <div class="gcon-panel-body">
+                                <div class="row gy-3" id="admin-config-grid">
+                                    <div class="col-md-3"><small class="text-secondary">Min Nodes</small><div class="fw-bold" id="admin-min-nodes">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Total Nodes</small><div class="fw-bold" id="admin-total-nodes">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Idle Nodes</small><div class="fw-bold" id="admin-idle-nodes">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Pending Jobs</small><div class="fw-bold" id="admin-pending-jobs">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Subscribers</small><div class="fw-bold" id="admin-subscribers">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Total Events</small><div class="fw-bold" id="admin-event-count">--</div></div>
+                                    <div class="col-md-3"><small class="text-secondary">Uptime</small><div class="fw-bold" id="admin-uptime">--</div></div>
+                                </div>
+                                <div class="mt-3 d-flex gap-2">
+                                    <button class="btn btn-sm btn-primary" id="admin-scale-up-btn">
+                                        <i class="bi bi-plus-circle me-1"></i>Scale Up
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger" id="admin-scale-down-btn">
+                                        <i class="bi bi-dash-circle me-1"></i>Scale Down
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0">Node Management</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table">
+                                <thead>
+                                    <tr>
+                                        <th>Node ID</th>
+                                        <th>Status</th>
+                                        <th>Running Jobs</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="admin-nodes-body">
+                                    <tr><td colspan="4" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
 
             </div>

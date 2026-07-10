@@ -19,42 +19,50 @@
 
         <div class="collapse navbar-collapse" id="navbarNav">
 
-            <ul class="navbar-nav ms-4">
+            <ul class="navbar-nav ms-4" id="tab-nav-top">
 
                 <li class="nav-item">
-                    <a class="nav-link active text-white" href="/">Dashboard</a>
+                    <a class="nav-link active text-white" href="#" data-tab="control-center">Control Center</a>
                 </li>
 
                 <li class="nav-item">
-                    <a class="nav-link text-light" href="#">Nodes</a>
+                    <a class="nav-link text-light" href="#" data-tab="topology">Topology</a>
                 </li>
 
                 <li class="nav-item">
-                    <a class="nav-link text-light" href="#">Jobs</a>
+                    <a class="nav-link text-light" href="#" data-tab="explorer">Explorer</a>
                 </li>
 
                 <li class="nav-item">
-                    <a class="nav-link text-light" href="#">Events</a>
+                    <a class="nav-link text-light" href="#" data-tab="monitoring">Monitoring</a>
                 </li>
 
                 <li class="nav-item">
-                    <a class="nav-link text-light" href="#">Receipts</a>
+                    <a class="nav-link text-light" href="#" data-tab="analytics">Analytics</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="admin">Admin</a>
                 </li>
 
             </ul>
 
             <div class="ms-auto d-flex align-items-center">
 
-                <span class="badge bg-success me-3">
+                <button id="refresh-now-btn" class="btn btn-sm btn-outline-light me-3" title="Refresh now">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
 
-                    ● Coordinator Online
+                <button id="pause-btn" class="btn btn-sm btn-outline-light me-3" title="Pause live updates">
+                    <i class="bi bi-pause-fill"></i>
+                </button>
 
+                <span id="conn-status" class="badge bg-secondary me-3">
+                    ● Connecting...
                 </span>
 
                 <span id="clock" class="text-light">
-
                     --:--:--
-
                 </span>
 
             </div>
