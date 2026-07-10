@@ -1,0 +1,11 @@
+{
+    "version": "1.0",
+
+    "max_runtime": 30.0,
+
+    "max_cpu_percent": 90.0,
+
+    "max_memory_percent": 95.0,
+
+    "require_gpu": false
+}

@@ -1,0 +1,20 @@
+{
+  "receipt_id": "0dbb8f86c4171c91",
+  "job_id": "hello-001",
+  "agent_id": "8a4f8090",
+  "status": "error",
+  "input_hash": "",
+  "output_hash": "",
+  "proof": {
+    "job_id": "hello-001",
+    "gpu": "Unknown",
+    "runtime_seconds": 1.639148473739624,
+    "input_hash": "",
+    "output_hash": "",
+    "timestamp": "2026-07-01T15:33:31.228388",
+    "metrics": {},
+    "signature": "fec1839c20ebf43aa06b8829e988dec5ef7bd8176875836d9591ba0a964d6a43",
+    "verified": true
+  },
+  "issued_at": "2026-07-01T15:33:31.233462"
+}

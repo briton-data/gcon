@@ -1,0 +1,297 @@
+
+
+/* ==========================================================
+   GCON Dashboard Styles
+   ========================================================== */
+
+/* ---------- Design Tokens ---------- */
+
+:root {
+    --bg: #0F172A;
+    --surface: #1E293B;
+    --sidebar: #111827;
+
+    --primary: #3B82F6;
+    --success: #22C55E;
+    --warning: #F59E0B;
+    --danger: #EF4444;
+
+    --text: #F8FAFC;
+    --muted: #94A3B8;
+
+    --radius: 12px;
+}
+
+/* ---------- Global ---------- */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", sans-serif;
+}
+
+/* ---------- Navbar ---------- */
+
+.gcon-navbar {
+    background: var(--surface);
+}
+
+/* ---------- Sidebar ---------- */
+
+.gcon-sidebar {
+    background: var(--sidebar);
+    min-height: 100vh;
+}
+
+/* ==========================================================
+   Metric Cards
+   ========================================================== */
+
+/* ==========================================================
+   Metric Cards
+========================================================== */
+
+.gcon-metric-card {
+
+    background: var(--surface);
+
+    border-radius: 16px;
+
+    padding: 22px;
+
+    border: 1px solid #334155;
+
+    transition: .25s ease;
+
+    cursor: pointer;
+
+    height: 140px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    justify-content: space-between;
+
+}
+
+.gcon-metric-card:hover {
+
+    transform: translateY(-6px);
+
+    border-color: var(--primary);
+
+    box-shadow: 0 12px 30px rgba(0,0,0,.30);
+
+}
+
+.gcon-metric-top {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+}
+
+.gcon-metric-icon {
+
+    font-size: 2rem;
+
+    color: var(--primary);
+
+}
+
+.gcon-metric-value {
+
+    font-size: 2.3rem;
+
+    font-weight: 700;
+
+}
+
+.gcon-metric-title {
+
+    font-size: .95rem;
+
+    color: var(--muted);
+
+    letter-spacing: .5px;
+
+}
+/* ==========================================================
+   Panels
+   ========================================================== */
+
+.gcon-panel {
+    background: var(--surface);
+    border: 1px solid #334155;
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+
+.gcon-panel-header {
+    margin-bottom: 15px;
+    border-bottom: 1px solid #334155;
+    padding-bottom: 10px;
+}
+
+.gcon-panel-header h5 {
+    margin: 0;
+    font-weight: 600;
+}
+
+.gcon-panel-body {
+    min-height: 120px;
+}
+
+/* ---------- Tables ---------- */
+
+.gcon-table {
+    width: 100%;
+}
+
+/* ---------- Status Badges ---------- */
+
+.gcon-status-badge {
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+/* ==========================================================
+   Navbar
+========================================================== */
+
+.gcon-navbar {
+
+    background: var(--surface);
+
+    border-bottom: 1px solid #334155;
+
+}
+
+/* ==========================================================
+   Sidebar
+========================================================== */
+
+.gcon-sidebar {
+
+    background: var(--sidebar);
+
+    min-height: calc(100vh - 56px);
+
+    border-right: 1px solid #334155;
+
+}
+
+.gcon-sidebar .list-group {
+
+    gap: 8px;
+
+}
+
+.gcon-sidebar .list-group-item {
+
+    background: transparent;
+
+    border: none;
+
+    color: var(--muted);
+
+    border-radius: 10px;
+
+}
+
+.gcon-sidebar .list-group-item:hover {
+
+    background: #1E293B;
+
+    color: white;
+
+}
+
+.gcon-sidebar .active {
+
+    background: var(--primary) !important;
+
+    color: white !important;
+
+}
+
+/* ==========================================================
+   GCON Tables
+========================================================== */
+
+.gcon-table {
+
+    margin-bottom: 0;
+
+}
+
+.gcon-table thead th {
+
+    color: var(--muted);
+
+    font-weight: 600;
+
+    border-bottom: 1px solid #334155;
+
+}
+
+.gcon-table tbody td {
+
+    vertical-align: middle;
+
+}
+/* ==========================================================
+   Activity Feed
+========================================================== */
+
+.gcon-activity-feed{
+
+    display:flex;
+
+    flex-direction:column;
+
+    gap:14px;
+
+}
+
+.gcon-activity-item{
+
+    display:flex;
+
+    gap:20px;
+
+    border-left:3px solid var(--primary);
+
+    padding-left:16px;
+
+}
+
+.gcon-activity-time{
+
+    width:90px;
+
+    color:var(--muted);
+
+    font-size:.85rem;
+
+}
+
+.gcon-activity-message{
+
+    flex:1;
+
+}
