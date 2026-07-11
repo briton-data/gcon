@@ -4,10 +4,13 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
+from management_layer import ManagementLayer
+from fastapi import Cookie, HTTPException, Depends
+from fastapi.responses import RedirectResponse
+from auth import SESSION_COOKIE_NAME
 import asyncio
 import uvicorn
 
-from management_layer import ManagementLayer
 
 """
 GCON Web Server
@@ -48,13 +51,25 @@ class WebServer:
         """
 
         @self.app.get("/", response_class=HTMLResponse)
-        def home(request: Request):
+        def home(
+            request: Request,
+            gcon_session: str = Cookie(default=None),
+):
+            user = self.management.get_current_user(gcon_session)
+
+            if not user:
+                return RedirectResponse(url="/login")
 
             return self.templates.TemplateResponse(
                 request=request,
                 name="dashboard.html",
-                context={"dashboard": self.presentation.get_dashboard()}
-            )
+                context={
+                    "dashboard": self.presentation.get_dashboard(),
+                     "current_user": user.to_dict(),
+        },
+    )
+       
+       
         @self.app.get("/cluster")
         def cluster():
             return self.presentation.get_cluster_state()    
@@ -68,7 +83,7 @@ class WebServer:
             return self.presentation.get_jobs()
 
         @self.app.get("/events")
-        def events():
+        def events(user=Depends(self.require_permission("Manage users"))):
             return self.presentation.get_events()
 
         # ---- Cluster Visualization ----
@@ -110,22 +125,35 @@ class WebServer:
             return self.presentation.get_admin_config()
 
         @self.app.post("/admin/scale-up")
-        def admin_scale_up():
+        def admin_scale_up(
+            user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.scale_up()
 
         @self.app.post("/admin/scale-down")
-        def admin_scale_down():
+        def admin_scale_down( 
+            user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.scale_down()
 
         @self.app.post("/admin/nodes/{node_id}/deregister")
-        def admin_deregister_node(node_id: str):
+        def admin_deregister_node(
+            node_id: str,  user=Depends (self.require_permission("Manage cluster"))):
             self.presentation.deregister_node(node_id)
-            return self.presentation.get_admin_config()
+            return {"success": True,
+                "node_id": node_id,
+}
+            
 
         # ---- Live push (WebSocket) ----
 
         @self.app.websocket("/ws")
         async def ws_live(websocket: WebSocket):
+            session_token = websocket.cookies.get(
+            SESSION_COOKIE_NAME
+)
+            if not self.management.get_current_user(session_token):
+                await websocket.close(code=4401)
+                return 
+            
             await websocket.accept()
             try:
                 while True:
@@ -149,31 +177,43 @@ class WebServer:
             return self.management.get_users()
 
         @self.app.get("/management/users/{user_id}")
-        def mgmt_get_user(user_id: str):
+        def mgmt_get_user(user_id: str,):
             return self.management.get_user(user_id)
 
         @self.app.post("/management/users")
-        def mgmt_create_user(payload: dict):
-            return self.management.create_user(
+        def mgmt_create_user(payload:
+            dict,user=Depends(self.require_permission("Manage users")), ):
+            # NEW
+            try:
+                return self.management.create_user(
                 name=payload["name"],
                 email=payload["email"],
                 role=payload["role"],
                 organization_id=payload.get("organization_id"),
                 status=payload.get("status", "Active"),
-            )
+                password=payload.get("password"),
+    )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
 
         @self.app.put("/management/users/{user_id}")
-        def mgmt_update_user(user_id: str, payload: dict):
-            return self.management.update_user(user_id, **payload)
+        def mgmt_update_user(
+            user_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),):
+            return self.management.get_user()
 
         @self.app.delete("/management/users/{user_id}")
-        def mgmt_delete_user(user_id: str):
+        def mgmt_delete_user(
+            user_id: str,
+            user=Depends(self.require_permission("Manage users")),):
             self.management.delete_user(user_id)
             return {"deleted": user_id}
 
         @self.app.post("/management/users/{user_id}/status")
-        def mgmt_set_user_status(user_id: str, payload: dict):
-            return self.management.set_user_status(user_id, payload["status"])
+        def mgmt_set_user_status(
+            user_id: str, payload: dict,user=Depends(self.require_permission("Manage post")),
+):
+            return self.management.get_user()
 
         @self.app.get("/management/user-counts")
         def mgmt_user_counts():
@@ -192,11 +232,12 @@ class WebServer:
         # ---- Management: RBAC ----
 
         @self.app.get("/management/roles")
-        def mgmt_roles():
+        def mgmt_roles(  user=Depends(self.require_permission("Manage roles"))):
             return self.management.get_roles()
 
         @self.app.get("/management/permissions")
-        def mgmt_permissions():
+        def mgmt_permissions(
+            user=Depends(self.require_permission("Manage permission"))):
             return self.management.get_permissions()
 
         @self.app.get("/management/permission-matrix")
@@ -206,11 +247,14 @@ class WebServer:
         # ---- Management: API Keys ----
 
         @self.app.get("/management/api-keys")
-        def mgmt_api_keys():
+        def mgmt_api_keys(  
+            user=Depends(self.require_permission("Manage api_keys"))):
             return self.management.get_api_keys()
 
         @self.app.post("/management/api-keys")
-        def mgmt_create_api_key(payload: dict):
+        def mgmt_create_api_key(
+            payload: dict,
+            user=Depends(self.require_permission("Manage API keys")),):
             return self.management.create_api_key(
                 name=payload["name"],
                 owner_user_id=payload["owner_user_id"],
@@ -229,7 +273,8 @@ class WebServer:
         # ---- Management: Audit log & notifications ----
 
         @self.app.get("/management/audit-logs")
-        def mgmt_audit_logs():
+        def mgmt_audit_logs(
+            user=Depends(self.require_permission("Manage audit_logs"))):
             return self.management.get_audit_logs()
 
         @self.app.get("/management/notifications")
@@ -243,7 +288,8 @@ class WebServer:
         # ---- Management: dashboard cards & search ----
 
         @self.app.get("/management/dashboard-cards")
-        def mgmt_dashboard_cards():
+        def mgmt_dashboard_cards(
+            user=Depends(self.require_permission("Manage dashboard_cards"))):
             return self.management.get_dashboard_cards()
 
         @self.app.get("/management/search")
@@ -260,6 +306,94 @@ class WebServer:
                 media_type=mime,
                 headers={"Content-Disposition": f"attachment; filename={filename}"},
             )
+        @self.app.get("/login", response_class=HTMLResponse)
+        def login_page(request: Request):
+            return self.templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={}
+    )
+
+
+        @self.app.post("/auth/login")
+        def auth_login(payload: dict, response: Response):
+            try:
+                token, user = self.management.login(
+                    payload["email"],
+                    payload["password"],
+        )
+            except ValueError as e:
+                raise HTTPException(status_code=401, detail=str(e))
+
+            response.set_cookie(
+                key=SESSION_COOKIE_NAME,
+                value=token,
+                httponly=True,
+                samesite="lax",
+                max_age=60 * 60 * 24,
+    )
+
+            return user
+
+
+        @self.app.post("/auth/logout")
+        def auth_logout(
+            response: Response,
+            gcon_session: str = Cookie(default=None),
+):
+            self.management.logout(gcon_session)
+            response.delete_cookie(SESSION_COOKIE_NAME)
+            return {"logged_out": True}
+
+
+        @self.app.get("/auth/me")
+        def auth_me(user=Depends(self.current_user)):
+            return user.to_dict()
+
+
+        @self.app.post("/auth/change-password")
+        def auth_change_password(
+            payload: dict,
+            user=Depends(self.current_user),
+):
+            try:
+                self.management.change_password(
+                    user.user_id,
+                    payload["current_password"],
+                    payload["new_password"],
+        )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            return {"changed": True}    
+            
+            
+            
+    def current_user(self, gcon_session: str = Cookie(default=None)):
+        user = self.management.get_current_user(gcon_session)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        return user
+
+
+    def require_permission(self,permission):
+        def dependency(
+            gcon_session: str = Cookie(default=None),
+    ):
+            user = self.current_user(gcon_session)
+
+            if not self.management.user_has_permission(
+                user,
+                permission,
+        ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"'{permission}' permission is required.",
+            )
+
+                return user
+
+            return dependency
 
     def start(self):
         """
