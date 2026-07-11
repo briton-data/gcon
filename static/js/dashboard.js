@@ -176,10 +176,14 @@ async function loadCluster() {
         setText("overview-registered-nodes", cluster.total_nodes);
         setText("overview-active-jobs", cluster.running_jobs);
         setText("cc-node-summary", `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`);
-    } catch (err) {
+    }   catch (err) {
         console.error("Failed to load cluster state:", err);
         setConnectionStatus(false);
+        throw err;
+
     }
+
+
 }
 
 async function loadNodes() {
@@ -573,6 +577,7 @@ async function refreshDashboard() {
         await loadActiveTab();
         await loadHealthBadge();
         await refreshNotifBadge();
+        await loadHealthPanel();
 
         lastSuccessfulRefresh = new Date();
 
@@ -1280,6 +1285,47 @@ async function loadHealthBadge() {
         setConnectionStatus(false);
     }
 }
+
+async function loadHealthPanel() {
+    try {
+        const health = await fetchJson("/health");
+
+        updateStatusBadge("health-coordinator", health.coordinator);
+        updateStatusBadge("health-cluster", health.cluster);
+        updateStatusBadge("health-events", health.event_system);
+        updateStatusBadge("health-storage", health.storage);
+
+    } catch (err) {
+        console.error("Failed to update health panel:", err);
+    }
+}
+function updateStatusBadge(id, state) {
+
+    const badge = document.getElementById(id);
+
+    if (!badge) return;
+
+    const classMap = {
+        online: "bg-success",
+        healthy: "bg-success",
+        running: "bg-success",
+        connected: "bg-success",
+
+        degraded: "bg-warning text-dark",
+
+        offline: "bg-danger",
+        critical: "bg-danger",
+        stopped: "bg-danger",
+        disconnected: "bg-danger"
+    };
+
+    badge.className = `badge ${classMap[state] || "bg-secondary"}`;
+
+    badge.textContent =
+        state.charAt(0).toUpperCase() +
+        state.slice(1);
+}
+
 
 // ---------------------------------------------------------------
 // Boot

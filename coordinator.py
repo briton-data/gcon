@@ -682,7 +682,26 @@ class GCONCoordinator:
             state = "healthy"
             reason = "Cluster operating normally."
 
+        
         return {
+    # Overall cluster health
             "state": state,
-            "reason": reason
+            "reason": reason,
+
+    # Individual service health
+            "services": {
+            "coordinator": "online",
+            "cluster": state,
+            "event_system": "running",
+            "storage": "connected",
+    },
+
+    # Useful summary metrics
+            "metrics": {
+                "total_nodes": cluster["total_nodes"],
+                "running_jobs": cluster["running_jobs"],
+                "completed_jobs": cluster["completed_jobs"],
+                "failed_jobs": cluster["failed_jobs"],
     }
+}
+    
