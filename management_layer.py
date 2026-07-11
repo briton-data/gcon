@@ -14,8 +14,10 @@ of truth for production access control.
 import csv
 import io
 import json
+from datetime import datetime, UTC
 
 import rbac
+from auth import SessionManager
 from users import UserRegistry, seed_users
 from organizations import OrganizationRegistry, seed_organizations
 from api_keys import APIKeyManager, seed_api_keys
@@ -32,6 +34,7 @@ class ManagementLayer:
         self.api_key_manager = APIKeyManager()
         self.audit_logger = AuditLogger()
         self.notification_center = NotificationCenter()
+        self.session_manager = SessionManager()
 
         self._seed_demo_data()
 
@@ -53,8 +56,13 @@ class ManagementLayer:
     def get_user(self, user_id):
         return self.user_registry.get_user(user_id).to_dict()
 
-    def create_user(self, name, email, role, organization_id=None, status="Active"):
+    def create_user(self, name, email, role, organization_id=None, status="Active", password=None):
+        if self.user_registry.get_user_by_email(email):
+            raise ValueError(f"A user with email '{email}' already exists.")
+
         user = self.user_registry.add_user(name, email, role, organization_id, status)
+        if password:
+            user.set_password(password)
         self.audit_logger.log("Admin", "created user", user.name)
         self.notification_center.notify("user_registered", f"{user.name} was added")
         return user.to_dict()
@@ -77,6 +85,83 @@ class ManagementLayer:
 
     def get_user_counts(self):
         return self.user_registry.counts()
+
+    # ------------------------------------------------------------
+    # Authentication
+    # ------------------------------------------------------------
+
+    def login(self, email, password):
+        """
+        Verify credentials and start a session. Returns
+        (session_token, user_dict) on success, raises ValueError
+        on failure. Failures use the same generic message so login
+        can't be used to enumerate valid emails.
+        """
+        user = self.user_registry.get_user_by_email(email)
+
+        if not user or not user.check_password(password):
+            self.audit_logger.log(email or "unknown", "failed login attempt")
+            raise ValueError("Invalid email or password.")
+
+        if user.status != "Active":
+            self.audit_logger.log(user.name, f"blocked login attempt (status: {user.status})")
+            raise ValueError(f"This account is {user.status.lower()} and cannot log in.")
+
+        user.last_active = datetime.now(UTC)
+        user.stats["login_count"] += 1
+
+        token = self.session_manager.create_session(user.user_id)
+        self.audit_logger.log(user.name, "logged in")
+        return token, user.to_dict()
+
+    def logout(self, token):
+        user_id = self.session_manager.get_user_id(token)
+        if user_id:
+            user = self.user_registry.get_user(user_id)
+            self.audit_logger.log(user.name, "logged out")
+        self.session_manager.destroy_session(token)
+
+    def get_current_user(self, token):
+        """
+        Return the user dict for a valid session token, or None.
+        """
+        user_id = self.session_manager.get_user_id(token)
+        if not user_id:
+            return None
+        try:
+            return self.user_registry.get_user(user_id)
+        except ValueError:
+            return None
+
+    def change_password(self, user_id, current_password, new_password):
+        user = self.user_registry.get_user(user_id)
+        if not user.check_password(current_password):
+            raise ValueError("Current password is incorrect.")
+        user.set_password(new_password)
+        self.session_manager.destroy_all_for_user(user_id)
+        self.audit_logger.log(user.name, "changed password")
+        self.notification_center.notify("password_changed", f"{user.name} changed their password")
+
+    def set_password(self, user_id, new_password):
+        """
+        Admin-initiated password set (e.g. right after creating a
+        user), no current password required.
+        """
+        user = self.user_registry.get_user(user_id)
+        user.set_password(new_password)
+        self.session_manager.destroy_all_for_user(user_id)
+        self.audit_logger.log("Admin", "set password for", user.name)
+
+    def user_has_permission(self, user, permission):
+        if user is None:
+            return False
+        return permission in rbac.get_permissions_for_role(user.role)
+
+    def require_permission(self, user, permission):
+        if not self.user_has_permission(user, permission):
+            raise PermissionError(
+                f"'{permission}' permission is required for this action."
+            )
 
     # ------------------------------------------------------------
     # Organizations & Teams

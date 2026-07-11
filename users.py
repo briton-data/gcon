@@ -10,6 +10,8 @@ since the coordinator does not currently attribute jobs to users.
 from datetime import datetime, UTC, timedelta
 from uuid import uuid4
 
+from auth import hash_password, verify_password
+
 VALID_STATUSES = ["Active", "Pending", "Suspended", "Disabled"]
 
 
@@ -32,6 +34,7 @@ class User:
         self.avatar_initials = _initials(name)
         self.created_at = created_at or datetime.now(UTC)
         self.last_active = datetime.now(UTC)
+        self.password_hash = None
 
         # Demo/seed usage figures — GCON does not yet attribute real
         # jobs or workflows to individual users.
@@ -47,6 +50,14 @@ class User:
             "login_count": 0,
         }
 
+    def set_password(self, password):
+        self.password_hash = hash_password(password)
+
+    def check_password(self, password):
+        if not self.password_hash:
+            return False
+        return verify_password(password, self.password_hash)
+
     def to_dict(self):
         return {
             "user_id": self.user_id,
@@ -58,6 +69,7 @@ class User:
             "avatar_initials": self.avatar_initials,
             "created_at": self.created_at.isoformat(),
             "last_active": self.last_active.isoformat(),
+            "has_password": self.password_hash is not None,
             "stats": self.stats,
         }
 
@@ -77,6 +89,13 @@ class UserRegistry:
         if user_id not in self.users:
             raise ValueError(f"User '{user_id}' does not exist.")
         return self.users[user_id]
+
+    def get_user_by_email(self, email):
+        email = email.lower().strip()
+        for user in self.users.values():
+            if user.email.lower() == email:
+                return user
+        return None
 
     def update_user(self, user_id, **fields):
         user = self.get_user(user_id)
@@ -135,6 +154,10 @@ def seed_users(registry, organization_ids):
             organization_id=orgs[i % len(orgs)],
             status=status,
         )
+        # Demo credential — every seeded account uses this password so
+        # the login flow can be tried out. Real accounts created via
+        # the "Add User" form must have their own password set.
+        user.set_password("gcon-demo-2026")
         # Vary last_active for realism.
         user.last_active = datetime.now(UTC) - timedelta(hours=i * 7)
         user.stats.update({
