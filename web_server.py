@@ -390,10 +390,8 @@ class WebServer:
                     status_code=403,
                     detail=f"'{permission}' permission is required.",
             )
-
-                return user
-
-            return dependency
+            return user
+        return dependency
 
     def start(self):
         """
