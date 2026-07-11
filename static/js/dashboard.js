@@ -12,8 +12,6 @@ let currentTab = "control-center";
 let explorerView = "jobs";
 let explorerData = [];
 let isPaused = false;
-let lastSuccessfulRefresh = null;
-let refreshInProgress = false;
 
 // ---------------------------------------------------------------
 // Helpers
@@ -64,7 +62,14 @@ function formatUptime(seconds) {
 
 async function fetchJson(url, options) {
     const response = await fetch(url, options);
-    if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+    if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Not authenticated");
+    }
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `${url} returned ${response.status}`);
+    }
     setConnectionStatus(true);
     return response.json();
 }
@@ -162,6 +167,87 @@ function loadActiveTab() {
     else if (currentTab === "notifications") loadNotificationsTab();
 }
 
+
+
+// ---------------------------------------------------------------
+// Cluster Health Panel
+// ---------------------------------------------------------------
+
+async function loadClusterHealth() {
+    try {
+        const health = await fetchJson("/health");
+
+        // Overall score
+        setText("health-score", `${health.score}%`);
+
+        // Overall state badge
+        const badge = document.getElementById("health-state-badge");
+        if (badge) {
+
+            const classMap = {
+                healthy: "badge bg-success",
+                degraded: "badge bg-warning text-dark",
+                critical: "badge bg-danger",
+            };
+
+            badge.className = classMap[health.state] || "badge bg-secondary";
+            badge.textContent =
+                health.state.charAt(0).toUpperCase() +
+                health.state.slice(1);
+        }
+
+        // Main reason
+        setText("health-reason", health.reason);
+
+        // Detailed reasons
+        const list = document.getElementById("health-reasons-list");
+
+        if (list) {
+
+            list.innerHTML = "";
+
+            if (health.reasons && health.reasons.length) {
+
+                health.reasons.forEach(reason => {
+
+                    const item = document.createElement("div");
+
+                    item.className = "small text-secondary";
+
+                    item.innerHTML = `
+                        <i class="bi bi-dot"></i>
+                        ${escapeHtml(reason)}
+                    `;
+
+                    list.appendChild(item);
+
+                });
+
+            } else {
+
+                list.innerHTML =
+                    `<div class="small text-success">No issues detected.</div>`;
+
+            }
+
+        }
+
+    } catch (err) {
+
+        console.error("Failed to load cluster health:", err);
+
+        setConnectionStatus(false);
+
+    }
+}
+
+
+
+
+
+
+
+
 // ---------------------------------------------------------------
 // Control Center
 // ---------------------------------------------------------------
@@ -176,14 +262,10 @@ async function loadCluster() {
         setText("overview-registered-nodes", cluster.total_nodes);
         setText("overview-active-jobs", cluster.running_jobs);
         setText("cc-node-summary", `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`);
-    }   catch (err) {
+    } catch (err) {
         console.error("Failed to load cluster state:", err);
         setConnectionStatus(false);
-        throw err;
-
     }
-
-
 }
 
 async function loadNodes() {
@@ -255,7 +337,8 @@ async function loadEvents() {
 }
 
 async function loadControlCenter() {
-    await Promise.all([loadCluster(), loadNodes(), loadJobs(), loadEvents()]);
+    await Promise.all([
+        loadCluster(), loadNodes(), loadJobs(), loadClusterHealth(), loadEvents()]);
 }
 
 // ---------------------------------------------------------------
@@ -533,6 +616,7 @@ async function loadAdminNodes() {
                     await loadAdmin();
                 } catch (err) {
                     console.error("Failed to deregister node:", err);
+                    alert(err.message || "Failed to deregister node.");
                     btn.disabled = false;
                 }
             });
@@ -553,6 +637,7 @@ async function triggerScale(direction) {
         await refreshDashboard();
     } catch (err) {
         console.error(`Failed to scale ${direction}:`, err);
+        alert(err.message || `Failed to scale ${direction}.`);
     }
 }
 
@@ -561,44 +646,9 @@ async function triggerScale(direction) {
 // ---------------------------------------------------------------
 
 async function refreshDashboard() {
-    
-    if (refreshInProgress) return;
-
-    refreshInProgress = true;
-
-    const refreshBtn = document.getElementById("refresh-now-btn");
-    const icon = refreshBtn ? refreshBtn.querySelector("i") : null;
-
-    if (refreshBtn) refreshBtn.disabled = true;
-    if (icon) icon.classList.add("spin");
-
-    try {
-
-        await loadActiveTab();
-        await loadHealthBadge();
-        await refreshNotifBadge();
-        await loadHealthPanel();
-
-        lastSuccessfulRefresh = new Date();
-
-        setText(
-            "last-updated",
-            lastSuccessfulRefresh.toLocaleTimeString()
-        );
-
-    } catch (err) {
-
-        console.error("Dashboard refresh failed:", err);
-
-    } finally {
-
-        if (refreshBtn) refreshBtn.disabled = false;
-        if (icon) icon.classList.remove("spin");
-
-        refreshInProgress = false;
-    }
+    loadActiveTab();
+    setText("last-updated", new Date().toLocaleTimeString());
 }
-
 
 function updateClock() {
     const clock = document.getElementById("clock");
@@ -610,14 +660,12 @@ function setupControls() {
     if (refreshBtn) refreshBtn.addEventListener("click", refreshDashboard);
 
     const pauseBtn = document.getElementById("pause-btn");
-
-
     if (pauseBtn) {
         pauseBtn.addEventListener("click", () => {
             isPaused = !isPaused;
             pauseBtn.innerHTML = isPaused
-                ? '<i class="bi bi-play-fill me-1"></i>'
-                : '<i class="bi bi-pause-fill me-1"></i>';
+                ? '<i class="bi bi-play-fill"></i>'
+                : '<i class="bi bi-pause-fill"></i>';
             pauseBtn.title = isPaused ? "Resume live updates" : "Pause live updates";
         });
     }
@@ -632,35 +680,6 @@ function setupControls() {
     });
 }
 
-
-    const rediscoverBtn = document.getElementById("rediscover-btn");
-    if (rediscoverBtn) {
-        rediscoverBtn.addEventListener("click", async () => {
-            try {
-                await fetchJson("/admin/rediscover", {
-                    method: "POST"
-            });
-                refreshDashboard();
-        }       catch (err) {
-                    console.error("Rediscover failed:", err);
-        }
-    });
-
-
-    const clearCompletedBtn = document.getElementById("clear-completed-btn");
-if (clearCompletedBtn) {
-    clearCompletedBtn.addEventListener("click", async () => {
-        try {
-            await fetchJson("/admin/jobs/clear-completed", {
-                method: "POST"
-            });
-            refreshDashboard();
-        } catch (err) {
-            console.error("Clear completed failed:", err);
-        }
-    });
-}
-}
 // ---------------------------------------------------------------
 // Management: Users
 // ---------------------------------------------------------------
@@ -744,6 +763,7 @@ function renderUsersTable() {
                 await loadUsersTab();
             } catch (err) {
                 console.error("Failed to delete user:", err);
+                alert(err.message || "Failed to delete user.");
             }
         });
     });
@@ -764,7 +784,13 @@ function setupUsersTab() {
 
     const addBtn = document.getElementById("users-add-btn");
     if (addBtn) {
-        addBtn.addEventListener("click", () => {
+        addBtn.addEventListener("click", async () => {
+            try {
+                const orgs = await fetchJson("/management/organizations");
+                const select = document.getElementById("add-user-org");
+                select.innerHTML = `<option value="">No organization</option>` +
+                    orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+            } catch (err) { /* non-fatal */ }
             new bootstrap.Modal(document.getElementById("addUserModal")).show();
         });
     }
@@ -775,20 +801,24 @@ function setupUsersTab() {
             const name = document.getElementById("add-user-name").value.trim();
             const email = document.getElementById("add-user-email").value.trim();
             const role = document.getElementById("add-user-role").value;
+            const organization_id = document.getElementById("add-user-org").value || null;
+            const password = document.getElementById("add-user-password").value || null;
             if (!name || !email) return;
 
             try {
                 await fetchJson("/management/users", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name, email, role }),
+                    body: JSON.stringify({ name, email, role, organization_id, password }),
                 });
                 bootstrap.Modal.getInstance(document.getElementById("addUserModal")).hide();
                 document.getElementById("add-user-name").value = "";
                 document.getElementById("add-user-email").value = "";
+                document.getElementById("add-user-password").value = "";
                 await loadUsersTab();
             } catch (err) {
                 console.error("Failed to create user:", err);
+                alert(err.message || "Failed to create user.");
             }
         });
     }
@@ -929,6 +959,7 @@ async function openUserDrawer(userId) {
                 if (currentTab === "users") await loadUsersTab();
             } catch (err) {
                 console.error("Failed to update user:", err);
+                alert(err.message || "Failed to update user.");
             }
         });
     }
@@ -968,12 +999,15 @@ async function loadTeamsTab() {
     const body = document.getElementById("teams-body");
     if (!body) return;
     try {
-        const [teams, orgs] = await Promise.all([
+        const [teams, orgs, users] = await Promise.all([
             fetchJson("/management/teams"),
             fetchJson("/management/organizations"),
+            fetchJson("/management/users"),
         ]);
         const orgName = {};
         orgs.forEach(o => orgName[o.org_id] = o.name);
+        const userName = {};
+        users.forEach(u => userName[u.user_id] = u.name);
 
         if (teams.length === 0) {
             body.innerHTML = `<tr><td colspan="4" class="text-center text-secondary">No teams.</td></tr>`;
@@ -984,12 +1018,89 @@ async function loadTeamsTab() {
                 <td>${escapeHtml(t.name)}</td>
                 <td>${escapeHtml(orgName[t.org_id] || "-")}</td>
                 <td>${escapeHtml(t.member_count)}</td>
-                <td>${escapeHtml(t.admin_user_id || "Unassigned")}</td>
+                <td>${escapeHtml(t.admin_user_id ? (userName[t.admin_user_id] || t.admin_user_id) : "Unassigned")}</td>
             </tr>
         `).join("");
     } catch (err) {
         console.error("Failed to load teams:", err);
         setConnectionStatus(false);
+    }
+}
+
+function setupOrganizationsTab() {
+    const createBtn = document.getElementById("org-create-btn");
+    if (!createBtn) return;
+    createBtn.addEventListener("click", () => {
+        new bootstrap.Modal(document.getElementById("createOrgModal")).show();
+    });
+
+    const submitBtn = document.getElementById("create-org-submit");
+    if (submitBtn) {
+        submitBtn.addEventListener("click", async () => {
+            const name = document.getElementById("create-org-name").value.trim();
+            const plan = document.getElementById("create-org-plan").value;
+            if (!name) return;
+            try {
+                await fetchJson("/management/organizations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, plan }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("createOrgModal")).hide();
+                document.getElementById("create-org-name").value = "";
+                await loadOrganizationsTab();
+            } catch (err) {
+                console.error("Failed to create organization:", err);
+                alert(err.message || "Failed to create organization.");
+            }
+        });
+    }
+}
+
+function setupTeamsTab() {
+    const createBtn = document.getElementById("team-create-btn");
+    if (!createBtn) return;
+    createBtn.addEventListener("click", async () => {
+        try {
+            const [orgs, users] = await Promise.all([
+                fetchJson("/management/organizations"),
+                fetchJson("/management/users"),
+            ]);
+            document.getElementById("create-team-org").innerHTML =
+                orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("")
+                || `<option value="">No organizations yet</option>`;
+            document.getElementById("create-team-admin").innerHTML =
+                `<option value="">Unassigned</option>` +
+                users.map(u => `<option value="${escapeHtml(u.user_id)}">${escapeHtml(u.name)}</option>`).join("");
+        } catch (err) { /* non-fatal */ }
+        new bootstrap.Modal(document.getElementById("createTeamModal")).show();
+    });
+
+    const submitBtn = document.getElementById("create-team-submit");
+    if (submitBtn) {
+        submitBtn.addEventListener("click", async () => {
+            const errorBox = document.getElementById("create-team-error");
+            errorBox.classList.add("d-none");
+
+            const org_id = document.getElementById("create-team-org").value;
+            const name = document.getElementById("create-team-name").value.trim();
+            const admin_user_id = document.getElementById("create-team-admin").value || null;
+            if (!org_id || !name) return;
+
+            try {
+                await fetchJson("/management/teams", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ org_id, name, admin_user_id }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("createTeamModal")).hide();
+                document.getElementById("create-team-name").value = "";
+                await loadTeamsTab();
+            } catch (err) {
+                errorBox.textContent = err.message || "Failed to create team.";
+                errorBox.classList.remove("d-none");
+            }
+        });
     }
 }
 
@@ -1025,15 +1136,25 @@ async function loadApiKeysTab() {
 
         document.querySelectorAll(".apikey-revoke-btn").forEach(btn => {
             btn.addEventListener("click", async () => {
-                await fetchJson(`/management/api-keys/${btn.dataset.keyId}/revoke`, { method: "POST" });
-                await loadApiKeysTab();
+                try {
+                    await fetchJson(`/management/api-keys/${btn.dataset.keyId}/revoke`, { method: "POST" });
+                    await loadApiKeysTab();
+                } catch (err) {
+                    console.error("Failed to revoke API key:", err);
+                    alert(err.message || "Failed to revoke API key.");
+                }
             });
         });
         document.querySelectorAll(".apikey-regen-btn").forEach(btn => {
             btn.addEventListener("click", async () => {
-                const result = await fetchJson(`/management/api-keys/${btn.dataset.keyId}/regenerate`, { method: "POST" });
-                showKeyReveal(result.secret);
-                await loadApiKeysTab();
+                try {
+                    const result = await fetchJson(`/management/api-keys/${btn.dataset.keyId}/regenerate`, { method: "POST" });
+                    showKeyReveal(result.secret);
+                    await loadApiKeysTab();
+                } catch (err) {
+                    console.error("Failed to regenerate API key:", err);
+                    alert(err.message || "Failed to regenerate API key.");
+                }
             });
         });
     } catch (err) {
@@ -1082,6 +1203,7 @@ async function setupApiKeysTab() {
                 await loadApiKeysTab();
             } catch (err) {
                 console.error("Failed to create API key:", err);
+                alert(err.message || "Failed to create API key.");
             }
         });
     }
@@ -1286,46 +1408,69 @@ async function loadHealthBadge() {
     }
 }
 
-async function loadHealthPanel() {
+// ---------------------------------------------------------------
+// Current user / logout / change password
+// ---------------------------------------------------------------
+
+async function loadCurrentUser() {
     try {
-        const health = await fetchJson("/health");
-
-        updateStatusBadge("health-coordinator", health.coordinator);
-        updateStatusBadge("health-cluster", health.cluster);
-        updateStatusBadge("health-events", health.event_system);
-        updateStatusBadge("health-storage", health.storage);
-
+        const user = await fetchJson("/auth/me");
+        setText("navbar-user-avatar", user.avatar_initials);
+        setText("navbar-user-name", user.name);
+        setText("navbar-user-role", `${user.role} · ${user.email}`);
     } catch (err) {
-        console.error("Failed to update health panel:", err);
+        // fetchJson already redirects to /login on 401
+        console.error("Failed to load current user:", err);
     }
 }
-function updateStatusBadge(id, state) {
 
-    const badge = document.getElementById(id);
+function setupAuthMenu() {
+    const logoutLink = document.getElementById("logout-link");
+    if (logoutLink) {
+        logoutLink.addEventListener("click", async (e) => {
+            e.preventDefault();
+            try {
+                await fetch("/auth/logout", { method: "POST" });
+            } finally {
+                window.location.href = "/login";
+            }
+        });
+    }
 
-    if (!badge) return;
+    const changePasswordLink = document.getElementById("change-password-link");
+    if (changePasswordLink) {
+        changePasswordLink.addEventListener("click", (e) => {
+            e.preventDefault();
+            document.getElementById("change-password-error").classList.add("d-none");
+            document.getElementById("cp-current-password").value = "";
+            document.getElementById("cp-new-password").value = "";
+            new bootstrap.Modal(document.getElementById("changePasswordModal")).show();
+        });
+    }
 
-    const classMap = {
-        online: "bg-success",
-        healthy: "bg-success",
-        running: "bg-success",
-        connected: "bg-success",
+    const submitBtn = document.getElementById("change-password-submit");
+    if (submitBtn) {
+        submitBtn.addEventListener("click", async () => {
+            const errorBox = document.getElementById("change-password-error");
+            errorBox.classList.add("d-none");
 
-        degraded: "bg-warning text-dark",
+            const current_password = document.getElementById("cp-current-password").value;
+            const new_password = document.getElementById("cp-new-password").value;
 
-        offline: "bg-danger",
-        critical: "bg-danger",
-        stopped: "bg-danger",
-        disconnected: "bg-danger"
-    };
-
-    badge.className = `badge ${classMap[state] || "bg-secondary"}`;
-
-    badge.textContent =
-        state.charAt(0).toUpperCase() +
-        state.slice(1);
+            try {
+                await fetchJson("/auth/change-password", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ current_password, new_password }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("changePasswordModal")).hide();
+            } catch (err) {
+                errorBox.textContent = err.message || "Failed to change password.";
+                errorBox.classList.remove("d-none");
+            }
+        });
+    }
 }
-
 
 // ---------------------------------------------------------------
 // Boot
@@ -1336,9 +1481,13 @@ setupExplorerNav();
 setupControls();
 setupUsersTab();
 setupApiKeysTab();
+setupOrganizationsTab();
+setupTeamsTab();
 setupGlobalSearch();
 setupDrawer();
+setupAuthMenu();
 
+loadCurrentUser();
 refreshDashboard();
 loadHealthBadge();
 refreshNotifBadge();

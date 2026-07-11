@@ -16,6 +16,7 @@ from event_types import EventType
 from event_bus import EventBus
 from datetime import datetime, UTC
 from workflow_engine import WorkflowEngine
+from health_service import HealthService
 
 class GCONCoordinator:
     """
@@ -38,6 +39,7 @@ class GCONCoordinator:
         self.artifact_registry = ArtifactRegistry() 
         self.storage_manager = StorageManager()
         self.workflow_engine = WorkflowEngine(self)
+        self.health_service = HealthService(self)
         
         self.scheduler_thread = threading.Thread(
                 target=self.scheduler_loop,                       
@@ -151,9 +153,7 @@ class GCONCoordinator:
         target=self._run_job,
         args=(node, job_id),
         daemon=True
-    )
-
-      
+    )    
         self.event_bus.publish(
             Event(
                 timestamp=datetime.now(UTC),
@@ -668,40 +668,50 @@ class GCONCoordinator:
         
         
     def get_cluster_health(self):
+        """
+        Return overall cluster health, computed from real subsystem
+        state (coordinator queue, node registry, receipts, storage
+        disk, API latency) rather than a bare percentage. See
+        HealthService for how each branch is derived.
+        """
+        health = self.health_service.compute()
         cluster = self.get_cluster_state()
 
-        if cluster["total_nodes"] == 0:
-            state = "critical"
-            reason = "No registered nodes."
+        checks = health["checks"]
 
-        elif cluster["failed_jobs"] > 0:
-            state = "degraded"
-            reason = f'{cluster["failed_jobs"]} failed job(s).'
-
-        else:
-            state = "healthy"
-            reason = "Cluster operating normally."
-
-        
         return {
-    # Overall cluster health
-            "state": state,
-            "reason": reason,
+            # Overall cluster health
+            "state": health["state"],
+            "score": health["score"],
+            "reason": health["reason"],
+            "reasons": health["reasons"],
+            "computed_at": health["computed_at"],
 
-    # Individual service health
+            # Per-branch detail, for the Health Inspector drill-down
+            "checks": checks,
+
+            # Kept for callers of the old shape (navbar badge, etc.)
             "services": {
-            "coordinator": "online",
-            "cluster": state,
-            "event_system": "running",
-            "storage": "connected",
-    },
+                "coordinator": "online" if checks["coordinator"]["healthy"] else "degraded",
+                "cluster": health["state"],
+                "event_system": "running",
+                "storage": "connected" if checks["storage"]["healthy"] else "degraded",
+            },
 
-    # Useful summary metrics
+            # Useful summary metrics
             "metrics": {
                 "total_nodes": cluster["total_nodes"],
                 "running_jobs": cluster["running_jobs"],
                 "completed_jobs": cluster["completed_jobs"],
                 "failed_jobs": cluster["failed_jobs"],
-    }
-}
+            },
+        }
+
+    def get_health_details(self):
+        """
+        Return the full health source-tree for the Health Inspector
+        drill-down view (one entry per branch, each with its own
+        metrics and explanation).
+        """
+        return self.health_service.details()
     

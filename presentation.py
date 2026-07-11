@@ -142,6 +142,18 @@ class PresentationLayer:
     def get_cluster_state(self):
         return self.coordinator.get_cluster_state()
     
+    def get_cluster_health(self):
+        """
+        Return overall cluster health.
+        """
+        return self.coordinator.get_cluster_health()
+    
+    def get_health_details(self):
+        """
+        Return detailed health information.
+        """
+        return self.coordinator.get_health_details()
+    
     def get_dashboard_metrics(self):
         """
         Return summary metrics for the dashboard.
@@ -226,9 +238,6 @@ class PresentationLayer:
         Return all registered artifacts.
         """
         return self.coordinator.get_artifacts()
-    
-    def get_cluster_health(self):
-        return self.coordinator.get_cluster_health()
 
     # ------------------------------------------------------------------
     # Real-Time Monitoring
