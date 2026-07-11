@@ -303,19 +303,6 @@ body {
     animation: gcon-fade-in .15s ease-in;
 }
 
-@keyframes gcon-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-.spin {
-    animation: gcon-spin 0.8s linear infinite;
-}
-
 @keyframes gcon-fade-in {
     from { opacity: 0; }
     to { opacity: 1; }
@@ -420,168 +407,84 @@ body {
     font-size: .95rem;
 }
 
-/* ==========================================================
-   Avatars
-========================================================== */
+/* ---------------------------------------------------------------
+   Users Management (avatars, profile sub-tabs)
+   --------------------------------------------------------------- */
 
 .gcon-avatar {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     border-radius: 50%;
     background: var(--primary);
-    color: white;
-    font-size: .75rem;
+    color: #fff;
     font-weight: 700;
+    font-size: .85rem;
+    flex-shrink: 0;
 }
 
 .gcon-avatar-lg {
-    width: 56px;
-    height: 56px;
-    font-size: 1.1rem;
+    width: 64px;
+    height: 64px;
+    font-size: 1.4rem;
 }
 
-.gcon-row-link {
-    cursor: pointer;
-    color: var(--text);
-}
-
-.gcon-row-link:hover {
-    color: var(--primary);
-    text-decoration: underline;
-}
-
-/* ==========================================================
-   Detail Drawer
-========================================================== */
-
-.gcon-drawer-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,.5);
-    z-index: 1040;
-}
-
-.gcon-drawer {
-    position: fixed;
-    top: 0;
-    right: -420px;
-    width: 420px;
-    max-width: 90vw;
-    height: 100vh;
-    background: var(--surface);
-    border-left: 1px solid rgba(255,255,255,.08);
-    z-index: 1050;
-    transition: right .25s ease;
+.gcon-user-cell {
     display: flex;
-    flex-direction: column;
-}
-
-.gcon-drawer.gcon-drawer-open {
-    right: 0;
-}
-
-.gcon-drawer-header {
-    display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 16px 20px;
-    border-bottom: 1px solid rgba(255,255,255,.08);
+    gap: 10px;
 }
 
-.gcon-drawer-body {
-    padding: 20px;
-    overflow-y: auto;
-    flex: 1;
+.gcon-user-cell .gcon-user-name {
+    font-weight: 600;
 }
 
-.gcon-drawer-tabs .nav-link {
+.gcon-user-cell .gcon-user-email {
+    font-size: .8rem;
     color: var(--muted);
-    font-size: .85rem;
-    padding: 4px 10px;
 }
 
-.gcon-drawer-tabs .nav-link.active {
+.gcon-subtab-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.gcon-subtab-nav a {
+    display: inline-block;
+    padding: 6px 14px;
+    border-radius: 6px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: .85rem;
+    font-weight: 600;
+}
+
+.gcon-subtab-nav a:hover {
+    color: var(--text, #e6e6e6);
+}
+
+.gcon-subtab-nav a.active {
     background: var(--primary);
-    color: white;
+    color: #fff;
 }
 
-/* ==========================================================
-   Global search
-========================================================== */
-
-.gcon-search-results {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    margin-top: 4px;
-    background: var(--surface);
-    border: 1px solid rgba(255,255,255,.1);
-    border-radius: 8px;
-    max-height: 340px;
-    overflow-y: auto;
-    z-index: 1060;
-    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+.gcon-stat-tile {
+    text-align: center;
+    padding: 14px 8px;
 }
 
-.gcon-search-group-label {
-    padding: 6px 12px 2px;
-    font-size: .7rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
+.gcon-stat-tile .gcon-stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.gcon-stat-tile .gcon-stat-label {
+    font-size: .78rem;
     color: var(--muted);
-}
-
-.gcon-search-result-item {
-    padding: 6px 12px;
-    font-size: .85rem;
-    color: var(--text);
-    border-bottom: 1px solid rgba(255,255,255,.04);
-}
-
-/* ==========================================================
-   Notifications
-========================================================== */
-
-.gcon-notif-unread {
-    border-left-color: var(--warning);
-}
-
-/* ==========================================================
-   Sparklines
-========================================================== */
-
-.gcon-sparkline {
-    height: 32px;
-    margin-top: 4px;
-}
-
-.gcon-sparkline svg {
-    width: 100%;
-    height: 100%;
-}
-
-/* ==========================================================
-   Modals (match dark theme)
-========================================================== */
-
-.gcon-modal {
-    background: var(--surface);
-    color: var(--text);
-    border: 1px solid rgba(255,255,255,.08);
-}
-
-.gcon-modal .modal-header,
-.gcon-modal .modal-footer {
-    border-color: rgba(255,255,255,.08);
-}
-
-.gcon-modal .form-control,
-.gcon-modal .form-select {
-    background: var(--bg);
-    color: var(--text);
-    border-color: rgba(255,255,255,.12);
 }

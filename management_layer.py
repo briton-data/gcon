@@ -5,10 +5,11 @@ A sibling to the cluster PresentationLayer: handles platform
 management concerns (users, organizations, RBAC, API keys, audit
 log, notifications) rather than cluster operations.
 
-GCON has no authentication system yet, so this layer operates on
-seeded, in-memory demo data. It's built to demonstrate the intended
-UI/API shape for a future real implementation, not to be a source
-of truth for production access control.
+Users/orgs/API keys/audit log are seeded with a small set of
+bootstrap accounts so the UI/RBAC can be exercised without a signup
+flow, but login itself is real (see auth.py), and notifications are
+generated from real coordinator events (see _bridge_cluster_events)
+rather than pre-seeded demo text.
 """
 
 import csv
@@ -22,7 +23,7 @@ from users import UserRegistry, seed_users
 from organizations import OrganizationRegistry, seed_organizations
 from api_keys import APIKeyManager, seed_api_keys
 from audit_log import AuditLogger, seed_audit_log
-from notifications import NotificationCenter, seed_notifications
+from notifications import NotificationCenter
 
 
 class ManagementLayer:
@@ -37,6 +38,7 @@ class ManagementLayer:
         self.session_manager = SessionManager()
 
         self._seed_demo_data()
+        self._bridge_cluster_events()
 
     def _seed_demo_data(self):
         orgs = seed_organizations(self.org_registry)
@@ -44,7 +46,48 @@ class ManagementLayer:
         users = seed_users(self.user_registry, org_ids)
         seed_api_keys(self.api_key_manager, users)
         seed_audit_log(self.audit_logger)
-        seed_notifications(self.notification_center)
+
+    # Real coordinator events -> notifications. This replaces the old
+    # seed_notifications() demo text: every notification below is
+    # triggered by something that actually happened on the cluster.
+    _EVENT_NOTIFICATIONS = {
+        "NODE_OFFLINE": (
+            "node_failure",
+            lambda p: f"Node {p.get('node_id')} missed its heartbeat and was marked offline",
+        ),
+        "NODE_REGISTERED": (
+            "node_registered",
+            lambda p: f"Node {p.get('node_id')} registered with the cluster",
+        ),
+        "JOB_FAILED": (
+            "job_failed",
+            lambda p: f"Job {p.get('job_id')} failed"
+            + (f": {p['error']}" if p.get("error") else ""),
+        ),
+        "RECEIPT_GENERATED": (
+            "receipt_generated",
+            lambda p: f"Receipt generated for job {p.get('job_id')}",
+        ),
+    }
+
+    def _bridge_cluster_events(self):
+        """
+        Subscribe the notification center to the coordinator's real
+        event bus, so notifications reflect what's actually happening
+        on the cluster (offline nodes, failed jobs, receipts) instead
+        of canned demo text.
+        """
+        if not self.coordinator:
+            return
+
+        def handle(event):
+            mapping = self._EVENT_NOTIFICATIONS.get(event.event_type)
+            if not mapping:
+                return
+            notif_type, build_message = mapping
+            self.notification_center.notify(notif_type, build_message(event.payload or {}))
+
+        self.coordinator.event_bus.subscribe(handle)
 
     # ------------------------------------------------------------
     # Users
