@@ -4,6 +4,6 @@ cryptography>=45.0.0
 pytest
 pytest-cov
 fastapi
-uvicorn
+uvicorn =[standard] (3.11)
 jinja2
 websockets

@@ -40,12 +40,20 @@ class GCONCoordinator:
         self.storage_manager = StorageManager()
         self.workflow_engine = WorkflowEngine(self)
         self.health_service = HealthService(self)
+        self.verifier = ExecutionVerifier()
+        self.scheduler_paused = False
         
         self.scheduler_thread = threading.Thread(
                 target=self.scheduler_loop,                       
                 daemon=True
         )       
         self.scheduler_thread.start()
+
+        self.health_check_thread = threading.Thread(
+                target=self.health_check_loop,
+                daemon=True
+        )
+        self.health_check_thread.start()
         
         print("GCON Coordinator initialized.")
         
@@ -153,7 +161,9 @@ class GCONCoordinator:
         target=self._run_job,
         args=(node, job_id),
         daemon=True
-    )    
+    )
+
+      
         self.event_bus.publish(
             Event(
                 timestamp=datetime.now(UTC),
@@ -199,6 +209,12 @@ class GCONCoordinator:
 
         for node_id in offline_nodes:
             print(f"Node '{node_id}' marked OFFLINE")
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC),
+                event_type="NODE_OFFLINE",
+                source="Coordinator",
+                payload={"node_id": node_id},
+            ))
             self.recover_jobs(node_id)
     
     def recover_jobs(self, node_id):
@@ -291,7 +307,8 @@ class GCONCoordinator:
             print(f"[ERROR] _run_job failed for '{job_id}' on "
                   f"'{node.node_id}': {e}")
 
-            job["status"] = "failed"
+            cancelled = job.get("cancel_requested", False)
+            job["status"] = "cancelled" if cancelled else "failed"
             job["completed_at"] = datetime.now(UTC).isoformat()
             job["result"] = {"status": "error", "message": str(e)}
 
@@ -305,7 +322,7 @@ class GCONCoordinator:
             self.event_bus.publish(
                 Event(
                     timestamp=datetime.now(UTC),
-                    event_type="JOB_FAILED",
+                    event_type="JOB_CANCELLED" if cancelled else "JOB_FAILED",
                     source="Coordinator",
                     payload={
                         "job_id": job_id,
@@ -334,6 +351,26 @@ class GCONCoordinator:
             job["status"] = "completed"
             job["completed_at"] = datetime.now(UTC).isoformat()
 
+            # Generate a real, cryptographically signed receipt for
+            # this execution using the coordinator's shared verifier
+            # instance (so later verification uses the same key).
+            try:
+                input_hash = self.verifier.hash_data(job["command"])
+                output_hash = self.verifier.hash_data(result.get("stdout", ""))
+                receipt = self.verifier.create_receipt(
+                    job_id, node.node_id, result, input_hash, output_hash
+                )
+                self.receive_receipt(job_id, receipt)
+
+                self.event_bus.publish(Event(
+                    timestamp=datetime.now(UTC),
+                    event_type="RECEIPT_GENERATED",
+                    source="Coordinator",
+                    payload={"job_id": job_id, "node_id": node.node_id},
+                ))
+            except Exception as e:
+                print(f"[WARN] Receipt generation failed for '{job_id}': {e}")
+
             self.event_bus.publish(
                 Event(
                     timestamp=datetime.now(UTC),
@@ -346,12 +383,13 @@ class GCONCoordinator:
     )
 )
         else:
-            job["status"] = "failed"
+            cancelled = job.get("cancel_requested", False)
+            job["status"] = "cancelled" if cancelled else "failed"
             job["completed_at"] = datetime.now(UTC).isoformat()
             self.event_bus.publish(
                 Event(
                     timestamp=datetime.now(UTC),
-                    event_type="JOB_FAILED",
+                    event_type="JOB_CANCELLED" if cancelled else "JOB_FAILED",
                     source="Coordinator",
                     payload={
                         "job_id": job_id,
@@ -368,6 +406,10 @@ class GCONCoordinator:
         """
 
         while True:
+
+            if self.scheduler_paused:
+                time.sleep(0.2)
+                continue
 
             if self.job_queue.empty():
                 time.sleep(0.1)
@@ -390,6 +432,21 @@ class GCONCoordinator:
                 
             time.sleep(0.05)    
             
+    def health_check_loop(self):
+        """
+        Periodically check for nodes that have gone silent (missed
+        their heartbeat window) and recover any jobs they were
+        running. Runs continuously in the background so heartbeat
+        loss is detected in real time, not just when a button is
+        clicked.
+        """
+        while True:
+            time.sleep(3)
+            try:
+                self.check_cluster_health()
+            except Exception as e:
+                print(f"[HEALTH] Health check loop error: {e}")
+
     def queue_job(self, job_id):
         """Add a job to the pending queue."""
         self.job_queue.put(job_id)   
@@ -416,6 +473,288 @@ class GCONCoordinator:
         self.registry.remove(node_id)
 
         print(f"Node '{node_id}' deregistered successfully.")
+
+    # ------------------------------------------------------------
+    # Scheduler control
+    # ------------------------------------------------------------
+
+    def pause_scheduler(self):
+        """
+        Stop assigning new jobs to nodes. Already-running jobs are
+        unaffected and continue to completion.
+        """
+        self.scheduler_paused = True
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="SCHEDULER_PAUSED",
+            source="Coordinator", payload={},
+        ))
+        print("[SCHEDULER] Paused.")
+
+    def resume_scheduler(self):
+        """
+        Resume assigning queued jobs to idle nodes.
+        """
+        self.scheduler_paused = False
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="SCHEDULER_RESUMED",
+            source="Coordinator", payload={},
+        ))
+        print("[SCHEDULER] Resumed.")
+
+    # ------------------------------------------------------------
+    # Node lifecycle control
+    # ------------------------------------------------------------
+
+    def drain_node(self, node_id):
+        """
+        Stop assigning new jobs to a node. Any job it's currently
+        running is left to finish naturally.
+        """
+        self.registry.get_node(node_id)  # raises if missing
+        self.registry.set_draining(node_id, True)
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="NODE_DRAINING",
+            source="Coordinator", payload={"node_id": node_id},
+        ))
+        print(f"[NODE] '{node_id}' is draining — no new jobs will be assigned.")
+
+    def restart_worker(self, node_id):
+        """
+        Restart a worker in place: cancel any job it's currently
+        running, then reset it to idle. The node keeps its identity
+        and stays registered (unlike stop_worker, which removes it).
+        """
+        node = self.registry.get_node(node_id)
+        info = self.registry.get_node_info(node_id)
+
+        was_running = info["status"] == "busy"
+        if was_running:
+            self._cancel_node_job(node_id)
+
+        self.registry.set_draining(node_id, False)
+        node.status = "idle"
+        self.registry.heartbeat(node_id, "idle", node.heartbeat()["timestamp"])
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="NODE_RESTARTED",
+            source="Coordinator", payload={"node_id": node_id, "had_running_job": was_running},
+        ))
+        print(f"[NODE] '{node_id}' restarted.")
+
+    def stop_worker(self, node_id):
+        """
+        Forcibly stop and remove a worker: cancel any job it's
+        currently running, then deregister it from the cluster.
+        """
+        info = self.registry.get_node_info(node_id)
+        if info["status"] == "busy":
+            self._cancel_node_job(node_id)
+
+        self.deregister_agent(node_id)
+        print(f"[NODE] '{node_id}' stopped and removed.")
+
+    def _cancel_node_job(self, node_id):
+        """
+        Find whatever job is currently running on a node and cancel
+        it (kills the underlying subprocess).
+        """
+        for job_id, job in self.jobs.items():
+            if job["node_id"] == node_id and job["status"] == "running":
+                job["cancel_requested"] = True
+                node = self.registry.get_node(node_id)
+                node.cancel()
+                return job_id
+        return None
+
+    # ------------------------------------------------------------
+    # Job control
+    # ------------------------------------------------------------
+
+    def cancel_job(self, job_id):
+        """
+        Cancel a specific running job by killing its process.
+        """
+        if job_id not in self.jobs:
+            raise ValueError(f"Job '{job_id}' does not exist.")
+
+        job = self.jobs[job_id]
+        if job["status"] != "running":
+            raise ValueError(f"Job '{job_id}' is not running (status: {job['status']}).")
+
+        job["cancel_requested"] = True
+        node = self.registry.get_node(job["node_id"])
+        killed = node.cancel()
+
+        print(f"[JOB] Cancel requested for '{job_id}' (process killed: {killed}).")
+        return killed
+
+    def clear_queue(self):
+        """
+        Remove every job still waiting in the queue and mark them
+        cancelled. Jobs already running are unaffected.
+        """
+        cleared = []
+        while not self.job_queue.empty():
+            job_id = self.job_queue.get()
+            job = self.jobs.get(job_id)
+            if job and job["status"] == "pending":
+                job["status"] = "cancelled"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                cleared.append(job_id)
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="QUEUE_CLEARED",
+            source="Coordinator", payload={"cleared_job_ids": cleared},
+        ))
+        print(f"[QUEUE] Cleared {len(cleared)} pending job(s).")
+        return cleared
+
+    def retry_failed_jobs(self):
+        """
+        Re-queue every currently failed job for another attempt.
+        """
+        retried = []
+        for job_id, job in self.jobs.items():
+            if job["status"] == "failed":
+                job["status"] = "pending"
+                job["node_id"] = None
+                job["completed_at"] = None
+                job.pop("cancel_requested", None)
+                self.queue_job(job_id)
+                retried.append(job_id)
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="FAILED_JOBS_RETRIED",
+            source="Coordinator", payload={"job_ids": retried},
+        ))
+        print(f"[QUEUE] Retrying {len(retried)} failed job(s).")
+        return retried
+
+    def clear_completed_jobs(self):
+        """
+        Remove completed jobs from the working set to declutter the
+        dashboard. Running/pending/failed jobs are left alone.
+        """
+        cleared = [jid for jid, j in self.jobs.items() if j["status"] == "completed"]
+        for job_id in cleared:
+            del self.jobs[job_id]
+
+        print(f"[JOBS] Cleared {len(cleared)} completed job(s).")
+        return cleared
+
+    def rediscover_nodes(self):
+        """
+        Re-check every node's heartbeat freshness right now (rather
+        than waiting for the next periodic health check), marking
+        any that have gone silent as offline and recovering their
+        in-flight jobs.
+        """
+        offline_nodes = self.registry.check_node_health()
+        for node_id in offline_nodes:
+            print(f"Node '{node_id}' marked OFFLINE")
+            self.recover_jobs(node_id)
+
+        print(f"[DISCOVERY] Rediscovery complete. {len(offline_nodes)} node(s) newly offline.")
+        return {
+            "checked": len(self.registry.nodes),
+            "newly_offline": offline_nodes,
+        }
+
+    # ------------------------------------------------------------
+    # Receipts, snapshots, emergency control
+    # ------------------------------------------------------------
+
+    def verify_all_receipts(self):
+        """
+        Cryptographically verify every stored receipt's signed proof
+        against the coordinator's verifier, using the real HMAC
+        signature check (not a stub).
+        """
+        results = []
+        for receipt_id, receipt in self.receipts.items():
+            proof = receipt.get("proof", {})
+            is_valid, message = self.verifier.validate_proof(proof)
+            results.append({
+                "receipt_id": receipt_id,
+                "job_id": receipt.get("job_id"),
+                "valid": is_valid,
+                "message": message,
+            })
+
+        print(f"[VERIFY] Checked {len(results)} receipt(s).")
+        return results
+
+    def get_cluster_snapshot(self):
+        """
+        Return a full point-in-time dump of cluster state, for the
+        "Snapshot Cluster" export.
+        """
+        return {
+            "taken_at": datetime.now(UTC).isoformat(),
+            "cluster_state": self.get_cluster_state(),
+            "nodes": self.get_nodes(),
+            "jobs": self.get_jobs(),
+            "receipts": self.get_receipts(),
+            "artifacts": self.get_artifacts(),
+            "events": [
+                {
+                    "timestamp": e.timestamp.isoformat(),
+                    "event_type": e.event_type,
+                    "source": e.source,
+                    "payload": e.payload,
+                }
+                for e in self.get_all_events()
+            ],
+        }
+
+    def export_logs(self):
+        """
+        Collect stdout/stderr for every job that has actually run,
+        for the "Export Logs" download.
+        """
+        lines = []
+        for job_id, job in self.jobs.items():
+            result = job.get("result")
+            if not result:
+                continue
+            lines.append(f"===== {job_id} ({job['status']}) =====")
+            lines.append(f"command: {job.get('command')}")
+            lines.append(f"node: {job.get('node_id')}")
+            if "stdout" in result:
+                lines.append("--- stdout ---")
+                lines.append(result.get("stdout") or "(empty)")
+            if "stderr" in result:
+                lines.append("--- stderr ---")
+                lines.append(result.get("stderr") or "(empty)")
+            if "message" in result:
+                lines.append(f"error: {result['message']}")
+            lines.append("")
+
+        return "\n".join(lines) if lines else "No job output recorded yet."
+
+    def emergency_stop(self):
+        """
+        Pause the scheduler and cancel every currently running job.
+        Registered nodes are left in place (this is a stop, not a
+        teardown) but no new work will be assigned until resumed.
+        """
+        self.pause_scheduler()
+
+        cancelled = []
+        for job_id, job in self.jobs.items():
+            if job["status"] == "running":
+                try:
+                    self.cancel_job(job_id)
+                    cancelled.append(job_id)
+                except ValueError:
+                    pass
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="EMERGENCY_STOP",
+            source="Coordinator", payload={"cancelled_job_ids": cancelled},
+        ))
+        print(f"[EMERGENCY] Stopped. Cancelled {len(cancelled)} running job(s).")
+        return cancelled
         
     def get_pending_job_count(self):
         """
@@ -500,6 +839,7 @@ class GCONCoordinator:
         return {
             "total_nodes": self.get_total_node_count(),
             "idle_nodes": self.get_idle_node_count(),
+            "registered_node_count": len(self.get_registered_nodes()),
             "registered_nodes": self.get_registered_nodes(),
             "running_jobs": sum(
                 1 for job in self.jobs.values()
@@ -554,15 +894,18 @@ class GCONCoordinator:
         nodes = []
         
         for node_id, info in self.registry.nodes.items():
-            node = info.get("node")
-
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
-                "cpu": getattr(node, "cpu", "N/A"),
-                "memory": getattr(node, "memory", "N/A"),
-                "running_jobs": getattr(node, "running_jobs", 0),
-                "last_seen": info.get("last_seen", "N/A"),
+                "cpu": info.get("cpu", "N/A"),
+                "memory": info.get("memory", "N/A"),
+                "running_jobs": info.get("running_jobs", 0),
+                "last_seen": (
+                    info["last_seen"].isoformat()
+                    if isinstance(info.get("last_seen"), datetime)
+                    else info.get("last_seen", "N/A")
+                ),
+                "draining": info.get("draining", False),
             })
 
         return nodes
@@ -615,8 +958,8 @@ class GCONCoordinator:
             receipts.append({
                 "receipt_id": receipt_id,
                 "job_id": receipt.get("job_id"),
-                "status": receipt.get("status", "verified"),
-                "created_at": receipt.get("created_at", "N/A")
+                "status": receipt.get("status", "unknown"),
+                "created_at": receipt.get("issued_at", "N/A")
         })
 
         return receipts
@@ -713,5 +1056,5 @@ class GCONCoordinator:
         drill-down view (one entry per branch, each with its own
         metrics and explanation).
         """
-        return self.health_service.details()
+        return self.health_service.health()
     

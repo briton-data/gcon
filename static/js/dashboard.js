@@ -6,7 +6,7 @@
  * so the dashboard stays live without full page reloads.
  */
 
-const REFRESH_INTERVAL_MS = 5000;
+
 
 let currentTab = "control-center";
 let explorerView = "jobs";
@@ -209,17 +209,14 @@ async function loadClusterHealth() {
             if (health.reasons && health.reasons.length) {
 
                 health.reasons.forEach(reason => {
-
                     const item = document.createElement("div");
-
-                    item.className = "small text-secondary";
-
+                    item.className = `small ${reason.healthy ? "text-secondary" : "text-warning"}`;
                     item.innerHTML = `
-                        <i class="bi bi-dot"></i>
-                        ${escapeHtml(reason)}
-                    `;
-
+                    <i class="bi bi-dot"></i>
+                    <strong>${escapeHtml(reason.label)}:</strong> ${escapeHtml(reason.detail)}
+    `;
                     list.appendChild(item);
+
 
                 });
 
@@ -240,8 +237,6 @@ async function loadClusterHealth() {
 
     }
 }
-
-
 
 
 
@@ -680,6 +675,30 @@ function setupControls() {
     });
 }
 
+async function openHealthInspector() {
+    try {
+        const details = await fetchJson("/health/details");
+        setText("drawer-title", "Health Inspector");
+        const body = document.getElementById("drawer-body");
+        body.innerHTML = Object.values(details.checks).map(c => `
+            <div class="gcon-panel mb-2">
+                <div class="gcon-panel-body">
+                    <div class="d-flex justify-content-between">
+                        <strong>${escapeHtml(c.label)}</strong>
+                        <span class="badge ${c.healthy ? "bg-success" : "bg-danger"}">
+                            ${c.healthy ? "Healthy" : "Unhealthy"}
+                        </span>
+                    </div>
+                    <div class="text-secondary small mt-1">${escapeHtml(c.detail)}</div>
+                </div>
+            </div>
+        `).join("");
+        openDrawer();
+    } catch (err) {
+        console.error("Failed to load health details:", err);
+    }
+}
+
 // ---------------------------------------------------------------
 // Management: Users
 // ---------------------------------------------------------------
@@ -1103,6 +1122,30 @@ function setupTeamsTab() {
         });
     }
 }
+let liveSocket = null;
+
+function connectLiveSocket() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    liveSocket = new WebSocket(`${proto}//${location.host}/ws`);
+
+    liveSocket.onmessage = (event) => {
+        if (isPaused) return;
+        const data = JSON.parse(event.data);
+        if (currentTab === "control-center") {
+            renderFeed("activity-feed", data.events);
+        }
+        setConnectionStatus(true);
+    };
+
+    liveSocket.onclose = () => {
+        setConnectionStatus(false);
+        setTimeout(connectLiveSocket, 5000);
+    };
+
+    liveSocket.onerror = () => liveSocket.close();
+}
+
+connectLiveSocket();
 
 // ---------------------------------------------------------------
 // Management: API Keys
@@ -1471,6 +1514,8 @@ function setupAuthMenu() {
         });
     }
 }
+
+
 
 // ---------------------------------------------------------------
 // Boot

@@ -26,7 +26,8 @@ class NodeRegistry:
             "cpu": 0.0,
             "memory": 0.0,
             "running_jobs": 0,
-            "resource_timestamp": None
+            "resource_timestamp": None,
+            "draining": False,
             
 }
         
@@ -39,6 +40,18 @@ class NodeRegistry:
             raise ValueError(f"Node '{node_id}' does not exist.")
 
         del self.nodes[node_id] 
+
+    def set_draining(self, node_id, draining):
+        """
+        Mark a node as draining (or not). A draining node keeps
+        running any job it's currently executing, but the scheduler
+        will not assign it new work.
+        """
+
+        if node_id not in self.nodes:
+            raise ValueError(f"Node '{node_id}' does not exist.")
+
+        self.nodes[node_id]["draining"] = draining
         
     def get_node(self, node_id):
         """
@@ -59,14 +72,14 @@ class NodeRegistry:
     
     def available_nodes(self):
         """
-        Return all idle nodes.
+        Return all idle, non-draining nodes.
         """
 
         return [     
         
         info["node"]
         for info in self.nodes.values()
-        if info["status"] == "idle"
+        if info["status"] == "idle" and not info.get("draining")
 ]
         
     def get_node_info(self, node_id):
@@ -79,7 +92,7 @@ class NodeRegistry:
 
         return self.nodes[node_id]
     
-    from datetime import datetime, UTC
+    
 
     def heartbeat(self, node_id, status, timestamp):
         """
@@ -89,8 +102,11 @@ class NodeRegistry:
         if node_id not in self.nodes:
             raise ValueError(f"Node '{node_id}' does not exist.")
 
-        self.nodes[node_id]["last_seen"] = timestamp
-        self.nodes[node_id]["status"] = status
+        info = self.nodes[node_id]
+        info["last_seen"] = timestamp
+        info["status"] = status
+        
+        
         
     def check_node_health(self):
         """
@@ -112,7 +128,8 @@ class NodeRegistry:
 
                 info["status"] = "offline"
                 offline_nodes.append(node_id)
-
+         
+        
         return offline_nodes
     
     
@@ -131,3 +148,9 @@ class NodeRegistry:
         info["running_jobs"] = resources["running_jobs"]
         info["resource_timestamp"] = resources["timestamp"]
         info["status"] = resources["status"]
+        
+        print(
+            f"[RESOURCE] {node_id}: "
+            f"status={resources['status']}, "
+            f"jobs={resources['running_jobs']}"
+)
