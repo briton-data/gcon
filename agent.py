@@ -136,6 +136,16 @@ class GCONAgent:
         self.metrics.append(metrics)
         return metrics
     
+    def cancel(self):
+        """
+        Terminate the currently running job's process, if any.
+        Returns True if a live process was actually killed.
+        """
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+            return True
+        return False
+
     def execute_job(self, job_id, job_script: str, timeout: Optional[int] = None) -> Dict[str, Any]:
         """
         Execute a job script and monitor execution.

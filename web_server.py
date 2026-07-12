@@ -71,15 +71,15 @@ class WebServer:
        
        
         @self.app.get("/cluster")
-        def cluster():
+        def cluster(user=Depends(self.current_user)):
             return self.presentation.get_cluster_state()    
             
         @self.app.get("/nodes")
-        def nodes():
+        def nodes(user=Depends(self.current_user)):
             return self.presentation.get_nodes()
         
         @self.app.get("/jobs")
-        def jobs():
+        def jobs(user=Depends(self.current_user)):
             return self.presentation.get_jobs()
 
         @self.app.get("/events")
@@ -95,17 +95,17 @@ class WebServer:
         # ---- Explorer views ----
 
         @self.app.get("/receipts")
-        def receipts():
+        def receipts(user=Depends(self.current_user)):
             return self.presentation.get_receipts()
 
         @self.app.get("/artifacts")
-        def artifacts():
+        def artifacts(user=Depends(self.current_user)):
             return self.presentation.get_artifacts()
 
         # ---- Real-Time Monitoring ----
 
         @self.app.get("/system-metrics")
-        def system_metrics():
+        def system_metrics(user=Depends(self.current_user)):
             return self.presentation.get_system_metrics()
 
         @self.app.get("/health")
@@ -115,13 +115,13 @@ class WebServer:
         # ---- Analytics & History ----
 
         @self.app.get("/analytics")
-        def analytics():
+        def analytics(user=Depends(self.current_user)):
             return self.presentation.get_analytics()
 
         # ---- Administration ----
 
         @self.app.get("/admin/config")
-        def admin_config():
+        def admin_config(user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.get_admin_config()
 
         @self.app.post("/admin/scale-up")
@@ -144,7 +144,7 @@ class WebServer:
             
 
         # ---- Live push (WebSocket) ----
-
+  
         @self.app.websocket("/ws")
         async def ws_live(websocket: WebSocket):
             session_token = websocket.cookies.get(
@@ -172,11 +172,11 @@ class WebServer:
 
         # ---- Management: Users ----
 
-        @self.app.get("/management/users")
-        def mgmt_users():
+        @self.app.put("/management/users")
+        def mgmt_users(user=Depends(self.require_permission("Manage users"))):
             return self.management.get_users()
 
-        @self.app.get("/management/users/{user_id}")
+        @self.app.post("/management/users/{user_id}")
         def mgmt_get_user(user_id: str,):
             return self.management.get_user(user_id)
 
@@ -222,7 +222,7 @@ class WebServer:
         # ---- Management: Organizations & Teams ----
 
         @self.app.get("/management/organizations")
-        def mgmt_organizations():
+        def mgmt_organizations(user=Depends(self.current_user)):
             return self.management.get_organizations()
 
         @self.app.get("/management/teams")
@@ -263,12 +263,13 @@ class WebServer:
             )
 
         @self.app.post("/management/api-keys/{key_id}/revoke")
-        def mgmt_revoke_api_key(key_id: str):
+        def mgmt_revoke_api_key(key_id: str, user=Depends(self.      require_permission("Manage api_keys"))):
             return self.management.revoke_api_key(key_id)
 
         @self.app.post("/management/api-keys/{key_id}/regenerate")
-        def mgmt_regenerate_api_key(key_id: str):
+        def mgmt_regenerate_api_key(key_id: str, user=Depends(self.require_permission("Manage api_keys"))):
             return self.management.regenerate_api_key(key_id)
+        
 
         # ---- Management: Audit log & notifications ----
 
@@ -278,11 +279,11 @@ class WebServer:
             return self.management.get_audit_logs()
 
         @self.app.get("/management/notifications")
-        def mgmt_notifications():
+        def mgmt_notifications(user=Depends(self.current_user)):
             return self.management.get_notifications()
 
         @self.app.post("/management/notifications/{notification_id}/read")
-        def mgmt_mark_notification_read(notification_id: str):
+        def mgmt_mark_notification_read(notification_id: str, user=Depends(self.current_user)):
             return self.management.mark_notification_read(notification_id)
 
         # ---- Management: dashboard cards & search ----
@@ -293,13 +294,18 @@ class WebServer:
             return self.management.get_dashboard_cards()
 
         @self.app.get("/management/search")
-        def mgmt_search(q: str = ""):
+        def mgmt_search(q: str = "", user=Depends(self.current_user)):
             return self.management.search(q)
-
+        
+        
+        @self.app.get("/health/details")
+        def cluster_health_details():
+            return self.presentation.get_health_details()
+        
         # ---- Management: export ----
 
         @self.app.get("/management/export/{entity}")
-        def mgmt_export(entity: str, format: str = "json"):
+        def mgmt_export(entity: str, format: str = "json",user=Depends(self.require_permission("Manage users"))):
             content, mime, filename = self.management.export(entity, format)
             return Response(
                 content=content,

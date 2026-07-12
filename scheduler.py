@@ -24,7 +24,7 @@ class Scheduler:
 
         for info in self.registry.nodes.values():
 
-            if info["status"] != "idle":
+            if info["status"] != "idle" or info.get("draining"):
                 continue
 
             score = (
@@ -55,4 +55,4 @@ class Scheduler:
         Return the number of registered nodes.
         """
 
-        return self.select_node() is not None
+        return len(self.registry.nodes)
