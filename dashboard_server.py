@@ -12,8 +12,14 @@ def main():
     agent3 = GCONAgent("node-003")
 
     coordinator.registry.register(agent1)
+    agent1.start_heartbeat(coordinator)
+    
     coordinator.registry.register(agent2)
+    agent2.start_heartbeat(coordinator)
+    
     coordinator.registry.register(agent3)
+    agent3.start_heartbeat(coordinator)
+    
     
     coordinator.submit_job(
     "job-001",
