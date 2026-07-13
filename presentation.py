@@ -109,10 +109,21 @@ class PresentationLayer:
             "JOB_STARTED": f"Job {job_id} started on {node_id}",
             "JOB_COMPLETED": f"Job {job_id} completed",
             "JOB_FAILED": f"Job {job_id} failed",
+            "JOB_CANCELLED": f"Job {job_id} cancelled",
+            
             "ARTIFACT_REGISTERED": f"Artifact registered for job {job_id}",
             "RECEIPT_GENERATED": f"Receipt generated for job {job_id}",
             "CLUSTER_STARTED": "Cluster started",
             "CLUSTER_STOPPED": "Cluster stopped",
+            
+            "SCHEDULER_PAUSED": "Scheduler paused",
+            "SCHEDULER_RESUMED": "Scheduler resumed",
+            "NODE_DRAINING": f"Node {node_id} draining — no new jobs will be assigned",
+            "NODE_RESTARTED": f"Node {node_id} restarted",
+            "QUEUE_CLEARED": f"Queue cleared ({len(payload.get('cleared_job_ids', []))} job(s))",
+            "FAILED_JOBS_RETRIED": f"Retried {len(payload.get('job_ids', []))} failed job(s)",
+            "FAILED_JOBS_CLEARED": f"Cleared {len(payload.get('job_ids', []))} failed job(s)",
+            "EMERGENCY_STOP": f"Emergency stop — cancelled {len(payload.get('cancelled_job_ids', []))} running job(s)",
         }
 
         return messages.get(event.event_type, f"{event.event_type} ({event.source})")
@@ -330,3 +341,117 @@ class PresentationLayer:
         """
         self.autoscaler.scale_down()
         return self.get_admin_config()
+    
+    
+    # ------------------------------------------------------------------
+# Operations Panel — scheduler control
+# ------------------------------------------------------------------
+
+    def pause_scheduler(self):
+        """
+        Stop assigning new jobs to nodes. Already-running jobs finish
+        normally.
+        """
+        self.coordinator.pause_scheduler()
+        return {"scheduler_paused": True}
+
+    def resume_scheduler(self):
+        """
+        Resume assigning queued jobs to idle nodes.
+        """
+        self.coordinator.resume_scheduler()
+        return {"scheduler_paused": False}
+    
+    
+    # ------------------------------------------------------------------
+# Operations Panel — node lifecycle control
+# ------------------------------------------------------------------
+
+    def drain_node(self, node_id):
+        """
+        Stop assigning new jobs to a node without interrupting the
+    job it may currently be running.
+        """
+        self.coordinator.drain_node(node_id)
+        return {"node_id": node_id, "draining": True}
+
+    def restart_worker(self, node_id):
+        """
+        Cancel a node's in-flight job (if any) and reset it to idle,
+        keeping it registered.
+        """
+        self.coordinator.restart_worker(node_id)
+        return {"node_id": node_id, "restarted": True}
+
+    def stop_worker(self, node_id):
+        """
+        Cancel a node's in-flight job (if any) and remove it from
+    the cluster entirely.
+        """
+        self.coordinator.stop_worker(node_id)
+        return {"node_id": node_id, "stopped": True}
+
+    def rediscover_nodes(self):
+        """
+        Force an immediate heartbeat freshness check across every
+        registered node, recovering jobs from any that have gone
+        silent.
+        """
+        return self.coordinator.rediscover_nodes()
+    
+    # ------------------------------------------------------------------
+# Operations Panel — job control
+# ------------------------------------------------------------------
+
+    def cancel_job(self, job_id):
+        """
+        Cancel a specific running job by killing its process.
+        """
+        killed = self.coordinator.cancel_job(job_id)
+        return {"job_id": job_id, "cancelled": True, "process_killed": killed}
+
+    def clear_queue(self):
+        """
+        Remove every job still waiting in the queue.
+        """
+        return {"cleared_job_ids": self.coordinator.clear_queue()}
+
+    def retry_failed_jobs(self):
+        """
+        Re-queue every currently failed job for another attempt.
+        """
+        return {"retried_job_ids": self.coordinator.retry_failed_jobs()}
+
+    def clear_failed_jobs(self):
+        """
+        Permanently drop every currently failed job.
+        """
+        return {"cleared_job_ids": self.coordinator.clear_failed_jobs()}
+    
+    # ------------------------------------------------------------------
+# Operations Panel — receipts, snapshots, export, emergency control
+# ------------------------------------------------------------------
+
+    def verify_all_receipts(self):
+        """
+        Cryptographically verify every stored receipt.
+        """
+        return self.coordinator.verify_all_receipts()
+
+    def get_cluster_snapshot(self):
+        """
+        Return a full point-in-time dump of cluster state.
+        """
+        return self.coordinator.get_cluster_snapshot()
+
+    def export_logs(self):
+        """
+        Return collected stdout/stderr for every job that has run.
+        """
+        return self.coordinator.export_logs()
+
+    def emergency_stop(self):
+        """
+        Pause the scheduler and cancel every currently running job.
+        """
+        return {"cancelled_job_ids": self.coordinator.emergency_stop()}

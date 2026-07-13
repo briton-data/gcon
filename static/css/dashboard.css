@@ -36,23 +36,6 @@ body {
     font-family: "Inter", sans-serif;
 }
 
-/* ---------- Navbar ---------- */
-
-.gcon-navbar {
-    background: var(--surface);
-}
-
-/* ---------- Sidebar ---------- */
-
-.gcon-sidebar {
-    background: var(--sidebar);
-    min-height: 100vh;
-}
-
-/* ==========================================================
-   Metric Cards
-   ========================================================== */
-
 /* ==========================================================
    Metric Cards
 ========================================================== */
@@ -152,14 +135,8 @@ body {
 
 .gcon-panel-body {
     min-height: 120px;
+    
 }
-
-/* ---------- Tables ---------- */
-
-.gcon-table {
-    width: 100%;
-}
-
 /* ---------- Status Badges ---------- */
 
 .gcon-status-badge {
@@ -487,4 +464,185 @@ body {
 .gcon-stat-tile .gcon-stat-label {
     font-size: .78rem;
     color: var(--muted);
+}
+
+/* ---------------------------------------------------------------
+   Operations Panel (button groups)
+   --------------------------------------------------------------- */
+
+.gcon-ops-select {
+    max-width: 200px;
+}
+
+#apikeys-reveal code {
+    color: var(--warning);
+}
+
+/* ---------------------------------------------------------------
+   Dark-themed Bootstrap modals
+   --------------------------------------------------------------- */
+
+.gcon-modal {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid #334155;
+}
+
+.gcon-modal .modal-header,
+.gcon-modal .modal-footer {
+    border-color: #334155;
+}
+
+.gcon-modal .form-control,
+.gcon-modal .form-select {
+    background: var(--bg);
+    color: var(--text);
+    border-color: #334155;
+}
+
+.gcon-modal .form-control:focus,
+.gcon-modal .form-select:focus {
+    background: var(--bg);
+    color: var(--text);
+    border-color: var(--primary);
+    box-shadow: 0 0 0 .2rem rgba(59, 130, 246, .25);
+}
+
+.gcon-modal .form-label {
+    color: var(--muted);
+}
+
+/* ---------------------------------------------------------------
+   Detail Drawer (user profiles, health inspector, snapshots)
+   --------------------------------------------------------------- */
+
+.gcon-drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .5);
+    z-index: 1040;
+}
+
+.gcon-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    width: min(440px, 92vw);
+    background: var(--surface);
+    border-left: 1px solid #334155;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, .35);
+    transform: translateX(100%);
+    transition: transform .2s ease;
+    z-index: 1050;
+    display: flex;
+    flex-direction: column;
+}
+
+.gcon-drawer.gcon-drawer-open {
+    transform: translateX(0);
+}
+
+.gcon-drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid #334155;
+}
+
+.gcon-drawer-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.ud-pane {
+    animation: gcon-fade-in .15s ease-in;
+}
+
+.gcon-drawer-tabs .nav-link {
+    color: var(--muted);
+    font-size: .85rem;
+}
+
+.gcon-drawer-tabs .nav-link.active {
+    background: var(--primary);
+    color: #fff;
+}
+
+/* ---------------------------------------------------------------
+   Global search results dropdown
+   --------------------------------------------------------------- */
+
+.gcon-search-results {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: var(--surface);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    max-height: 360px;
+    overflow-y: auto;
+    z-index: 1060;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
+}
+
+.gcon-search-group-label {
+    padding: 8px 12px 4px;
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--muted);
+}
+
+.gcon-search-result-item {
+    padding: 6px 12px;
+    font-size: .85rem;
+    color: var(--text);
+}
+
+.gcon-search-result-item:hover {
+    background: rgba(255, 255, 255, .05);
+}
+
+/* ---------------------------------------------------------------
+   Notifications & row links
+   --------------------------------------------------------------- */
+
+.gcon-notif-unread {
+    border-left-color: var(--warning);
+}
+
+.gcon-row-link {
+    cursor: pointer;
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.gcon-row-link:hover {
+    text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------
+   Cluster Health score
+   --------------------------------------------------------------- */
+
+.gcon-health-score {
+    font-size: 2.4rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+/* ---------------------------------------------------------------
+   Operations Panel result feedback
+   --------------------------------------------------------------- */
+
+#op-result.text-success {
+    color: var(--success) !important;
+}
+
+#op-result.text-danger {
+    color: var(--danger) !important;
 }

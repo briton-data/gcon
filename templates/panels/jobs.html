@@ -6,8 +6,8 @@
             Recent Jobs
         </h5>
 
-        <button class="btn btn-sm btn-outline-light">
-            Refresh
+        <button class="btn btn-sm btn-outline-light" id="jobs-refresh-btn">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
         </button>
 
     </div>
@@ -28,6 +28,7 @@
                         <th>Artifacts</th>
                         <th>Created</th>
                         <th>Completed</th>
+                        <th>Actions</th>
 
                     </tr>
 
@@ -89,6 +90,16 @@
 
                         <td>{{ job.completed_at or "-" }}</td>
 
+                        <td>
+                            {% if job.status == "running" %}
+                            <button class="btn btn-sm btn-outline-danger gcon-job-cancel-btn" data-job-id="{{ job.job_id }}">
+                                <i class="bi bi-x-circle me-1"></i>Cancel
+                            </button>
+                            {% else %}
+                            <span class="text-secondary">&mdash;</span>
+                            {% endif %}
+                        </td>
+
                     </tr>
 
                     {% endfor %}
@@ -97,7 +108,7 @@
 
                     <tr>
 
-                        <td colspan="6" class="text-center text-secondary">
+                        <td colspan="7" class="text-center text-secondary">
 
                             No jobs submitted.
 

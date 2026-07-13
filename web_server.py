@@ -1,3 +1,5 @@
+import json
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, Response
@@ -112,6 +114,7 @@ class WebServer:
         def cluster_health():
             return self.presentation.get_cluster_health()
 
+    
         # ---- Analytics & History ----
 
         @self.app.get("/analytics")
@@ -143,6 +146,7 @@ class WebServer:
 }
             
 
+   
         # ---- Live push (WebSocket) ----
   
         @self.app.websocket("/ws")
@@ -200,7 +204,11 @@ class WebServer:
         @self.app.put("/management/users/{user_id}")
         def mgmt_update_user(
             user_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),):
-            return self.management.get_user()
+            try:
+                return self.management.update_user(user_id, **payload)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
 
         @self.app.delete("/management/users/{user_id}")
         def mgmt_delete_user(
