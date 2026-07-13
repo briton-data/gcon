@@ -6,8 +6,8 @@
             Registered Nodes
         </h5>
 
-        <button class="btn btn-sm btn-outline-light">
-            Refresh
+        <button class="btn btn-sm btn-outline-light" id="nodes-refresh-btn">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
         </button>
 
     </div>
@@ -33,6 +33,8 @@
                         <th>Memory</th>
 
                         <th>Last Seen</th>
+
+                        <th>Actions</th>
 
                     </tr>
 
@@ -108,6 +110,22 @@
 
         </td>
 
+        <td>
+
+            <div class="btn-group">
+                <button class="btn btn-sm btn-outline-warning gcon-node-action-btn" data-action="drain" data-node-id="{{ node.node_id }}" title="Drain">
+                    <i class="bi bi-sign-turn-slight-right"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-info gcon-node-action-btn" data-action="restart" data-node-id="{{ node.node_id }}" title="Restart">
+                    <i class="bi bi-arrow-repeat"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger gcon-node-action-btn" data-action="stop" data-node-id="{{ node.node_id }}" title="Stop">
+                    <i class="bi bi-stop-circle"></i>
+                </button>
+            </div>
+
+        </td>
+
     </tr>
 
     {% endfor %}
@@ -116,7 +134,7 @@
 
 <tr>
 
-    <td colspan="6" class="text-center text-secondary">
+    <td colspan="7" class="text-center text-secondary">
 
         No registered nodes.
 

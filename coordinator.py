@@ -641,7 +641,8 @@ class GCONCoordinator:
 
         print(f"[JOBS] Cleared {len(cleared)} completed job(s).")
         return cleared
-
+    
+     
     def rediscover_nodes(self):
         """
         Re-check every node's heartbeat freshness right now (rather
@@ -1056,5 +1057,5 @@ class GCONCoordinator:
         drill-down view (one entry per branch, each with its own
         metrics and explanation).
         """
-        return self.health_service.health()
+        return self.health_service.compute()
     
