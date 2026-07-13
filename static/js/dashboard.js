@@ -263,63 +263,243 @@ async function loadCluster() {
     }
 }
 
-async function loadNodes() {
-    const body = document.getElementById("nodes-body");
-    if (!body) return;
-    try {
-        const nodes = await fetchJson("/nodes");
-        if (nodes.length === 0) {
-            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No registered nodes.</td></tr>`;
-            return;
-        }
-        let rows = "";
-        for (const node of nodes) {
-            rows += `
-                <tr>
-                    <td>${escapeHtml(node.node_id)}</td>
-                    <td>${statusBadge(node.status)}</td>
-                    <td>${escapeHtml(node.running_jobs)}</td>
-                    <td>${escapeHtml(node.cpu)}</td>
-                    <td>${escapeHtml(node.memory)}</td>
-                    <td>${escapeHtml(node.last_seen)}</td>
-                </tr>
-            `;
-        }
-        body.innerHTML = rows;
-    } catch (err) {
-        console.error("Failed to load nodes:", err);
-        setConnectionStatus(false);
-    }
+function nodeActionButtons(node) {
+    return `
+        <div class="btn-group">
+            <button class="btn btn-sm btn-outline-warning gcon-node-action-btn"
+                data-action="drain"
+                data-node-id="${escapeHtml(node.node_id)}"
+                title="Drain">
+                <i class="bi bi-sign-turn-slight-right"></i>
+            </button>
+
+            <button class="btn btn-sm btn-outline-info gcon-node-action-btn"
+                data-action="restart"
+                data-node-id="${escapeHtml(node.node_id)}"
+                title="Restart">
+                <i class="bi bi-arrow-repeat"></i>
+            </button>
+
+            <button class="btn btn-sm btn-outline-danger gcon-node-action-btn"
+                data-action="stop"
+                data-node-id="${escapeHtml(node.node_id)}"
+                title="Stop">
+                <i class="bi bi-stop-circle"></i>
+            </button>
+        </div>
+    `;
 }
 
-async function loadJobs() {
-    const body = document.getElementById("jobs-body");
-    if (!body) return;
-    try {
-        const jobs = await fetchJson("/jobs");
-        if (jobs.length === 0) {
-            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No jobs submitted.</td></tr>`;
-            return;
-        }
-        let rows = "";
-        for (const job of jobs) {
-            rows += `
-                <tr>
-                    <td>${escapeHtml(job.job_id)}</td>
-                    <td>${statusBadge(job.status)}</td>
-                    <td>${escapeHtml(job.node_id || "-")}</td>
-                    <td>${escapeHtml(job.artifacts)}</td>
-                    <td>${escapeHtml(job.created_at || "-")}</td>
-                    <td>${escapeHtml(job.completed_at || "-")}</td>
-                </tr>
-            `;
-        }
-        body.innerHTML = rows;
-    } catch (err) {
-        console.error("Failed to load jobs:", err);
-        setConnectionStatus(false);
-    }
+function bindNodeActionButtons() {
+    document.querySelectorAll(".gcon-node-action-btn").forEach(btn => {
+
+        btn.addEventListener("click", async () => {
+
+            const action = btn.dataset.action;
+            const nodeId = btn.dataset.nodeId;
+
+            if (
+                action === "stop" &&
+                !confirm(`Stop and remove node ${nodeId} from the cluster?`)
+            ) {
+                return;
+            }
+
+            btn.disabled = true;
+
+            try {
+
+                await fetchJson(
+                    `/cluster/nodes/${encodeURIComponent(nodeId)}/${action}`,
+                    {
+                        method: "POST",
+                    }
+                );
+
+                await refreshDashboard();
+
+            } catch (err) {
+
+                console.error(`Failed to ${action} node:`, err);
+
+                alert(err.message || `Failed to ${action} node.`);
+
+                btn.disabled = false;
+
+            }
+
+        });
+
+    });
 }
+
+async function loadNodes() {
+
+    const body = document.getElementById("nodes-body");
+
+    if (!body) return [];
+
+    try {
+
+        const nodes = await fetchJson("/nodes");
+
+        if (nodes.length === 0) {
+
+            body.innerHTML =
+                `<tr><td colspan="7" class="text-center text-secondary">No registered nodes.</td></tr>`;
+
+        } else {
+
+            let rows = "";
+
+            for (const node of nodes) {
+
+                rows += `
+                    <tr>
+                        <td>${escapeHtml(node.node_id)}</td>
+                        <td>${statusBadge(node.status)}</td>
+                        <td>${escapeHtml(node.running_jobs)}</td>
+                        <td>${escapeHtml(node.cpu)}</td>
+                        <td>${escapeHtml(node.memory)}</td>
+                        <td>${escapeHtml(node.last_seen)}</td>
+                        <td>${nodeActionButtons(node)}</td>
+                    </tr>
+                `;
+
+            }
+
+            body.innerHTML = rows;
+
+            bindNodeActionButtons();
+
+        }
+
+        return nodes;
+
+    } catch (err) {
+
+        console.error("Failed to load nodes:", err);
+
+        setConnectionStatus(false);
+
+        return [];
+
+    }
+
+}
+
+function jobActionCell(job) {
+
+    if (job.status !== "running") {
+        return `<span class="text-secondary">&mdash;</span>`;
+    }
+
+    return `
+        <button class="btn btn-sm btn-outline-danger gcon-job-cancel-btn"
+            data-job-id="${escapeHtml(job.job_id)}">
+            <i class="bi bi-x-circle me-1"></i>
+            Cancel
+        </button>
+    `;
+}
+
+function bindJobActionButtons() {
+
+    document.querySelectorAll(".gcon-job-cancel-btn").forEach(btn => {
+
+        btn.addEventListener("click", async () => {
+
+            const jobId = btn.dataset.jobId;
+
+            if (!confirm(`Cancel running job ${jobId}?`)) {
+                return;
+            }
+
+            btn.disabled = true;
+
+            try {
+
+                await fetchJson(
+                    `/jobs/${encodeURIComponent(jobId)}/cancel`,
+                    {
+                        method: "POST",
+                    }
+                );
+
+                await refreshDashboard();
+
+            } catch (err) {
+
+                console.error("Failed to cancel job:", err);
+
+                alert(err.message || "Failed to cancel job.");
+
+                btn.disabled = false;
+
+            }
+
+        });
+
+    });
+
+}
+
+
+async function loadJobs() {
+
+    const body = document.getElementById("jobs-body");
+
+    if (!body) return [];
+
+    try {
+
+        const jobs = await fetchJson("/jobs");
+
+        if (jobs.length === 0) {
+
+            body.innerHTML =
+                `<tr><td colspan="7" class="text-center text-secondary">No jobs submitted.</td></tr>`;
+
+        } else {
+
+            let rows = "";
+
+            for (const job of jobs) {
+
+                rows += `
+                    <tr>
+                        <td>${escapeHtml(job.job_id)}</td>
+                        <td>${statusBadge(job.status)}</td>
+                        <td>${escapeHtml(job.node_id || "-")}</td>
+                        <td>${escapeHtml(job.artifacts)}</td>
+                        <td>${escapeHtml(job.created_at || "-")}</td>
+                        <td>${escapeHtml(job.completed_at || "-")}</td>
+                        <td>${jobActionCell(job)}</td>
+                    </tr>
+                `;
+
+            }
+
+            body.innerHTML = rows;
+
+            bindJobActionButtons();
+
+        }
+
+        return jobs;
+
+    } catch (err) {
+
+        console.error("Failed to load jobs:", err);
+
+        setConnectionStatus(false);
+
+        return [];
+
+    }
+
+}
+
 
 async function loadEvents() {
     try {
@@ -332,8 +512,335 @@ async function loadEvents() {
 }
 
 async function loadControlCenter() {
-    await Promise.all([
-        loadCluster(), loadNodes(), loadJobs(), loadClusterHealth(), loadEvents()]);
+
+    const [, nodes, jobs] = await Promise.all([
+        loadCluster(),
+        loadNodes(),
+        loadJobs(),
+        loadClusterHealth(),
+        loadEvents()
+    ]);
+
+    populateOperationsSelectors(nodes, jobs);
+
+}
+
+function populateOperationsSelectors(nodes, jobs) {
+
+    if (nodes !== undefined) {
+
+        const nodeSelect = document.getElementById("op-node-select");
+
+        if (nodeSelect) {
+
+            const current = nodeSelect.value;
+
+            nodeSelect.innerHTML =
+                `<option value="">Select node…</option>` +
+                nodes.map(n =>
+                    `<option value="${escapeHtml(n.node_id)}">
+                        ${escapeHtml(n.node_id)}
+                        (${escapeHtml(n.status)})
+                    </option>`
+                ).join("");
+
+            if (nodes.some(n => n.node_id === current)) {
+                nodeSelect.value = current;
+            }
+
+        }
+
+    }
+
+    if (jobs !== undefined) {
+
+        const jobSelect = document.getElementById("op-job-select");
+
+        if (jobSelect) {
+
+            const current = jobSelect.value;
+
+            const running =
+                jobs.filter(j => j.status === "running");
+
+            jobSelect.innerHTML =
+                `<option value="">Select running job…</option>` +
+                running.map(j =>
+                    `<option value="${escapeHtml(j.job_id)}">
+                        ${escapeHtml(j.job_id)}
+                        (${escapeHtml(j.node_id || "-")})
+                    </option>`
+                ).join("");
+
+            if (running.some(j => j.job_id === current)) {
+                jobSelect.value = current;
+            }
+
+        }
+
+    }
+
+}
+
+function setOpResult(message, isError) {
+
+    const el = document.getElementById("op-result");
+
+    if (!el) return;
+
+    el.textContent = message;
+
+    el.className =
+        isError
+            ? "mt-3 small text-danger"
+            : "mt-3 small text-success";
+
+}
+
+async function opCall(url, options, successMessage) {
+
+    try {
+
+        const data = await fetchJson(url, options);
+
+        setOpResult(successMessage || "Done.", false);
+
+        await refreshDashboard();
+
+        return data;
+
+    } catch (err) {
+
+        console.error(`Operation failed (${url}):`, err);
+
+        setOpResult(err.message || "Action failed.", true);
+
+        throw err;
+
+    }
+    bind(
+        "op-drain-node-btn",
+        async () => {
+
+            const nodeId =
+                document.getElementById("op-node-select").value;
+
+            if (!nodeId) {
+
+                setOpResult("Select a node first.", true);
+
+                return;
+
+            }
+
+            await opCall(
+                `/cluster/nodes/${encodeURIComponent(nodeId)}/drain`,
+                { method: "POST" },
+                `Node ${nodeId} is draining.`
+            );
+
+        }
+    );
+
+    bind(
+        "op-restart-worker-btn",
+        async () => {
+
+            const nodeId =
+                document.getElementById("op-node-select").value;
+
+            if (!nodeId) {
+
+                setOpResult("Select a node first.", true);
+
+                return;
+
+            }
+
+            await opCall(
+                `/cluster/nodes/${encodeURIComponent(nodeId)}/restart`,
+                { method: "POST" },
+                `Node ${nodeId} restarted.`
+            );
+
+        }
+    );
+
+    bind(
+        "op-stop-worker-btn",
+        async () => {
+
+            const nodeId =
+                document.getElementById("op-node-select").value;
+
+            if (!nodeId) {
+
+                setOpResult("Select a node first.", true);
+
+                return;
+
+            }
+
+            if (
+                !confirm(
+                    `Stop and remove node ${nodeId} from the cluster?`
+                )
+            ) {
+                return;
+            }
+
+            await opCall(
+                `/cluster/nodes/${encodeURIComponent(nodeId)}/stop`,
+                { method: "POST" },
+                `Node ${nodeId} stopped and removed.`
+            );
+
+        }
+    );
+}
+
+function setupOperationsPanel() {
+
+    const bind = (id, handler) => {
+
+        const btn = document.getElementById(id);
+
+        if (btn) {
+
+            btn.addEventListener("click", () =>
+                handler().catch(() => {})
+            );
+
+        }
+
+    };
+
+    bind(
+        "op-pause-scheduler-btn",
+        () => opCall(
+            "/cluster/scheduler/pause",
+            { method: "POST" },
+            "Scheduler paused — no new jobs will be assigned."
+        )
+    );
+
+    bind(
+        "op-resume-scheduler-btn",
+        () => opCall(
+            "/cluster/scheduler/resume",
+            { method: "POST" },
+            "Scheduler resumed."
+        )
+    );
+
+    bind(
+        "op-refresh-cluster-btn",
+        () => opCall(
+            "/cluster",
+            {},
+            "Cluster state refreshed."
+        )
+    );
+
+    bind(
+        "op-emergency-stop-btn",
+        async () => {
+
+            if (
+                !confirm(
+                    "Emergency stop: pause the scheduler and cancel every running job?"
+                )
+            ) {
+                return;
+            }
+
+            await opCall(
+                "/cluster/emergency-stop",
+                { method: "POST" },
+                "Emergency stop triggered."
+            );
+
+        }
+    );
+
+        bind(
+        "op-cancel-job-btn",
+        async () => {
+
+            const jobId =
+                document.getElementById("op-job-select").value;
+
+            if (!jobId) {
+
+                setOpResult("Select a running job first.", true);
+
+                return;
+
+            }
+
+            if (!confirm(`Cancel job ${jobId}?`)) {
+                return;
+            }
+
+            await opCall(
+                `/jobs/${encodeURIComponent(jobId)}/cancel`,
+                {
+                    method: "POST",
+                },
+                `Job ${jobId} cancelled.`
+            );
+
+        }
+    );
+
+    bind(
+        "op-verify-receipts-btn",
+        () => opCall(
+            "/receipts/verify-all",
+            {
+                method: "POST",
+            },
+            "Receipt verification started."
+        )
+    );
+
+    bind(
+        "op-export-events-btn",
+        () => {
+
+            window.open(
+                "/events/export",
+                "_blank"
+            );
+
+            setOpResult(
+                "Export started.",
+                false
+            );
+
+            return Promise.resolve();
+
+        }
+    );
+
+    bind(
+        "op-cluster-snapshot-btn",
+        () => {
+
+            window.open(
+                "/cluster/snapshot",
+                "_blank"
+            );
+
+            setOpResult(
+                "Snapshot generated.",
+                false
+            );
+
+            return Promise.resolve();
+
+        }
+    );
 }
 
 // ---------------------------------------------------------------
@@ -350,6 +857,7 @@ async function loadTopology() {
     } catch (err) {
         console.error("Failed to load topology:", err);
         setConnectionStatus(false);
+ 
     }
 }
 
@@ -444,51 +952,122 @@ function setupExplorerNav() {
 }
 
 function filterExplorerData(query) {
-    if (!query) return explorerData;
+
+    if (!query) {
+        return explorerData;
+    }
     const q = query.toLowerCase();
+
     return explorerData.filter(row =>
-        Object.values(row).some(v => String(v).toLowerCase().includes(q))
+        Object.values(row).some(value =>
+
+            String(value ?? "")
+                .toLowerCase()
+                .includes(q)
+        )
     );
 }
 
 function renderExplorerRows(rows) {
-    const thead = document.getElementById("explorer-thead");
-    const body = document.getElementById("explorer-body");
+
+    const thead =
+        document.getElementById("explorer-thead");
+
+    const body =
+        document.getElementById("explorer-body");
+
     if (!thead || !body) return;
 
-    const columns = EXPLORER_COLUMNS[explorerView];
-    const headers = EXPLORER_HEADERS[explorerView];
+    const columns =
+        EXPLORER_COLUMNS[explorerView];
 
-    thead.innerHTML = `<tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr>`;
+    const headers =
+        EXPLORER_HEADERS[explorerView];
 
-    if (rows.length === 0) {
-        body.innerHTML = `<tr><td colspan="${columns.length}" class="text-center text-secondary">No data.</td></tr>`;
+    thead.innerHTML =
+        `<tr>${
+            headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")
+        }</tr>`;
+
+    if (!rows.length) {
+
+        body.innerHTML =
+            `<tr>
+                <td colspan="${columns.length}"
+                    class="text-center text-secondary">
+                    No data.
+                </td>
+            </tr>`;
+
         return;
+
     }
 
     let html = "";
-    for (const row of rows) {
+
+    rows.forEach(row => {
+
         html += "<tr>";
-        for (const col of columns) {
-            const value = row[col];
-            html += EXPLORER_BADGE_COLUMNS.has(col)
-                ? `<td>${statusBadge(value)}</td>`
-                : `<td>${escapeHtml(value ?? "-")}</td>`;
-        }
+
+        columns.forEach(column => {
+
+            const value = row[column];
+
+            if (EXPLORER_BADGE_COLUMNS.has(column)) {
+
+                html +=
+                    `<td>${statusBadge(value)}</td>`;
+
+            } else {
+
+                html +=
+                    `<td>${escapeHtml(value ?? "-")}</td>`;
+            }
+
+        });
+
         html += "</tr>";
-    }
+
+    });
+
     body.innerHTML = html;
 }
 
 async function loadExplorer() {
+
     try {
-        explorerData = await fetchJson(`/${explorerView}`);
-        const search = document.getElementById("explorer-search");
-        renderExplorerRows(filterExplorerData(search ? search.value : ""));
+
+        explorerData =
+            await fetchJson(`/${explorerView}`);
+
+        const search =
+            document.getElementById(
+                "explorer-search"
+            );
+
+        renderExplorerRows(
+
+            filterExplorerData(
+
+                search
+                    ? search.value
+                    : ""
+
+            )
+
+        );
+
     } catch (err) {
-        console.error("Failed to load explorer data:", err);
+
+        console.error(
+            "Failed to load explorer:",
+            err
+        );
+
         setConnectionStatus(false);
+
     }
+
 }
 
 // ---------------------------------------------------------------
@@ -496,8 +1075,14 @@ async function loadExplorer() {
 // ---------------------------------------------------------------
 
 async function loadMonitoring() {
+
     try {
-        const metrics = await fetchJson("/system-metrics");
+
+        const [metrics, events] = await Promise.all([
+            fetchJson("/system-metrics"),
+            fetchJson("/events"),
+        ]);
+
         setText("sm-avg-cpu", `${metrics.avg_cpu}%`);
         setText("sm-avg-memory", `${metrics.avg_memory}%`);
         setText("sm-running", metrics.running_jobs);
@@ -505,10 +1090,16 @@ async function loadMonitoring() {
         setText("sm-uptime", formatUptime(metrics.uptime_seconds));
         setText("sm-connection", "Live");
 
-        const events = await fetchJson("/events");
-        renderFeed("monitoring-activity-feed", events);
+        renderFeed(
+            "monitoring-activity-feed",
+            events
+        );
     } catch (err) {
-        console.error("Failed to load monitoring data:", err);
+
+        console.error(
+            "Failed to load monitoring:",
+            err
+        );
         setConnectionStatus(false);
         setText("sm-connection", "Down");
     }
@@ -543,18 +1134,48 @@ function renderBarChart(totals) {
 }
 
 async function loadAnalytics() {
+
     try {
-        const data = await fetchJson("/analytics");
-        setText("an-success-rate", `${data.success_rate}%`);
-        setText("an-completed", data.totals.completed);
-        setText("an-failed", data.totals.failed);
-        setText("an-pending", data.totals.pending);
-        renderBarChart(data.totals);
-        renderFeed("analytics-timeline", data.timeline);
+
+        const analytics =
+            await fetchJson("/analytics");
+
+        setText(
+            "an-success-rate",
+            `${analytics.success_rate}%`
+        );
+
+        setText(
+            "an-completed",
+            analytics.totals.completed
+        );
+
+        setText(
+            "an-failed",
+            analytics.totals.failed
+        );
+
+        setText(
+            "an-pending",
+            analytics.totals.pending
+        );
+
+        renderBarChart(
+            analytics.totals
+        );
+        renderFeed(
+            "analytics-timeline",
+            analytics.timeline
+        );
+
     } catch (err) {
-        console.error("Failed to load analytics:", err);
+        console.error(
+            "Failed to load analytics:",
+            err
+        );
         setConnectionStatus(false);
     }
+
 }
 
 // ---------------------------------------------------------------
@@ -641,8 +1262,12 @@ async function triggerScale(direction) {
 // ---------------------------------------------------------------
 
 async function refreshDashboard() {
-    loadActiveTab();
-    setText("last-updated", new Date().toLocaleTimeString());
+   await loadActiveTab();
+    refreshHealthInspector();
+    setText(
+        "last-updated",
+        new Date().toLocaleTimeString()
+);
 }
 
 function updateClock() {
@@ -672,33 +1297,88 @@ function setupControls() {
     ["cc-scale-down-btn", "admin-scale-down-btn"].forEach(id => {
         const btn = document.getElementById(id);
         if (btn) btn.addEventListener("click", () => triggerScale("down"));
+  
     });
-}
 
-async function openHealthInspector() {
-    try {
-        const details = await fetchJson("/health/details");
-        setText("drawer-title", "Health Inspector");
-        const body = document.getElementById("drawer-body");
-        body.innerHTML = Object.values(details.checks).map(c => `
-            <div class="gcon-panel mb-2">
-                <div class="gcon-panel-body">
-                    <div class="d-flex justify-content-between">
-                        <strong>${escapeHtml(c.label)}</strong>
-                        <span class="badge ${c.healthy ? "bg-success" : "bg-danger"}">
-                            ${c.healthy ? "Healthy" : "Unhealthy"}
-                        </span>
-                    </div>
-                    <div class="text-secondary small mt-1">${escapeHtml(c.detail)}</div>
-                </div>
-            </div>
-        `).join("");
-        openDrawer();
-    } catch (err) {
-        console.error("Failed to load health details:", err);
+    setupOperationsPanel();
+
+    const inspectorBtn =
+        document.getElementById("health-inspector-btn");
+
+    if (inspectorBtn) {
+
+        inspectorBtn.addEventListener(
+            "click",
+            openHealthInspector
+        );
+
     }
 }
 
+
+async function openHealthInspector() {
+
+    try {
+
+        const details = await fetchJson("/health/details");
+
+        setText("drawer-title", "Health Inspector");
+
+        const body =
+            document.getElementById("drawer-body");
+
+        body.innerHTML = "";
+
+        Object.values(details.checks).forEach(check => {
+
+            body.innerHTML += `
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-body">
+
+                        <div class="d-flex justify-content-between align-items-center">
+
+                            <strong>${escapeHtml(check.label)}</strong>
+
+                            <span class="badge ${check.healthy ? "bg-success" : "bg-danger"}">
+                                ${check.healthy ? "Healthy" : "Unhealthy"}
+                            </span>
+
+                        </div>
+
+                        <div class="small text-secondary mt-2">
+                            ${escapeHtml(check.detail)}
+                        </div>
+
+                    </div>
+                </div>
+            `;
+
+        });
+
+        openDrawer();
+
+    } catch (err) {
+
+        console.error(
+            "Failed to load health inspector:",
+            err
+        );
+
+    }
+
+}
+
+function refreshHealthInspector() {
+    const drawer =
+        document.getElementById("drawer");
+    if ( drawer &&
+        drawer.classList.contains("show")
+    ) {
+        openHealthInspector();
+
+    }
+
+}
 // ---------------------------------------------------------------
 // Management: Users
 // ---------------------------------------------------------------

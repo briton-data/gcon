@@ -32,16 +32,85 @@
             <!-- ================================================= -->
             <div class="gcon-tab" id="tab-control-center">
 
-                <div class="gcon-panel mb-4">
-                    <div class="gcon-panel-body d-flex flex-wrap gap-2 align-items-center">
-                        <span class="text-secondary me-2">Operations:</span>
-                        <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">
-                            <i class="bi bi-plus-circle me-1"></i>Scale Up
-                        </button>
-                        <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">
-                            <i class="bi bi-dash-circle me-1"></i>Scale Down
-                        </button>
-                        <span class="ms-auto badge bg-dark" id="cc-node-summary">-- nodes</span>
+                <div class="gcon-panel mb-4" id="operations-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Operations</h5>
+                        <span class="badge bg-dark" id="cc-node-summary">-- nodes</span>
+                    </div>
+                    <div class="gcon-panel-body">
+
+                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <span class="text-secondary small me-1">Cluster:</span>
+                            <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">
+                                <i class="bi bi-plus-circle me-1"></i>Scale Up
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">
+                                <i class="bi bi-dash-circle me-1"></i>Scale Down
+                            </button>
+                            <button class="btn btn-sm btn-outline-warning" id="op-pause-scheduler-btn">
+                                <i class="bi bi-pause-circle me-1"></i>Pause Scheduler
+                            </button>
+                            <button class="btn btn-sm btn-outline-success" id="op-resume-scheduler-btn">
+                                <i class="bi bi-play-circle me-1"></i>Resume Scheduler
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-refresh-cluster-btn">
+                                <i class="bi bi-arrow-clockwise me-1"></i>Refresh Cluster
+                            </button>
+                            <button class="btn btn-sm btn-danger ms-auto" id="op-emergency-stop-btn">
+                                <i class="bi bi-exclamation-octagon me-1"></i>Emergency Stop
+                            </button>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <span class="text-secondary small me-1">Node:</span>
+                            <select class="form-select form-select-sm w-auto" id="op-node-select">
+                                <option value="">Select node…</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-warning" id="op-drain-node-btn">
+                                <i class="bi bi-sign-turn-slight-right me-1"></i>Drain Node
+                            </button>
+                            <button class="btn btn-sm btn-outline-info" id="op-restart-worker-btn">
+                                <i class="bi bi-arrow-repeat me-1"></i>Restart Worker
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" id="op-stop-worker-btn">
+                                <i class="bi bi-stop-circle me-1"></i>Stop Worker
+                            </button>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <span class="text-secondary small me-1">Jobs:</span>
+                            <select class="form-select form-select-sm w-auto" id="op-job-select">
+                                <option value="">Select running job…</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-danger" id="op-cancel-job-btn">
+                                <i class="bi bi-x-circle me-1"></i>Cancel Running Job
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-clear-queue-btn">
+                                <i class="bi bi-trash me-1"></i>Clear Queue
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-retry-failed-btn">
+                                <i class="bi bi-arrow-counterclockwise me-1"></i>Retry Failed Jobs
+                            </button>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                            <span class="text-secondary small me-1">Data:</span>
+                            <button class="btn btn-sm btn-outline-light" id="op-verify-receipts-btn">
+                                <i class="bi bi-patch-check me-1"></i>Verify Receipts
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-export-logs-btn">
+                                <i class="bi bi-file-earmark-text me-1"></i>Export Logs
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-export-metrics-btn">
+                                <i class="bi bi-file-earmark-bar-graph me-1"></i>Export Metrics
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="op-snapshot-btn">
+                                <i class="bi bi-camera me-1"></i>Snapshot Cluster
+                            </button>
+                        </div>
+
+                        <div id="op-result" class="mt-3 small"></div>
+
                     </div>
                 </div>
 
@@ -360,6 +429,13 @@
                                 <option value="viewer">Viewer</option>
                             </select>
 
+                            <button class="btn btn-sm btn-outline-light" id="users-export-csv" title="Export CSV">
+                                <i class="bi bi-filetype-csv me-1"></i>CSV
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="users-export-json" title="Export JSON">
+                                <i class="bi bi-filetype-json me-1"></i>JSON
+                            </button>
+
                             <button class="btn btn-sm btn-primary ms-auto" id="users-add-btn">
                                 <i class="bi bi-person-plus me-1"></i>Add User
                             </button>
@@ -432,41 +508,143 @@
 
             </div>
 
-            <!-- Management placeholders (coming soon) -->
+            <!-- Organizations -->
             <div class="gcon-tab d-none" id="tab-organizations">
-                {% with icon="bi-building", title="Organizations", body="Multi-org support (teams, storage usage, job history per org) is planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Organizations</h5>
+                        <button class="btn btn-sm btn-primary" id="org-create-btn">
+                            <i class="bi bi-plus-circle me-1"></i>New Organization
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Plan</th>
+                                        <th>Members</th>
+                                        <th>Teams</th>
+                                        <th>Storage Used</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="organizations-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Teams -->
             <div class="gcon-tab d-none" id="tab-teams">
-                {% with icon="bi-diagram-2", title="Teams", body="Team membership and team administrators are planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-diagram-2 me-2"></i>Teams</h5>
+                        <button class="btn btn-sm btn-primary" id="team-create-btn">
+                            <i class="bi bi-plus-circle me-1"></i>New Team
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Organization</th>
+                                        <th>Members</th>
+                                        <th>Team Admin</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="teams-body">
+                                    <tr><td colspan="4" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- API Keys -->
             <div class="gcon-tab d-none" id="tab-api-keys">
-                {% with icon="bi-key", title="API Keys", body="Programmatic access — create/revoke keys, scopes, and usage stats — is planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-key me-2"></i>API Keys</h5>
+                        <button class="btn btn-sm btn-primary" id="apikeys-create-btn">
+                            <i class="bi bi-plus-circle me-1"></i>Generate Key
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div id="apikeys-reveal" class="alert alert-warning d-none"></div>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Key</th>
+                                        <th>Created</th>
+                                        <th>Expires</th>
+                                        <th>Last Used</th>
+                                        <th>Scopes</th>
+                                        <th>Status</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="apikeys-body">
+                                    <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Permissions -->
             <div class="gcon-tab d-none" id="tab-permissions">
-                {% with icon="bi-shield-lock", title="Roles &amp; Permissions", body="Fine-grained RBAC (Owner/Administrator/Operator/Developer/Viewer with per-capability permissions) is planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-shield-lock me-2"></i>Roles &amp; Permissions</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead id="permissions-thead"></thead>
+                                <tbody id="permissions-body">
+                                    <tr><td class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Audit Logs -->
             <div class="gcon-tab d-none" id="tab-audit-logs">
-                {% with icon="bi-journal-text", title="Audit Logs", body="A platform-wide audit trail of user and admin actions is planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-journal-text me-2"></i>Audit Logs</h5>
+                        <span class="badge bg-success">Live</span>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="audit-log-feed">
+                            <div class="text-secondary">Loading...</div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Notifications -->
             <div class="gcon-tab d-none" id="tab-notifications">
-                {% with icon="bi-bell", title="Notifications", body="Platform event notifications (node failures, storage warnings, workflow completions) are planned for a future update." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-bell me-2"></i>Notifications</h5>
+                        <span class="badge bg-success">Live</span>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="notifications-list">
+                            <div class="text-secondary">Loading...</div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
         </div>
@@ -476,54 +654,155 @@
 
 </div>
 
-<!-- Add/Edit User Modal -->
-<div class="modal fade" id="user-form-modal" tabindex="-1">
+<!-- Add User Modal -->
+<div class="modal fade" id="addUserModal" tabindex="-1">
     <div class="modal-dialog">
-        <div class="modal-content">
+        <div class="modal-content gcon-modal">
             <div class="modal-header">
-                <h5 class="modal-title" id="user-form-title">Add User</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <h5 class="modal-title">Add User</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <form id="user-form">
-                    <input type="hidden" id="user-form-id">
-                    <div class="mb-3">
-                        <label class="form-label">Full name</label>
-                        <input type="text" class="form-control" id="user-form-name" required>
+                <div class="mb-3">
+                    <label class="form-label">Full name</label>
+                    <input type="text" class="form-control" id="add-user-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input type="email" class="form-control" id="add-user-email" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Password (optional)</label>
+                    <input type="password" class="form-control" id="add-user-password" placeholder="Leave blank to set later">
+                </div>
+                <div class="row">
+                    <div class="col-6 mb-3">
+                        <label class="form-label">Role</label>
+                        <select class="form-select" id="add-user-role">
+                            <option value="Owner">Owner</option>
+                            <option value="Administrator">Administrator</option>
+                            <option value="Operator" selected>Operator</option>
+                            <option value="Developer">Developer</option>
+                            <option value="Viewer">Viewer</option>
+                        </select>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Email</label>
-                        <input type="email" class="form-control" id="user-form-email" required>
+                    <div class="col-6 mb-3">
+                        <label class="form-label">Organization</label>
+                        <select class="form-select" id="add-user-org">
+                            <option value="">No organization</option>
+                        </select>
                     </div>
-                    <div class="row">
-                        <div class="col-6 mb-3">
-                            <label class="form-label">Role</label>
-                            <select class="form-select" id="user-form-role">
-                                <option value="owner">Owner</option>
-                                <option value="administrator">Administrator</option>
-                                <option value="operator" selected>Operator</option>
-                                <option value="developer">Developer</option>
-                                <option value="viewer">Viewer</option>
-                            </select>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <label class="form-label">Status</label>
-                            <select class="form-select" id="user-form-status">
-                                <option value="active" selected>Active</option>
-                                <option value="pending">Pending</option>
-                                <option value="suspended">Suspended</option>
-                                <option value="disabled">Disabled</option>
-                            </select>
-                        </div>
-                    </div>
-                </form>
+                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" id="user-form-save-btn">Save User</button>
+                <button type="button" class="btn btn-primary" id="add-user-submit">Save User</button>
             </div>
         </div>
     </div>
+</div>
+
+<!-- Create Organization Modal -->
+<div class="modal fade" id="createOrgModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">New Organization</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-control" id="create-org-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Plan</label>
+                    <select class="form-select" id="create-org-plan">
+                        <option value="Free">Free</option>
+                        <option value="Pro" selected>Pro</option>
+                        <option value="Enterprise">Enterprise</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="create-org-submit">Create Organization</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Team Modal -->
+<div class="modal fade" id="createTeamModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">New Team</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="create-team-error" class="alert alert-danger d-none"></div>
+                <div class="mb-3">
+                    <label class="form-label">Organization</label>
+                    <select class="form-select" id="create-team-org"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Team name</label>
+                    <input type="text" class="form-control" id="create-team-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Team admin</label>
+                    <select class="form-select" id="create-team-admin">
+                        <option value="">Unassigned</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="create-team-submit">Create Team</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create API Key Modal -->
+<div class="modal fade" id="createKeyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Generate API Key</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">Key name</label>
+                    <input type="text" class="form-control" id="create-key-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Owner</label>
+                    <select class="form-select" id="create-key-owner"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Expires in (days, 0 = never)</label>
+                    <input type="number" class="form-control" id="create-key-expires" value="90" min="0">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="create-key-submit">Generate Key</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Shared Detail Drawer (user profiles, health inspector, etc.) -->
+<div id="drawer-backdrop" class="gcon-drawer-backdrop d-none"></div>
+<div id="detail-drawer" class="gcon-drawer">
+    <div class="gcon-drawer-header">
+        <h5 class="mb-0" id="drawer-title">Details</h5>
+        <button type="button" class="btn-close btn-close-white" id="drawer-close-btn"></button>
+    </div>
+    <div class="gcon-drawer-body" id="drawer-body"></div>
 </div>
 
 {% endblock %}
