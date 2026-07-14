@@ -9,7 +9,7 @@ is retrievable, matching how most platforms handle API secrets.
 import secrets
 from datetime import datetime, UTC, timedelta
 from uuid import uuid4
-
+import hmac
 
 def _generate_secret():
     return f"gcon_{secrets.token_hex(20)}"
@@ -85,33 +85,29 @@ class APIKeyManager:
     def list_keys(self):
         return list(self.keys.values())
 
+    def find_by_secret(self, secret):
+        """
+        Look up an active key by its raw secret, for use by the
+        public API's authentication layer. Uses a constant-time
+        comparison to avoid leaking timing information.
+        """
+        if not secret:
+            return None
+        for key in self.keys.values():
+            
+            if hmac.compare_digest(key.secret, secret):
+                return key
+        return None
 
-def seed_api_keys(manager, users):
-    """
-    Populate the manager with illustrative demo API keys.
-    """
-    if not users:
-        return []
-
-    created = []
-    presets = [
-        ("CI/CD Pipeline", ["Submit workflows", "View monitoring"], 90),
-        ("Monitoring Integration", ["View monitoring", "Access analytics"], 180),
-        ("Legacy Script (expired)", ["Submit workflows"], -1),
-    ]
-
-    for i, (name, scopes, days) in enumerate(presets):
-        owner = users[i % len(users)]
-        key = manager.create_key(name, owner.user_id, scopes, expires_in_days=abs(days) or None)
-
-        if days < 0:
-            # Force this one into the past to illustrate an expired key.
-            key.expires_at = datetime.now(UTC) - timedelta(days=5)
+    def is_valid(self, key):
+        """
+        Return True if a key is active and not expired.
+        """
+        if key.status != "Active":
+            return False
+        if key.expires_at and datetime.now(UTC) > key.expires_at:
             key.status = "Expired"
-        else:
-            key.mark_used()
-            key.usage_count = (i + 1) * 37
+            return False
+        return True
 
-        created.append(key)
 
-    return created

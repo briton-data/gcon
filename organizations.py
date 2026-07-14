@@ -77,19 +77,3 @@ class OrganizationRegistry:
             teams = [t for t in teams if t.org_id == org_id]
         return teams
 
-
-def seed_organizations(registry):
-    """
-    Populate the registry with illustrative demo organizations and teams.
-    """
-    acme = registry.add_organization("Acme Compute", plan="Enterprise")
-    acme.storage_used_gb = 128.4
-
-    nimbus = registry.add_organization("Nimbus Labs", plan="Standard")
-    nimbus.storage_used_gb = 42.1
-
-    registry.add_team(acme.org_id, "Platform Engineering")
-    registry.add_team(acme.org_id, "Data Science")
-    registry.add_team(nimbus.org_id, "Core")
-
-    return [acme, nimbus]

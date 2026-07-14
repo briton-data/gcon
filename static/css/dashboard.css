@@ -474,6 +474,41 @@ body {
     max-width: 200px;
 }
 
+#operations-panel .gcon-panel-body > .d-flex {
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, .06);
+}
+
+#operations-panel .gcon-panel-body > .d-flex:last-of-type {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+#operations-panel .gcon-panel-body > .d-flex:first-of-type {
+    padding-top: 0;
+}
+
+#operations-panel .text-secondary.small {
+    width: 56px;
+    flex-shrink: 0;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: .72rem;
+}
+
+#operations-panel .form-select {
+    min-width: 170px;
+}
+
+#operations-panel .btn {
+    white-space: nowrap;
+}
+
+#op-result {
+    min-height: 1.2em;
+}
+
 #apikeys-reveal code {
     color: var(--warning);
 }
@@ -645,4 +680,87 @@ body {
 
 #op-result.text-danger {
     color: var(--danger) !important;
+}
+
+/* ==========================================================
+   Responsive — laptop screens (1366x768 and similar)
+   ========================================================== */
+
+@media (max-width: 1400px) {
+
+    .gcon-metric-card {
+        height: 120px;
+        padding: 16px;
+    }
+
+    .gcon-metric-value {
+        font-size: 1.9rem;
+    }
+
+    .gcon-metric-icon {
+        font-size: 1.6rem;
+    }
+
+    .gcon-panel {
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+
+    .gcon-panel-body {
+        min-height: 0;
+    }
+
+    #operations-panel .text-secondary.small {
+        width: 48px;
+    }
+
+    #operations-panel .form-select {
+        min-width: 140px;
+    }
+}
+
+@media (max-height: 800px) {
+
+    .gcon-sidebar {
+        min-height: calc(100vh - 56px);
+        overflow-y: auto;
+    }
+
+    .gcon-activity-feed-lg {
+        max-height: 320px;
+    }
+
+    .gcon-drawer-body {
+        padding: 14px 20px;
+    }
+}
+
+@media (max-width: 1400px), (max-height: 800px) {
+
+    .container-fluid > .row > .col-lg-10 {
+        padding: 1rem !important;
+    }
+
+    #operations-panel .gcon-panel-body > .d-flex {
+        padding: 8px 0;
+        gap: .4rem !important;
+    }
+
+    #operations-panel .btn-sm {
+        padding: .2rem .55rem;
+        font-size: .78rem;
+    }
+}
+
+@media (max-width: 992px) {
+
+    .gcon-sidebar {
+        min-height: auto;
+    }
+
+    #operations-panel .text-secondary.small {
+        width: auto;
+        margin-bottom: 4px;
+        flex-basis: 100%;
+    }
 }

@@ -12,6 +12,7 @@ generated from real coordinator events (see _bridge_cluster_events)
 rather than pre-seeded demo text.
 """
 
+
 import csv
 import io
 import json
@@ -19,12 +20,19 @@ from datetime import datetime, UTC
 
 import rbac
 from auth import SessionManager
-from users import UserRegistry, seed_users
-from organizations import OrganizationRegistry, seed_organizations
-from api_keys import APIKeyManager, seed_api_keys
-from audit_log import AuditLogger, seed_audit_log
+from users import UserRegistry, bootstrap_owner_account
+from organizations import OrganizationRegistry
+from api_keys import APIKeyManager
+from audit_log import AuditLogger
 from notifications import NotificationCenter
+import os
 
+# Bootstrap owner account, created once on first boot. Overridable
+# via environment variables for deployments that don't want this
+# exact identity hard-coded in source control.
+BOOTSTRAP_OWNER_NAME = os.environ.get("GCON_OWNER_NAME", "Briton Nyongesa")
+BOOTSTRAP_OWNER_EMAIL = os.environ.get("GCON_OWNER_EMAIL", "nyongesabriton620@gmail.com")
+BOOTSTRAP_OWNER_PASSWORD = os.environ.get("GCON_OWNER_PASSWORD", "GCON2024")
 
 class ManagementLayer:
     def __init__(self, coordinator=None):
@@ -37,15 +45,23 @@ class ManagementLayer:
         self.notification_center = NotificationCenter()
         self.session_manager = SessionManager()
 
-        self._seed_demo_data()
+        self._bootstrap_owner_account()
         self._bridge_cluster_events()
 
-    def _seed_demo_data(self):
-        orgs = seed_organizations(self.org_registry)
-        org_ids = [o.org_id for o in orgs]
-        users = seed_users(self.user_registry, org_ids)
-        seed_api_keys(self.api_key_manager, users)
-        seed_audit_log(self.audit_logger)
+    
+    def _bootstrap_owner_account(self):
+        """
+        Create the one real account that exists on first boot, so
+        there's a way to log in. No demo users, organizations, API
+        keys, or audit entries are created.
+        """
+        bootstrap_owner_account(
+            self.user_registry,
+            BOOTSTRAP_OWNER_NAME,
+            BOOTSTRAP_OWNER_EMAIL,
+            BOOTSTRAP_OWNER_PASSWORD,
+    )
+        self.audit_logger.log("System", "created user", BOOTSTRAP_OWNER_NAME)
 
     # Real coordinator events -> notifications. This replaces the old
     # seed_notifications() demo text: every notification below is
@@ -70,6 +86,51 @@ class ManagementLayer:
         ),
     }
 
+    def create_organization(self, name, plan="Standard"):
+        org = self.org_registry.add_organization(name, plan)
+        self.audit_logger.log("Admin", "created organization", org.name)
+        data = org.to_dict()
+        data["member_count"] = 0
+        data["team_count"] = 0
+        return data
+    
+    def create_team(self, org_id, name, admin_user_id=None):
+        team = self.org_registry.add_team(org_id, name, admin_user_id)
+        self.audit_logger.log("Admin", "created team", team.name)
+        data = team.to_dict()
+        data["member_count"] = 0
+        return data
+       
+    def authenticate_api_key(self, secret, required_scope=None):
+        """
+        Validate a raw API key secret for the public API (see
+        api_v1.py). Returns (key, owner_user) on success, raises
+        ValueError on any failure (unknown key, revoked, expired,
+        missing scope, or disabled owner) with a generic message so
+        the failure reason can't be used to enumerate valid keys.
+        """
+        key = self.api_key_manager.find_by_secret(secret)
+        if not key or not self.api_key_manager.is_valid(key):
+            raise ValueError("Invalid or expired API key.")
+
+        if required_scope and required_scope not in (key.scopes or []):
+            raise ValueError(f"This API key does not have the '{required_scope}' scope.")
+
+        owner = None
+        try:
+            owner = self.user_registry.get_user(key.owner_user_id)
+        except ValueError:
+            owner = None
+
+        if owner is not None and owner.status != "Active":
+            raise ValueError("Invalid or expired API key.")
+
+        key.mark_used()
+        if owner is not None:
+            owner.stats["api_requests"] += 1
+
+        return key, owner   
+    
     def _bridge_cluster_events(self):
         """
         Subscribe the notification center to the coordinator's real

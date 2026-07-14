@@ -9,9 +9,13 @@ from fastapi import Request
 from management_layer import ManagementLayer
 from fastapi import Cookie, HTTPException, Depends
 from fastapi.responses import RedirectResponse
+from api_v1 import create_api_v1_app
+
 from auth import SESSION_COOKIE_NAME
 import asyncio
 import uvicorn
+
+
 
 
 """
@@ -45,7 +49,14 @@ class WebServer:
             name="static"
         )
         self._register_routes()
+        
+        
+        # Versioned, API-key-authenticated public API — independent of
+        # the dashboard's cookie-session auth used everywhere else.
+        self.api_v1_app = create_api_v1_app(self.management, self.presentation)
+        self.app.mount("/api/v1", self.api_v1_app)
 
+        
     
     def _register_routes(self):
         """
@@ -114,7 +125,96 @@ class WebServer:
         def cluster_health():
             return self.presentation.get_cluster_health()
 
-    
+        # ---- Operations Panel: scheduler control ----
+
+        @self.app.post("/cluster/scheduler/pause")
+        def cluster_pause_scheduler(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.pause_scheduler()
+
+        @self.app.post("/cluster/scheduler/resume")
+        def cluster_resume_scheduler(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.resume_scheduler()
+
+        # ---- Operations Panel: node lifecycle control ----
+
+        @self.app.post("/cluster/nodes/{node_id}/drain")
+        def cluster_drain_node(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.drain_node(node_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.post("/cluster/nodes/{node_id}/restart")
+        def cluster_restart_node(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.restart_worker(node_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.post("/cluster/nodes/{node_id}/stop")
+        def cluster_stop_node(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.stop_worker(node_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        # ---- Operations Panel: job control ----
+
+        @self.app.post("/jobs/{job_id}/cancel")
+        def job_cancel(job_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.cancel_job(job_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/cluster/queue/clear")
+        def cluster_clear_queue(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.clear_queue()
+
+        @self.app.post("/jobs/retry-failed")
+        def jobs_retry_failed(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.retry_failed_jobs()
+
+        @self.app.post("/jobs/clear-failed")
+        def jobs_clear_failed(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.clear_failed_jobs()
+
+        # ---- Operations Panel: receipts, snapshots, export, emergency ----
+
+        @self.app.post("/receipts/verify-all")
+        def receipts_verify_all(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.verify_all_receipts()
+
+        @self.app.get("/cluster/snapshot")
+        def cluster_snapshot(user=Depends(self.require_permission("Manage cluster"))):
+            snapshot = self.presentation.get_cluster_snapshot()
+            return Response(
+                content=json.dumps(jsonable_encoder(snapshot), indent=2),
+                media_type="application/json",
+                headers={"Content-Disposition": "attachment; filename=cluster-snapshot.json"},
+            )
+
+        @self.app.get("/logs/export")
+        def logs_export(user=Depends(self.require_permission("Manage cluster"))):
+            return Response(
+                content=self.presentation.export_logs(),
+                media_type="text/plain",
+                headers={"Content-Disposition": "attachment; filename=gcon-logs.txt"},
+            )
+
+        @self.app.get("/metrics/export")
+        def metrics_export(user=Depends(self.require_permission("Manage cluster"))):
+            metrics = self.presentation.get_metrics()
+            return Response(
+                content=json.dumps(jsonable_encoder(metrics), indent=2),
+                media_type="application/json",
+                headers={"Content-Disposition": "attachment; filename=gcon-metrics.json"},
+            )
+
+        @self.app.post("/cluster/emergency-stop")
+        def cluster_emergency_stop(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.emergency_stop()
+
         # ---- Analytics & History ----
 
         @self.app.get("/analytics")
@@ -136,6 +236,10 @@ class WebServer:
         def admin_scale_down( 
             user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.scale_down()
+
+        @self.app.post("/admin/rediscover-nodes")
+        def admin_rediscover_nodes(user=Depends(self.require_permission("Manage cluster"))):
+            return self.presentation.rediscover_nodes()
 
         @self.app.post("/admin/nodes/{node_id}/deregister")
         def admin_deregister_node(
@@ -176,14 +280,17 @@ class WebServer:
 
         # ---- Management: Users ----
 
-        @self.app.put("/management/users")
+        @self.app.get("/management/users")
         def mgmt_users(user=Depends(self.require_permission("Manage users"))):
             return self.management.get_users()
 
-        @self.app.post("/management/users/{user_id}")
-        def mgmt_get_user(user_id: str,):
-            return self.management.get_user(user_id)
-
+        @self.app.get("/management/users/{user_id}")
+        def mgmt_get_user(user_id: str, user=Depends(self.require_permission("Manage users"))):
+            try:
+                return self.management.get_user(user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+        
         @self.app.post("/management/users")
         def mgmt_create_user(payload:
             dict,user=Depends(self.require_permission("Manage users")), ):
@@ -219,9 +326,12 @@ class WebServer:
 
         @self.app.post("/management/users/{user_id}/status")
         def mgmt_set_user_status(
-            user_id: str, payload: dict,user=Depends(self.require_permission("Manage post")),
+            user_id: str, payload: dict,user=Depends(self.require_permission("Manage users")),
 ):
-            return self.management.get_user()
+            try:
+                return self.management.set_user_status(user_id, payload["status"])
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
         @self.app.get("/management/user-counts")
         def mgmt_user_counts():
@@ -234,29 +344,54 @@ class WebServer:
             return self.management.get_organizations()
 
         @self.app.get("/management/teams")
-        def mgmt_teams():
+        def mgmt_teams(user=Depends(self.current_user)):
             return self.management.get_teams()
+        
+        @self.app.post("/management/organizations")
+        def mgmt_create_organization(
+            payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.create_organization(
+                name=payload["name"],
+                plan=payload.get("plan", "Standard"),
+        )
+            except (KeyError, ValueError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
+        @self.app.post("/management/teams")
+        def mgmt_create_team(
+            payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.create_team(
+                    org_id=payload["org_id"],
+                    name=payload["name"],
+                    admin_user_id=payload.get("admin_user_id"),
+        )
+            except (KeyError, ValueError) as e:
+                raise HTTPException(status_code=400, detail=str(e))    
 
         # ---- Management: RBAC ----
 
         @self.app.get("/management/roles")
-        def mgmt_roles(  user=Depends(self.require_permission("Manage roles"))):
+        def mgmt_roles(  user=Depends(self.require_permission("Manage users"))):
             return self.management.get_roles()
 
         @self.app.get("/management/permissions")
         def mgmt_permissions(
-            user=Depends(self.require_permission("Manage permission"))):
+            user=Depends(self.require_permission("Manage users"))):
             return self.management.get_permissions()
 
         @self.app.get("/management/permission-matrix")
-        def mgmt_permission_matrix():
+        def mgmt_permission_matrix(user=Depends(self.current_user)):
             return self.management.get_permission_matrix()
 
         # ---- Management: API Keys ----
 
         @self.app.get("/management/api-keys")
         def mgmt_api_keys(  
-            user=Depends(self.require_permission("Manage api_keys"))):
+            user=Depends(self.require_permission("Manage API keys"))):
             return self.management.get_api_keys()
 
         @self.app.post("/management/api-keys")
@@ -271,11 +406,11 @@ class WebServer:
             )
 
         @self.app.post("/management/api-keys/{key_id}/revoke")
-        def mgmt_revoke_api_key(key_id: str, user=Depends(self.      require_permission("Manage api_keys"))):
+        def mgmt_revoke_api_key(key_id: str, user=Depends(self.require_permission("Manage API keys"))):
             return self.management.revoke_api_key(key_id)
 
         @self.app.post("/management/api-keys/{key_id}/regenerate")
-        def mgmt_regenerate_api_key(key_id: str, user=Depends(self.require_permission("Manage api_keys"))):
+        def mgmt_regenerate_api_key(key_id: str, user=Depends(self.require_permission("Manage API keys"))):
             return self.management.regenerate_api_key(key_id)
         
 
@@ -283,7 +418,7 @@ class WebServer:
 
         @self.app.get("/management/audit-logs")
         def mgmt_audit_logs(
-            user=Depends(self.require_permission("Manage audit_logs"))):
+            user=Depends(self.require_permission("Manage users"))):
             return self.management.get_audit_logs()
 
         @self.app.get("/management/notifications")
@@ -298,7 +433,7 @@ class WebServer:
 
         @self.app.get("/management/dashboard-cards")
         def mgmt_dashboard_cards(
-            user=Depends(self.require_permission("Manage dashboard_cards"))):
+            user=Depends(self.require_permission("Manage users"))):
             return self.management.get_dashboard_cards()
 
         @self.app.get("/management/search")
