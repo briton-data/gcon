@@ -26,18 +26,3 @@ class AuditLogger:
 
     def list_entries(self, limit=100):
         return list(reversed(self.entries[-limit:]))
-
-
-def seed_audit_log(logger):
-    """
-    Populate the log with illustrative demo entries.
-    """
-    seed_entries = [
-        ("Avery Chen", "created workflow", "Workflow A"),
-        ("Priya Nair", "deregistered node", "node-004"),
-        ("Marcus Webb", "generated API key", "CI/CD Pipeline"),
-        ("Avery Chen", "changed permissions", "Sofia Ramirez"),
-        ("System", "created organization", "Nimbus Labs"),
-    ]
-    for actor, action, target in seed_entries:
-        logger.log(actor, action, target)

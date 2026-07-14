@@ -42,13 +42,3 @@ class NotificationCenter:
 
     def unread_count(self):
         return sum(1 for e in self.entries if not e["read"])
-
-
-def seed_notifications(center):
-    """
-    Populate the center with illustrative demo notifications.
-    """
-    center.notify("user_registered", "Ken Osei registered and is pending approval")
-    center.notify("api_key_created", "Marcus Webb created API key 'CI/CD Pipeline'")
-    center.notify("workflow_completed", "Workflow A completed successfully")
-    center.notify("storage_warning", "Acme Compute is at 85% of its storage quota")

@@ -618,6 +618,72 @@ async function opCall(url, options, successMessage) {
         throw err;
 
     }
+}
+
+function setupOperationsPanel() {
+
+    const bind = (id, handler) => {
+
+        const btn = document.getElementById(id);
+
+        if (btn) {
+
+            btn.addEventListener("click", () =>
+                handler().catch(() => {})
+            );
+
+        }
+
+    };
+
+    bind(
+        "op-pause-scheduler-btn",
+        () => opCall(
+            "/cluster/scheduler/pause",
+            { method: "POST" },
+            "Scheduler paused — no new jobs will be assigned."
+        )
+    );
+
+    bind(
+        "op-resume-scheduler-btn",
+        () => opCall(
+            "/cluster/scheduler/resume",
+            { method: "POST" },
+            "Scheduler resumed."
+        )
+    );
+
+    bind(
+        "op-refresh-cluster-btn",
+        () => opCall(
+            "/cluster",
+            {},
+            "Cluster state refreshed."
+        )
+    );
+
+    bind(
+        "op-emergency-stop-btn",
+        async () => {
+
+            if (
+                !confirm(
+                    "Emergency stop: pause the scheduler and cancel every running job?"
+                )
+            ) {
+                return;
+            }
+
+            await opCall(
+                "/cluster/emergency-stop",
+                { method: "POST" },
+                "Emergency stop triggered."
+            );
+
+        }
+    );
+
     bind(
         "op-drain-node-btn",
         async () => {
@@ -697,73 +763,8 @@ async function opCall(url, options, successMessage) {
 
         }
     );
-}
-
-function setupOperationsPanel() {
-
-    const bind = (id, handler) => {
-
-        const btn = document.getElementById(id);
-
-        if (btn) {
-
-            btn.addEventListener("click", () =>
-                handler().catch(() => {})
-            );
-
-        }
-
-    };
 
     bind(
-        "op-pause-scheduler-btn",
-        () => opCall(
-            "/cluster/scheduler/pause",
-            { method: "POST" },
-            "Scheduler paused — no new jobs will be assigned."
-        )
-    );
-
-    bind(
-        "op-resume-scheduler-btn",
-        () => opCall(
-            "/cluster/scheduler/resume",
-            { method: "POST" },
-            "Scheduler resumed."
-        )
-    );
-
-    bind(
-        "op-refresh-cluster-btn",
-        () => opCall(
-            "/cluster",
-            {},
-            "Cluster state refreshed."
-        )
-    );
-
-    bind(
-        "op-emergency-stop-btn",
-        async () => {
-
-            if (
-                !confirm(
-                    "Emergency stop: pause the scheduler and cancel every running job?"
-                )
-            ) {
-                return;
-            }
-
-            await opCall(
-                "/cluster/emergency-stop",
-                { method: "POST" },
-                "Emergency stop triggered."
-            );
-
-        }
-    );
-
-        bind(
         "op-cancel-job-btn",
         async () => {
 
@@ -794,6 +795,32 @@ function setupOperationsPanel() {
     );
 
     bind(
+        "op-clear-queue-btn",
+        async () => {
+
+            if (!confirm("Remove every job still waiting in the queue?")) {
+                return;
+            }
+
+            await opCall(
+                "/cluster/queue/clear",
+                { method: "POST" },
+                "Queue cleared."
+            );
+
+        }
+    );
+
+    bind(
+        "op-retry-failed-btn",
+        () => opCall(
+            "/jobs/retry-failed",
+            { method: "POST" },
+            "Failed jobs re-queued."
+        )
+    );
+
+    bind(
         "op-verify-receipts-btn",
         () => opCall(
             "/receipts/verify-all",
@@ -805,11 +832,11 @@ function setupOperationsPanel() {
     );
 
     bind(
-        "op-export-events-btn",
+        "op-export-logs-btn",
         () => {
 
             window.open(
-                "/events/export",
+                "/logs/export",
                 "_blank"
             );
 
@@ -824,7 +851,26 @@ function setupOperationsPanel() {
     );
 
     bind(
-        "op-cluster-snapshot-btn",
+        "op-export-metrics-btn",
+        () => {
+
+            window.open(
+                "/metrics/export",
+                "_blank"
+            );
+
+            setOpResult(
+                "Export started.",
+                false
+            );
+
+            return Promise.resolve();
+
+        }
+    );
+
+    bind(
+        "op-snapshot-btn",
         () => {
 
             window.open(
@@ -1302,8 +1348,14 @@ function setupControls() {
 
     setupOperationsPanel();
 
+    const nodesRefreshBtn = document.getElementById("nodes-refresh-btn");
+    if (nodesRefreshBtn) nodesRefreshBtn.addEventListener("click", loadNodes);
+
+    const jobsRefreshBtn = document.getElementById("jobs-refresh-btn");
+    if (jobsRefreshBtn) jobsRefreshBtn.addEventListener("click", loadJobs);
+
     const inspectorBtn =
-        document.getElementById("health-inspector-btn");
+        document.getElementById("open-health-inspector-btn");
 
     if (inspectorBtn) {
 
@@ -1370,9 +1422,10 @@ async function openHealthInspector() {
 
 function refreshHealthInspector() {
     const drawer =
-        document.getElementById("drawer");
+        document.getElementById("detail-drawer");
     if ( drawer &&
-        drawer.classList.contains("show")
+        drawer.classList.contains("gcon-drawer-open") &&
+        document.getElementById("drawer-title")?.textContent === "Health Inspector"
     ) {
         openHealthInspector();
 
