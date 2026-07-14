@@ -1,13 +1,13 @@
 """
 GCON Users — user records and an in-memory user registry.
 
-GCON has no authentication system yet, so this registry is seeded
-with illustrative demo users rather than backed by real accounts.
-Per-user job/workflow/usage statistics are likewise demo figures,
-since the coordinator does not currently attribute jobs to users.
+Authentication is real (PBKDF2-HMAC-SHA256, see auth.py). On first
+boot the registry is bootstrapped with exactly one real account (the
+platform owner) so there's a way to log in before any signup/invite
+flow exists — no illustrative/demo users are created.
 """
 
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, UTC
 from uuid import uuid4
 
 from auth import hash_password, verify_password
@@ -36,8 +36,9 @@ class User:
         self.last_active = datetime.now(UTC)
         self.password_hash = None
 
-        # Demo/seed usage figures — GCON does not yet attribute real
-        # jobs or workflows to individual users.
+        # Real per-user usage counters. These start at zero and are
+        # incremented as the user actually does things (logs in,
+        # makes API requests, etc.) rather than being pre-filled.
         self.stats = {
             "jobs_submitted": 0,
             "jobs_running": 0,
@@ -131,46 +132,16 @@ class UserRegistry:
         }
 
 
-def seed_users(registry, organization_ids):
+def bootstrap_owner_account(registry, name, email, password, organization_id=None):
     """
-    Populate the registry with illustrative demo users.
+    Create the single real bootstrap account (the platform owner) on
+    first boot, so there's a way to log in before any signup/invite
+    flow exists. Replaces the old seed_users() demo-data function.
     """
-    demo = [
-        ("Avery Chen", "avery.chen@example.com", "Owner", "Active"),
-        ("Priya Nair", "priya.nair@example.com", "Administrator", "Active"),
-        ("Marcus Webb", "marcus.webb@example.com", "Operator", "Active"),
-        ("Sofia Ramirez", "sofia.ramirez@example.com", "Developer", "Active"),
-        ("Ken Osei", "ken.osei@example.com", "Developer", "Pending"),
-        ("Lena Novak", "lena.novak@example.com", "Viewer", "Suspended"),
-        ("Tariq Hassan", "tariq.hassan@example.com", "Operator", "Disabled"),
-    ]
-
-    orgs = list(organization_ids) or [None]
-    created = []
-
-    for i, (name, email, role, status) in enumerate(demo):
-        user = registry.add_user(
-            name, email, role,
-            organization_id=orgs[i % len(orgs)],
-            status=status,
-        )
-        # Demo credential — every seeded account uses this password so
-        # the login flow can be tried out. Real accounts created via
-        # the "Add User" form must have their own password set.
-        user.set_password("gcon-demo-2026")
-        # Vary last_active for realism.
-        user.last_active = datetime.now(UTC) - timedelta(hours=i * 7)
-        user.stats.update({
-            "jobs_submitted": (i + 1) * 12,
-            "jobs_running": i % 3,
-            "jobs_failed": i % 4,
-            "jobs_completed": (i + 1) * 10,
-            "workflows_created": i + 1,
-            "cpu_usage": round(10 + i * 7.5, 1),
-            "storage_usage_gb": round(1.2 + i * 3.4, 1),
-            "api_requests": (i + 1) * 84,
-            "login_count": (i + 1) * 5,
-        })
-        created.append(user)
-
-    return created
+    user = registry.add_user(
+        name, email, "Owner",
+        organization_id=organization_id,
+        status="Active",
+    )
+    user.set_password(password)
+    return user
