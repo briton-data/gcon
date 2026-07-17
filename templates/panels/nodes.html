@@ -1,0 +1,155 @@
+<div class="gcon-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+
+        <h5 class="mb-0">
+            Registered Nodes
+        </h5>
+
+        <button class="btn btn-sm btn-outline-light" id="nodes-refresh-btn">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+
+    </div>
+
+    <div class="gcon-panel-body">
+
+        <div class="table-responsive">
+
+            <table class="table table-dark table-hover align-middle gcon-table">
+
+                <thead>
+
+                    <tr>
+
+                        <th>Node ID</th>
+
+                        <th>Status</th>
+
+                        <th>Running Jobs</th>
+
+                        <th>CPU</th>
+
+                        <th>Memory</th>
+
+                        <th>Last Seen</th>
+
+                        <th>Actions</th>
+
+                    </tr>
+
+                </thead>
+
+              <tbody id="nodes-body">
+
+{% if dashboard.nodes %}
+
+    {% for node in dashboard.nodes %}
+
+    <tr>
+
+        <td>
+
+            {{ node.node_id }}
+
+        </td>
+
+        <td>
+
+            {% if node.status == "idle" %}
+
+                <span class="badge bg-success">
+                    Idle
+                </span>
+
+            {% elif node.status == "busy" %}
+
+                <span class="badge bg-primary">
+                    Busy
+                </span>
+
+            {% elif node.status == "offline" %}
+
+                <span class="badge bg-danger">
+                    Offline
+                </span>
+
+            {% else %}
+
+                <span class="badge bg-secondary">
+
+                    {{ node.status }}
+
+                </span>
+
+            {% endif %}
+
+        </td>
+
+        <td>
+
+            {{ node.running_jobs }}
+
+        </td>
+
+        <td>
+
+            {{ node.cpu }}
+
+        </td>
+
+        <td>
+
+            {{ node.memory }}
+
+        </td>
+
+        <td>
+
+            {{ node.last_seen }}
+
+        </td>
+
+        <td>
+
+            <div class="btn-group">
+                <button class="btn btn-sm btn-outline-warning gcon-node-action-btn" data-action="drain" data-node-id="{{ node.node_id }}" title="Drain">
+                    <i class="bi bi-sign-turn-slight-right"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-info gcon-node-action-btn" data-action="restart" data-node-id="{{ node.node_id }}" title="Restart">
+                    <i class="bi bi-arrow-repeat"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger gcon-node-action-btn" data-action="stop" data-node-id="{{ node.node_id }}" title="Stop">
+                    <i class="bi bi-stop-circle"></i>
+                </button>
+            </div>
+
+        </td>
+
+    </tr>
+
+    {% endfor %}
+
+{% else %}
+
+<tr>
+
+    <td colspan="7" class="text-center text-secondary">
+
+        No registered nodes.
+
+    </td>
+
+</tr>
+
+{% endif %}
+
+</tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+</div>

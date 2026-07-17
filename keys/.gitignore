@@ -1,0 +1,8 @@
+# Ignore generated key material
+*.pem
+*.key
+*.der
+
+# Keep documentation
+!README.md
+!.gitignore
