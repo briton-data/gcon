@@ -67,8 +67,8 @@ def cluster():
     daemon threads accumulate for the life of the pytest process; this
     is acceptable for a bounded test run but is itself worth noting).
     """
-    from coordinator import GCONCoordinator
-    from agent import GCONAgent
+    from gcon.cluster.coordinator import GCONCoordinator
+    from gcon.execution.agent import GCONAgent
 
     coordinator = GCONCoordinator()
     agents = []
@@ -81,8 +81,8 @@ def cluster():
 
 @pytest.fixture
 def single_node_cluster():
-    from coordinator import GCONCoordinator
-    from agent import GCONAgent
+    from gcon.cluster.coordinator import GCONCoordinator
+    from gcon.execution.agent import GCONAgent
 
     coordinator = GCONCoordinator()
     agent = GCONAgent(node_id="solo-node")
@@ -156,7 +156,7 @@ class TestConcurrency:
         registry.nodes directly (no lock) while nodes register/deregister
         concurrently.
         """
-        from agent import GCONAgent
+        from gcon.execution.agent import GCONAgent
         coordinator, agents = cluster
         stop = threading.Event()
         errors = []
@@ -337,7 +337,7 @@ class TestCoordinatorFailover:
         # "Restart" = build a brand new coordinator, as a real process
         # restart would. If any persistence existed, it would be loaded
         # here (there is currently no such API to call).
-        from coordinator import GCONCoordinator
+        from gcon.cluster.coordinator import GCONCoordinator
         new_coordinator = GCONCoordinator()
 
         assert job_id in new_coordinator.jobs, (
@@ -502,7 +502,7 @@ class TestWebSocket:
         """
         try:
             from fastapi.testclient import TestClient
-            from web_server import build_app  # adjust to actual factory name if different
+            from gcon.dashboard.web_server import build_app  # adjust to actual factory name if different
         except ImportError as e:
             pytest.skip(f"web stack not available: {e}")
 
@@ -518,8 +518,8 @@ class TestWebSocket:
 # =======================================================================
 
 def _standalone_load(jobs: int, nodes: int, duration: float):
-    from coordinator import GCONCoordinator
-    from agent import GCONAgent
+    from gcon.cluster.coordinator import GCONCoordinator
+    from gcon.execution.agent import GCONAgent
 
     coordinator = GCONCoordinator()
     for i in range(nodes):

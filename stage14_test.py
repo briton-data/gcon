@@ -1,6 +1,6 @@
 import os
 
-from artifact_registry import ArtifactRegistry
+from gcon.execution.artifact_registry import ArtifactRegistry
 
 
 print("=" * 60)

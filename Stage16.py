@@ -1,6 +1,6 @@
-from coordinator import GCONCoordinator
-from agent import GCONAgent
-from autoscaler import AutoScaler
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.execution.agent import GCONAgent
+from gcon.cluster.autoscaler import AutoScaler
 
 
 def banner(title):

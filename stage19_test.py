@@ -1,8 +1,8 @@
 from datetime import datetime, UTC
 
-from coordinator import GCONCoordinator
-from dashboard import Dashboard
-from event import Event
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.dashboard.dashboard import Dashboard
+from gcon.events.event import Event
 
 print("=" * 60)
 print("STAGE 19 - EVENT HISTORY TEST")

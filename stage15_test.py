@@ -2,10 +2,10 @@
 GCON STAGE 15 - WORKFLOW ENGINE TEST
 """
 
-from workflow import Workflow, WorkflowJob
-from dag import DAG
-from workflow_state import WorkflowState
-from workflow_engine import WorkflowEngine
+from gcon.workflow.workflow import Workflow, WorkflowJob
+from gcon.workflow.dag import DAG
+from gcon.workflow.workflow_state import WorkflowState
+from gcon.workflow.workflow_engine import WorkflowEngine
 
 
 class DummyCoordinator:

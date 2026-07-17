@@ -59,8 +59,11 @@ docs = [
 "Documentation" = "https://gcon.network/docs"
 "Repository" = "https://github.com/Jug-data/GCON.git"
 
-[tool.setuptools]
-packages = ["gcon"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.black]
 line-length = 100
