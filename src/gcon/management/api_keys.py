@@ -1,0 +1,113 @@
+"""
+GCON API Keys — programmatic access key management.
+
+Keys are generated with a random secret which is only ever shown
+in full at creation/regeneration time; afterward only a masked form
+is retrievable, matching how most platforms handle API secrets.
+"""
+
+import secrets
+from datetime import datetime, UTC, timedelta
+from uuid import uuid4
+import hmac
+
+def _generate_secret():
+    return f"gcon_{secrets.token_hex(20)}"
+
+
+def _mask(secret):
+    return f"{secret[:8]}{'*' * 24}{secret[-4:]}"
+
+
+class APIKey:
+    def __init__(self, name, owner_user_id, scopes=None, expires_in_days=90, key_id=None):
+        self.key_id = key_id or f"key_{uuid4().hex[:8]}"
+        self.name = name
+        self.owner_user_id = owner_user_id
+        self.scopes = scopes or ["Submit workflows", "View monitoring"]
+        self.secret = _generate_secret()
+        self.created_at = datetime.now(UTC)
+        self.expires_at = (
+            self.created_at + timedelta(days=expires_in_days)
+            if expires_in_days else None
+        )
+        self.last_used_at = None
+        self.usage_count = 0
+        self.status = "Active"
+
+    def mark_used(self):
+        self.last_used_at = datetime.now(UTC)
+        self.usage_count += 1
+
+    def to_dict(self, reveal_secret=False):
+        return {
+            "key_id": self.key_id,
+            "name": self.name,
+            "owner_user_id": self.owner_user_id,
+            "scopes": self.scopes,
+            "secret": self.secret if reveal_secret else _mask(self.secret),
+            "created_at": self.created_at.isoformat(),
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "usage_count": self.usage_count,
+            "status": self.status,
+        }
+
+
+class APIKeyManager:
+    def __init__(self):
+        self.keys = {}
+
+    def create_key(self, name, owner_user_id, scopes=None, expires_in_days=90):
+        key = APIKey(name, owner_user_id, scopes, expires_in_days)
+        self.keys[key.key_id] = key
+        return key
+
+    def get_key(self, key_id):
+        if key_id not in self.keys:
+            raise ValueError(f"API key '{key_id}' does not exist.")
+        return self.keys[key_id]
+
+    def revoke_key(self, key_id):
+        key = self.get_key(key_id)
+        key.status = "Revoked"
+        return key
+
+    def regenerate_key(self, key_id):
+        key = self.get_key(key_id)
+        key.secret = _generate_secret()
+        key.status = "Active"
+        key.created_at = datetime.now(UTC)
+        key.last_used_at = None
+        key.usage_count = 0
+        return key
+
+    def list_keys(self):
+        return list(self.keys.values())
+
+    def find_by_secret(self, secret):
+        """
+        Look up an active key by its raw secret, for use by the
+        public API's authentication layer. Uses a constant-time
+        comparison to avoid leaking timing information.
+        """
+        if not secret:
+            return None
+        for key in self.keys.values():
+            
+            if hmac.compare_digest(key.secret, secret):
+                return key
+        return None
+
+    def is_valid(self, key):
+        """
+        Return True if a key is active and not expired.
+        """
+        if key.status != "Active":
+            return False
+        if key.expires_at and datetime.now(UTC) > key.expires_at:
+            key.status = "Expired"
+            return False
+        return True
+
+

@@ -1,0 +1,125 @@
+<nav class="navbar navbar-expand-lg gcon-navbar shadow-sm">
+
+    <div class="container-fluid">
+
+        <a class="navbar-brand fw-bold text-white" href="#">
+            <i class="bi bi-diagram-3-fill me-2"></i>
+            GCON
+        </a>
+
+        <button
+            class="navbar-toggler"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#navbarNav">
+
+            <span class="navbar-toggler-icon"></span>
+
+        </button>
+
+        <div class="collapse navbar-collapse" id="navbarNav">
+
+            <ul class="navbar-nav ms-4" id="tab-nav-top">
+
+                <li class="nav-item">
+                    <a class="nav-link active text-white" href="#" data-tab="control-center">Control Center</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="topology">Topology</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="explorer">Explorer</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="monitoring">Monitoring</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="analytics">Analytics</a>
+                </li>
+
+                <li class="nav-item">
+                    <a class="nav-link text-light" href="#" data-tab="admin">Admin</a>
+                </li>
+
+            </ul>
+
+            <div class="ms-auto d-flex align-items-center position-relative">
+
+                <div class="me-3 position-relative">
+                    <input type="text" id="global-search" class="form-control form-control-sm"
+                           placeholder="🔍 Search users, jobs, nodes..." style="width:260px;">
+                    <div id="global-search-results" class="gcon-search-results d-none"></div>
+                </div>
+
+                <button id="refresh-now-btn" class="btn btn-sm btn-outline-light me-3" title="Refresh now">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
+
+                <button id="pause-btn" class="btn btn-sm btn-outline-light me-3" title="Pause live updates">
+                    <i class="bi bi-pause-fill"></i>
+                </button>
+
+                <span id="cluster-health-badge" class="badge bg-secondary me-3">
+                    ● Connecting...
+                </span>
+
+                <span id="conn-status" class="badge bg-secondary me-3">
+                    ● WS Connecting...
+                </span>
+
+                <span id="clock" class="text-light me-3">
+                    --:--:--
+                </span>
+
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button"
+                            data-bs-toggle="dropdown">
+                        <span class="gcon-avatar" id="navbar-user-avatar">--</span>
+                        <span id="navbar-user-name" class="ms-1">Loading...</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end gcon-modal">
+                        <li><span class="dropdown-item-text text-secondary small" id="navbar-user-role">--</span></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="#" id="change-password-link">Change Password</a></li>
+                        <li><a class="dropdown-item" href="#" id="logout-link">Logout</a></li>
+                    </ul>
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</nav>
+
+<!-- Change Password Modal -->
+<div class="modal fade" id="changePasswordModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Change Password</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="change-password-error" class="alert alert-danger d-none"></div>
+                <div class="mb-3">
+                    <label class="form-label">Current Password</label>
+                    <input type="password" class="form-control" id="cp-current-password">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">New Password</label>
+                    <input type="password" class="form-control" id="cp-new-password">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="change-password-submit">Change Password</button>
+            </div>
+        </div>
+    </div>
+</div>
