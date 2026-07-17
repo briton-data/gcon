@@ -1,0 +1,10 @@
+psutil>=5.9.0
+GPUtil>=1.4.0
+cryptography>=45.0.0
+pytest
+pytest-cov
+fastapi
+uvicorn[standard]
+jinja2
+websockets
+websockets-clients
