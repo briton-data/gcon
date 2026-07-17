@@ -82,30 +82,44 @@ class DAG:
     def has_cycle(self) -> bool:
         """
         Check whether the workflow graph contains a cycle.
+
+        Implemented iteratively (explicit stack, white/gray/black
+        coloring) rather than via recursive DFS: a recursive
+        implementation blows Python's call stack (RecursionError) on
+        large workflows -- a real workflow can easily exceed the
+        default ~1000 frame recursion limit, and cycle detection must
+        not crash on exactly the kind of input (large graphs) it
+        exists to validate.
         """
-        visited = set()
-        recursion_stack = set()
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {job_id: WHITE for job_id in self.jobs}
 
-        def dfs(job_id: str) -> bool:
-            visited.add(job_id)            
-            recursion_stack.add(job_id)
+        for start in self.jobs:
+            if color[start] != WHITE:
+                continue
 
-            for child in self.dependencies.get(job_id, []):
+            # Each stack entry is [node_id, iterator over its children]
+            stack = [(start, iter(self.dependencies.get(start, [])))]
+            color[start] = GRAY
 
-                if child not in visited:
-                    if dfs(child):
+            while stack:
+                node_id, children = stack[-1]
+                advanced = False
+
+                for child in children:
+                    if color.get(child, WHITE) == GRAY:
+                        # Back edge to a node still on the current
+                        # path -- that's a cycle.
                         return True
+                    if color.get(child, WHITE) == WHITE:
+                        color[child] = GRAY
+                        stack.append((child, iter(self.dependencies.get(child, []))))
+                        advanced = True
+                        break
 
-                elif child in recursion_stack:
-                    return True
-
-            recursion_stack.remove(job_id)
-            return False
-
-        for job_id in self.jobs:
-            if job_id not in visited:
-                if dfs(job_id):
-                    return True
+                if not advanced:
+                    color[node_id] = BLACK
+                    stack.pop()
 
         return False
     

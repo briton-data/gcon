@@ -1,0 +1,39 @@
+2026-07-16T13:29:59 [INFO] benchmark: [BENCH] job_throughput: 5.016 jobs/sec (200/200 completed)
+2026-07-16T13:30:33 [INFO] benchmark: [BENCH] dispatch_latency: p50=0.051795s over 50 samples
+2026-07-16T13:30:35 [INFO] benchmark: [BENCH] concurrent_submission: 164.554 submits/sec, 0 errors
+2026-07-16T13:30:50 [INFO] benchmark: [BENCH] resource_usage: RSS growth=0.63MB over 15.0s / 66 jobs (unbounded self.jobs/self.receipts growth — AUDIT_REPORT.md 6.2 — should show up here as roughly-linear RSS growth with job count)
+2026-07-16T13:31:25 [INFO] benchmark: [BENCH] job_throughput: 2.992 jobs/sec (100/100 completed)
+2026-07-16T13:31:25 [INFO] benchmark: [BENCH] scalability_curve: nodes=5 -> 2.992 jobs/sec
+2026-07-16T13:31:48 [INFO] benchmark: [BENCH] job_throughput: 4.362 jobs/sec (100/100 completed)
+2026-07-16T13:31:48 [INFO] benchmark: [BENCH] scalability_curve: nodes=20 -> 4.362 jobs/sec
+2026-07-16T13:32:03 [INFO] benchmark: [BENCH] job_throughput: 6.857 jobs/sec (100/100 completed)
+2026-07-16T13:32:03 [INFO] benchmark: [BENCH] scalability_curve: nodes=50 -> 6.857 jobs/sec
+2026-07-16T13:32:19 [INFO] benchmark: [BENCH] job_throughput: 6.509 jobs/sec (100/100 completed)
+2026-07-16T13:32:19 [INFO] benchmark: [BENCH] scalability_curve: nodes=100 -> 6.509 jobs/sec
+2026-07-16T13:32:19 [INFO] benchmark: [BENCH] report written to benchmark_report.json
+2026-07-16T13:41:55 [INFO] benchmark: [BENCH] job_throughput: 4.603 jobs/sec (200/200 completed)
+2026-07-16T13:42:40 [INFO] benchmark: [BENCH] dispatch_latency: p50=0.058579s over 50 samples
+2026-07-16T13:42:41 [INFO] benchmark: [BENCH] concurrent_submission: 208.489 submits/sec, 0 errors
+2026-07-16T13:42:57 [INFO] benchmark: [BENCH] resource_usage: RSS growth=0.4MB over 15.0s / 70 jobs (unbounded self.jobs/self.receipts growth — AUDIT_REPORT.md 6.2 — should show up here as roughly-linear RSS growth with job count)
+2026-07-16T13:43:30 [INFO] benchmark: [BENCH] job_throughput: 3.026 jobs/sec (100/100 completed)
+2026-07-16T13:43:30 [INFO] benchmark: [BENCH] scalability_curve: nodes=5 -> 3.026 jobs/sec
+2026-07-16T13:43:53 [INFO] benchmark: [BENCH] job_throughput: 4.519 jobs/sec (100/100 completed)
+2026-07-16T13:43:53 [INFO] benchmark: [BENCH] scalability_curve: nodes=20 -> 4.519 jobs/sec
+2026-07-16T13:44:14 [INFO] benchmark: [BENCH] job_throughput: 4.928 jobs/sec (100/100 completed)
+2026-07-16T13:44:14 [INFO] benchmark: [BENCH] scalability_curve: nodes=50 -> 4.928 jobs/sec
+2026-07-16T13:44:31 [INFO] benchmark: [BENCH] job_throughput: 5.871 jobs/sec (100/100 completed)
+2026-07-16T13:44:31 [INFO] benchmark: [BENCH] scalability_curve: nodes=100 -> 5.871 jobs/sec
+2026-07-16T13:44:31 [INFO] benchmark: [BENCH] report written to benchmark_report.json
+2026-07-16T18:39:26 [INFO] benchmark: [BENCH] job_throughput: 6.258 jobs/sec (200/200 completed)
+2026-07-16T18:39:57 [INFO] benchmark: [BENCH] dispatch_latency: p50=0.052305s over 50 samples
+2026-07-16T18:39:58 [INFO] benchmark: [BENCH] concurrent_submission: 370.672 submits/sec, 0 errors
+2026-07-16T18:40:14 [INFO] benchmark: [BENCH] resource_usage: RSS growth=0.79MB over 15.0s / 84 jobs (unbounded self.jobs/self.receipts growth — AUDIT_REPORT.md 6.2 — should show up here as roughly-linear RSS growth with job count)
+2026-07-16T18:40:39 [INFO] benchmark: [BENCH] job_throughput: 4.042 jobs/sec (100/100 completed)
+2026-07-16T18:40:39 [INFO] benchmark: [BENCH] scalability_curve: nodes=5 -> 4.042 jobs/sec
+2026-07-16T18:40:56 [INFO] benchmark: [BENCH] job_throughput: 5.878 jobs/sec (100/100 completed)
+2026-07-16T18:40:56 [INFO] benchmark: [BENCH] scalability_curve: nodes=20 -> 5.878 jobs/sec
+2026-07-16T18:41:10 [INFO] benchmark: [BENCH] job_throughput: 7.353 jobs/sec (100/100 completed)
+2026-07-16T18:41:10 [INFO] benchmark: [BENCH] scalability_curve: nodes=50 -> 7.353 jobs/sec
+2026-07-16T18:41:25 [INFO] benchmark: [BENCH] job_throughput: 6.81 jobs/sec (100/100 completed)
+2026-07-16T18:41:25 [INFO] benchmark: [BENCH] scalability_curve: nodes=100 -> 6.81 jobs/sec
+2026-07-16T18:41:25 [INFO] benchmark: [BENCH] report written to benchmark_report.json
