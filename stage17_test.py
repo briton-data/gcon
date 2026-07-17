@@ -1,7 +1,7 @@
 import os
 
-from storage_manager import StorageManager
-from artifact_registry import ArtifactRegistry
+from gcon.storage.storage_manager import StorageManager
+from gcon.execution.artifact_registry import ArtifactRegistry
 
 print("=" * 60)
 print("STAGE 17 - DISTRIBUTED STORAGE TEST")

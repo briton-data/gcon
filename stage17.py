@@ -1,7 +1,7 @@
 import os
 
-from coordinator import GCONCoordinator
-from agent import GCONAgent
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.execution.agent import GCONAgent
 
 print("=" * 60)
 print("STAGE 17 - DISTRIBUTED STORAGE INTEGRATION TEST")

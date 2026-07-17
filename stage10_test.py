@@ -1,9 +1,9 @@
-from network import GCONNetwork
-from coordinator import GCONCoordinator
-from agent import GCONAgent
-from node import GCONNode
-from metrics import MetricsCollector, MetricsSummary
-from dashboard import Dashboard
+from gcon.cluster.network import GCONNetwork
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.execution.agent import GCONAgent
+from gcon.cluster.node import GCONNode
+from gcon.monitoring.metrics import MetricsCollector, MetricsSummary
+from gcon.dashboard.dashboard import Dashboard
 
 print("=" * 70)
 print("        GCON STAGE 10 - RESOURCE MONITORING & LOAD SCHEDULING TEST")

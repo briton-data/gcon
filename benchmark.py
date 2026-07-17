@@ -40,8 +40,8 @@ def _build_cluster(node_count: int):
     points (run_job.py, examples/*.py) do. No mocking of coordinator
     internals — this measures the actual code path.
     """
-    from coordinator import GCONCoordinator
-    from agent import GCONAgent
+    from gcon.cluster.coordinator import GCONCoordinator
+    from gcon.execution.agent import GCONAgent
 
     coordinator = GCONCoordinator()
     agents = []

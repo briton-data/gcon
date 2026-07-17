@@ -1,5 +1,5 @@
-from coordinator import GCONCoordinator
-from agent import GCONAgent
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.execution.agent import GCONAgent
 coordinator = GCONCoordinator()
 
 node1 = GCONAgent("node-001")
