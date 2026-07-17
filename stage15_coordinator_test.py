@@ -2,10 +2,10 @@
 GCON STAGE 15 - COORDINATOR INTEGRATION TEST
 """
 
-from coordinator import GCONCoordinator
-from workflow import Workflow, WorkflowJob
-from workflow_engine import WorkflowEngine
-from agent import GCONAgent
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.workflow.workflow import Workflow, WorkflowJob
+from gcon.workflow.workflow_engine import WorkflowEngine
+from gcon.execution.agent import GCONAgent
 
 
 agent1 = GCONAgent("node-001")

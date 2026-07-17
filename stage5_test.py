@@ -1,8 +1,8 @@
-from coordinator import GCONCoordinator
-from network import GCONNetwork
-from dispatcher import JobDispatcher
-from registry import NodeRegistry
-from node import GCONNode
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.cluster.network import GCONNetwork
+from gcon.cluster.dispatcher import JobDispatcher
+from gcon.cluster.registry import NodeRegistry
+from gcon.cluster.node import GCONNode
 
 # Create registry
 registry = NodeRegistry()

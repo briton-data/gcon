@@ -106,32 +106,32 @@ except ImportError:
 
 IMPORT_ERROR = None
 try:
-    from coordinator import GCONCoordinator
-    from agent import GCONAgent
-    from Noderegistry import NodeRegistry
-    from scheduler import Scheduler
-    from communication import CommunicationManager
-    from verifier import ExecutionVerifier
-    from receipt import (
+    from gcon.cluster.coordinator import GCONCoordinator
+    from gcon.execution.agent import GCONAgent
+    from gcon.cluster.Noderegistry import NodeRegistry
+    from gcon.cluster.scheduler import Scheduler
+    from gcon.cluster.communication import CommunicationManager
+    from gcon.execution.verifier import ExecutionVerifier
+    from gcon.execution.receipt import (
         ReceiptGenerator,
         ReceiptSigner,
         ReceiptVerifier,
         compute_receipt_hash,
     )
-    from key_manager import KeyManager
-    from artifact_registry import ArtifactRegistry
-    from storage_manager import StorageManager
+    from gcon.management.key_manager import KeyManager
+    from gcon.execution.artifact_registry import ArtifactRegistry
+    from gcon.storage.storage_manager import StorageManager
     from policy import PolicyEngine
-    from dag import DAG
-    from workflow import Workflow, WorkflowJob
-    from workflow_engine import WorkflowEngine
-    from workflow_state import WorkflowState
-    from health_service import HealthService
-    from autoscaler import AutoScaler
-    from event_bus import EventBus
-    from event import Event
-    from auth import hash_password, verify_password, SessionManager
-    from node import GCONNode
+    from gcon.workflow.dag import DAG
+    from gcon.workflow.workflow import Workflow, WorkflowJob
+    from gcon.workflow.workflow_engine import WorkflowEngine
+    from gcon.workflow.workflow_state import WorkflowState
+    from gcon.monitoring.health_service import HealthService
+    from gcon.cluster.autoscaler import AutoScaler
+    from gcon.events.event_bus import EventBus
+    from gcon.events.event import Event
+    from gcon.management.auth import hash_password, verify_password, SessionManager
+    from gcon.cluster.node import GCONNode
 except Exception as exc:  # pragma: no cover - environment problem, not a test result
     IMPORT_ERROR = exc
 
@@ -1650,8 +1650,8 @@ def test_dashboard_endpoints_require_authentication():
             "/management/user-counts)."
         )
     from fastapi.testclient import TestClient  # noqa: local import, optional dep
-    from web_server import WebServer
-    from presentation import PresentationLayer
+    from gcon.dashboard.web_server import WebServer
+    from gcon.dashboard.presentation import PresentationLayer
 
     with isolated_cwd():
         coord = make_coordinator()

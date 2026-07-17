@@ -10,9 +10,9 @@ Tests:
 - Cluster status
 """
 
-from coordinator import GCONCoordinator
-from dashboard import Dashboard
-from agent import GCONAgent
+from gcon.cluster.coordinator import GCONCoordinator
+from gcon.dashboard.dashboard import Dashboard
+from gcon.execution.agent import GCONAgent
 
 
 def main():
