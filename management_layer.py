@@ -136,7 +136,7 @@ class ManagementLayer:
         Subscribe the notification center to the coordinator's real
         event bus, so notifications reflect what's actually happening
         on the cluster (offline nodes, failed jobs, receipts) instead
-        of canned demo text.
+        of canned sss text.
         """
         if not self.coordinator:
             return

@@ -23,22 +23,32 @@ class CommunicationManager:
 
         return self.nodes[node_id]
     
-    def send_job(self, node_id, job_id, command):
+    def send_job(self, node_id, job_id, command, timeout=None):
         """
         Send a job to a registered node for execution.
+
+        Args:
+            timeout: Maximum seconds to allow the job to run before
+                it's killed. Previously accepted nowhere in this call
+                chain, so every job ran with an unbounded timeout
+                regardless of what the caller intended -- a hung job
+                script would block the coordinator's per-job worker
+                thread (and the node it's "running" on) forever.
         """
 
         packet = {
         "node_id": node_id,
         "job_id": job_id,
-        "command": command
+        "command": command,
+        "timeout": timeout,
     }
         print(f"[COMM] Sending packet to {node_id}")
         node = self.get_node(packet["node_id"])
 
-        result = node.execute_job(           
+        result = node.execute_job(
             packet["job_id"],
-            packet["command"]
+            packet["command"],
+            timeout=packet["timeout"],
 )
         print(f"[COMM] Response received from {node_id}")
         

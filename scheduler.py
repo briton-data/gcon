@@ -22,7 +22,11 @@ class Scheduler:
         best_node = None
         lowest_score = float("inf")
 
-        for info in self.registry.nodes.values():
+        # Snapshot rather than iterate the live registry dict: another
+        # thread can concurrently register()/remove() a node, which
+        # would otherwise raise "dictionary changed size during
+        # iteration" mid-scan.
+        for info in self.registry.snapshot().values():
 
             if info["status"] != "idle" or info.get("draining"):
                 continue
