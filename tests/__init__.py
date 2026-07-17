@@ -1,3 +1,0 @@
-"""
-GCON Test Suite
-"""
