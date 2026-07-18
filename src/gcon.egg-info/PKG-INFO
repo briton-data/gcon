@@ -1,0 +1,176 @@
+Metadata-Version: 2.4
+Name: gcon
+Version: 0.1.0
+Summary: Decentralized Verified GPU Compute Network
+Author-email: GCON Contributors <contact@gcon.network>
+License: MIT
+Project-URL: Homepage, https://github.com/Jug-data/GCON
+Project-URL: Bug Tracker, https://github.com/Jug-data/GCON/issues
+Project-URL: Documentation, https://gcon.network/docs
+Project-URL: Repository, https://github.com/Jug-data/GCON.git
+Keywords: gpu,compute,distributed,verification,blockchain,ai,ml
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: System :: Distributed Computing
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: psutil>=5.9.0
+Requires-Dist: GPUtil>=1.4.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: black>=22.0; extra == "dev"
+Requires-Dist: flake8>=4.0; extra == "dev"
+Requires-Dist: mypy>=0.990; extra == "dev"
+Provides-Extra: docs
+Requires-Dist: sphinx>=4.0; extra == "docs"
+Requires-Dist: sphinx-rtd-theme>=1.0; extra == "docs"
+Dynamic: license-file
+
+# GCON
+
+> Decentralized Verified GPU Compute Network
+
+
+Run GPU workloads on distributed providers with **cryptographic proof of execution**—without relying on blockchain consensus.
+
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
+![Version](https://img.shields.io/badge/Version-v0.10-orange)
+![Execution](https://img.shields.io/badge/Execution-Verifiable-brightgreen)
+![Network](https://img.shields.io/badge/Network-Decentralized-blueviolet)
+![Status](https://img.shields.io/badge/Status-MVP-success)
+
+---
+
+## Why GCON?
+
+Traditional GPU marketplaces let users rent compute, but they cannot prove that a workload was executed correctly.
+
+GCON introduces **verifiable execution** through cryptographic receipts, execution evidence, and decentralized coordination, allowing customers to trust computation without trusting the provider.
+
+---
+
+## Key Features
+
+-  Distributed GPU execution
+-  Cryptographic proof of execution
+-  Signed execution receipts
+-  Job scheduling and orchestration
+-  Distributed agent networking
+-  Resource monitoring
+-  Artifact registry
+-  Open-source architecture
+
+---
+
+## Architecture
+
+```text
+        Customer
+            │
+            ▼
+     Job Coordinator
+            │
+     ┌──────┴──────┐
+     ▼             ▼
+  Agent A       Agent B
+     │             │
+     ▼             ▼
+ GPU Worker    GPU Worker
+     │             │
+     └──────┬──────┘
+            ▼
+     Receipt Generator
+            │
+            ▼
+       Verification
+```
+
+---
+
+## Project Status
+
+| Component | Status |
+|-----------|--------|
+| Core Coordinator | ✅ Complete |
+| Agent Runtime | ✅ Complete |
+| Job Scheduler | ✅ Complete |
+| Receipt System | ✅ Complete |
+| Verification Engine | ✅ Complete |
+| Distributed Storage | ✅ Complete |
+| Workflow DAG Engine | ✅ Complete |
+| Elastic Scaling | ✅ Complete |
+| Fault Recovery | ✅ Complete |
+| Monitoring Dashboard | 🚧 In Progress |
+---
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/Jug-data/GCON.git
+
+cd GCON
+
+pip install -r requirements.txt
+
+python agent.py
+```
+
+---
+
+## Roadmap
+
+### Phase 1 — Core Platform ✅
+
+- Coordinator
+- Agent runtime
+- Scheduling
+- Verification
+- Workflow execution
+
+### Phase 2 — Platform Services 🚧
+
+- Web dashboard
+- REST API
+- Metrics
+- Authentication
+
+### Phase 3 — Production Cluster
+
+- Multi-node deployment
+- Kubernetes integration
+- Multi-provider networking
+- Persistent distributed storage
+
+### Phase 4 — Marketplace
+
+- Provider registration
+- Billing
+- Reputation
+- Public compute marketplace
+
+---
+## Design Principles
+
+- Verify, don't trust
+- Decentralized coordination
+- Fault-tolerant execution
+- Horizontal scalability
+- Modular architecture
+- Cryptographic accountability
+
+## License
+
+MIT License.

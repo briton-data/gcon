@@ -11,6 +11,9 @@ The verifier:
 import hashlib
 import json
 import hmac
+import os
+import secrets
+from pathlib import Path
 from datetime import datetime, UTC
 from typing import Dict, Any, Optional, Tuple
 import logging
@@ -25,11 +28,34 @@ class ExecutionVerifier:
         """
         Initialize ExecutionVerifier.
         
-        Args:
-            secret_key: Secret key for HMAC signing (optional)
+        Args: 
+            
+            secret_key: Secret key for HMAC signing. If not provided,
+                a persistent random key is loaded from (or generated
+                into) the path in GCON_HMAC_KEY_PATH, defaulting to
+                "./keys/hmac_secret.key". Never falls back to a
+                hardcoded constant, since anyone with source access
+                could forge signatures with a known key.           
+        
         """
-        self.secret_key = secret_key or "gcon-default-key"
+        self.secret_key = secret_key or self._load_or_create_secret_key()
         logger.info("ExecutionVerifier initialized")
+        
+    @staticmethod
+    def _load_or_create_secret_key() -> str:
+        """
+        Load the HMAC signing key from disk, generating a fresh
+        cryptographically random one on first run.
+        """
+        key_path = Path(os.environ.get("GCON_HMAC_KEY_PATH", "./keys/hmac_secret.key"))
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        if key_path.exists():
+            return key_path.read_text().strip()
+        new_key = secrets.token_hex(32)
+        key_path.write_text(new_key)
+        logger.info(f"Generated new HMAC signing key at {key_path}")
+        return new_key
+
     
     @staticmethod
     def hash_data(data: Any, algorithm: str = "sha256") -> str:
