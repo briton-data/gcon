@@ -6,6 +6,17 @@ The receipt system:
 2. Manages receipt lifecycle
 3. Provides receipt retrieval
 4. Validates receipt authenticity
+
+NOTE ON THE TWO SIGNING PATHS IN THIS CODEBASE:
+GCONCoordinator (coordinator.py) creates and signs receipts via
+ExecutionVerifier.create_receipt() in verifier.py (HMAC-SHA256).
+That is the live signing path. This module's ReceiptGenerator /
+ReceiptSigner / ReceiptVerifier classes below implement a separate,
+Ed25519-based signing scheme that is NOT currently invoked by the
+coordinator or run_job.py -- only by tests. Only ReceiptManager
+(file storage) from this module is used by the live coordinator
+path. Before extending either scheme, confirm which one you mean
+to change; they are not interchangeable and are not kept in sync.
 """
 
 import base64
