@@ -22,13 +22,9 @@ class Dashboard:
         """
         Receive cluster events from the EventBus.
         """
-        self.events.append(event)
-        
+        self.events.append(event)  
         if len(self.events) > 100:
             self.events.pop(0)
-
-        self.refresh()
-        self.display()
     
     def format_event(self, event):
         """
