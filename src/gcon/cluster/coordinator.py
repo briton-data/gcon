@@ -33,6 +33,7 @@ class GCONCoordinator:
         self.event_bus = EventBus()
         
         self.jobs = {}
+        self.jobs_lock = threading.RLock()
         self.job_queue = Queue()
         
         self.receipts = {}
@@ -86,8 +87,9 @@ class GCONCoordinator:
              
             
         
-        if job_id in self.jobs:
-            raise ValueError(f"Job '{job_id}' already exists.")
+        with self.jobs_lock:
+            if job_id in self.jobs:
+                raise ValueError(f"Job '{job_id}' already exists.")
         artifact_ids = []
 
         for filepath in artifacts:
@@ -95,13 +97,14 @@ class GCONCoordinator:
             artifact_ids.append(artifact_id)
         
         
-        self.jobs[job_id] = {
-            "command": command,
-            "node_id": None,
-            "status": "pending",
-            "artifacts": artifact_ids,
-            "created_at": datetime.now(UTC).isoformat(),
-            "completed_at": None,
+        with self.jobs_lock:    
+            self.jobs[job_id] = {
+                "command": command,
+                "node_id": None,
+                "status": "pending",
+                "artifacts": artifact_ids,
+                "created_at": datetime.now(UTC).isoformat(),
+                "completed_at": None,
     }
         self.queue_job(job_id)
         
@@ -223,16 +226,17 @@ class GCONCoordinator:
         """
 
         print(f"Recovering jobs from '{node_id}'...")
+        with self.jobs_lock:
 
-        for job_id, job in self.jobs.items():
+            for job_id, job in self.jobs.items():
 
-            if job["node_id"] == node_id and job["status"] == "running":
+                if job["node_id"] == node_id and job["status"] == "running":
 
-                print(f"Recovering job '{job_id}'")
+                    print(f"Recovering job '{job_id}'")
 
             # Reset the job
-                job["status"] = "pending"
-                job["node_id"] = None
+                    job["status"] = "pending"
+                    job["node_id"] = None
 
                 
             # Reassign the job
@@ -420,10 +424,8 @@ class GCONCoordinator:
                 continue
 
             job_id = self.job_queue.get()
-
             print(f"[QUEUE] Dispatching {job_id}")
             print(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
-
 
             try:
                 self.assign_job(job_id)
@@ -558,12 +560,14 @@ class GCONCoordinator:
         Find whatever job is currently running on a node and cancel
         it (kills the underlying subprocess).
         """
-        for job_id, job in self.jobs.items():
-            if job["node_id"] == node_id and job["status"] == "running":
-                job["cancel_requested"] = True
-                node = self.registry.get_node(node_id)
-                node.cancel()
-                return job_id
+        with self.jobs_lock:
+        
+            for job_id, job in self.jobs.items():
+                if job["node_id"] == node_id and job["status"] == "running":
+                    job["cancel_requested"] = True
+                    node = self.registry.get_node(node_id)
+                    node.cancel()
+                    return job_id
         return None
 
     # ------------------------------------------------------------
@@ -614,14 +618,16 @@ class GCONCoordinator:
         Re-queue every currently failed job for another attempt.
         """
         retried = []
-        for job_id, job in self.jobs.items():
-            if job["status"] == "failed":
-                job["status"] = "pending"
-                job["node_id"] = None
-                job["completed_at"] = None
-                job.pop("cancel_requested", None)
-                self.queue_job(job_id)
-                retried.append(job_id)
+
+        with self.jobs_lock:
+            for job_id, job in self.jobs.items():
+                if job["status"] == "failed":
+                    job["status"] = "pending"
+                    job["node_id"] = None
+                    job["completed_at"] = None
+                    job.pop("cancel_requested", None)
+                    self.queue_job(job_id)
+                    retried.append(job_id)
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="FAILED_JOBS_RETRIED",
@@ -635,9 +641,10 @@ class GCONCoordinator:
         Remove completed jobs from the working set to declutter the
         dashboard. Running/pending/failed jobs are left alone.
         """
-        cleared = [jid for jid, j in self.jobs.items() if j["status"] == "completed"]
-        for job_id in cleared:
-            del self.jobs[job_id]
+        with self.jobs_lock:
+            cleared = [jid for jid, j in self.jobs.items() if j["status"] == "completed"]
+            for job_id in cleared:
+                del self.jobs[job_id]
 
         print(f"[JOBS] Cleared {len(cleared)} completed job(s).")
         return cleared
@@ -714,7 +721,10 @@ class GCONCoordinator:
         for the "Export Logs" download.
         """
         lines = []
-        for job_id, job in self.jobs.items():
+         
+        with self.jobs_lock:
+            jobs_snapshot = list(self.jobs.items())
+        for job_id, job in jobs_snapshot:
             result = job.get("result")
             if not result:
                 continue
@@ -742,6 +752,8 @@ class GCONCoordinator:
         self.pause_scheduler()
 
         cancelled = []
+        with self.jobs_lock:
+            jobs_snapshot = list(self.jobs.items())
         for job_id, job in self.jobs.items():
             if job["status"] == "running":
                 try:
@@ -836,7 +848,9 @@ class GCONCoordinator:
         Return a snapshot of the current cluster state, in the flat
         shape expected by the dashboard.
         """
-
+        with self.jobs_lock:
+            jobs_snapshot = list(self.jobs.values())
+ 
         return {
             "total_nodes": self.get_total_node_count(),
             "idle_nodes": self.get_idle_node_count(),
@@ -916,7 +930,9 @@ class GCONCoordinator:
         Return a dashboard summary about all jobs.
         """
         jobs = []
-
+        
+        with self.jobs_lock:
+            jobs_snapshot = list(self.jobs.items())
         for job_id, job in self.jobs.items():
             jobs.append({
                 "job_id": job_id,
