@@ -2,9 +2,13 @@
 GCON RBAC — Roles & Permissions reference data.
 
 This is static reference data describing the platform's role-based
-access control model. It is not yet enforced against real requests
-(GCON has no authentication layer), but is exposed so the dashboard
-can display and manage roles/permissions.
+access control model. Permissions are enforced against real requests
+via ManagementLayer.require_permission() (management_layer.py) and
+WebServer.require_permission() (web_server.py), which is used as a
+FastAPI dependency on the cluster/user/API-key management routes.
+Authentication is handled in auth.py (PBKDF2 password hashing plus
+in-memory sessions). This module is exposed here so the dashboard
+can also display and manage roles/permissions.
 """
 
 ROLES = ["Owner", "Administrator", "Operator", "Developer", "Viewer"]
