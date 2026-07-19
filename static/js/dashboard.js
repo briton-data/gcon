@@ -12,6 +12,11 @@ let currentTab = "control-center";
 let explorerView = "jobs";
 let explorerData = [];
 let isPaused = false;
+// How often the dashboard re-polls REST endpoints (cluster state,
+// nodes, jobs, health badge, notifications) when not paused. The
+// /ws socket already pushes live activity-feed events every 2s
+// independently of this.
+const REFRESH_INTERVAL_MS = 5000;
 
 // ---------------------------------------------------------------
 // Helpers

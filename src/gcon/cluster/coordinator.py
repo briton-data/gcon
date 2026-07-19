@@ -754,7 +754,7 @@ class GCONCoordinator:
         cancelled = []
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
-        for job_id, job in self.jobs.items():
+        for job_id, job in jobs_snapshot:
             if job["status"] == "running":
                 try:
                     self.cancel_job(job_id)
@@ -802,7 +802,7 @@ class GCONCoordinator:
         """
         idle_nodes = []
 
-        for info in self.registry.nodes.values():
+        for info in self.registry.snapshot().values():
             if info["status"] == "idle":
                 idle_nodes.append(info["node"])
 
@@ -857,15 +857,15 @@ class GCONCoordinator:
             "registered_node_count": len(self.get_registered_nodes()),
             "registered_nodes": self.get_registered_nodes(),
             "running_jobs": sum(
-                1 for job in self.jobs.values()
+                1 for job in jobs_snapshot
                 if job["status"] == "running"
             ),
             "completed_jobs": sum(
-                1 for job in self.jobs.values()
+                1 for job in jobs_snapshot
                 if job["status"] == "completed"
             ),
             "failed_jobs": sum(
-                1 for job in self.jobs.values()
+                1 for job in jobs_snapshot
                 if job["status"] == "failed"
             ),
         }
@@ -908,7 +908,7 @@ class GCONCoordinator:
         """
         nodes = []
         
-        for node_id, info in self.registry.nodes.items():
+        for node_id, info in self.registry.snapshot().items():
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
@@ -933,7 +933,7 @@ class GCONCoordinator:
         
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
-        for job_id, job in self.jobs.items():
+        for job_id, job in jobs_snapshot:
             jobs.append({
                 "job_id": job_id,
                 "status": job["status"],
