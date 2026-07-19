@@ -117,10 +117,21 @@ class NodeRegistry:
         with self._lock:
             if node_id not in self.nodes:
                 raise ValueError(f"Node '{node_id}' does not exist.")
-
+            
             info = self.nodes[node_id]
-            info["last_seen"] = timestamp
-            info["status"] = status
+            # Only move last_seen forward. An out-of-order/duplicate
+            # heartbeat (delayed retransmit, reordered packet, etc.)
+            # must never roll last_seen backward, or it could
+            # un-expire a node that should already be considered
+            # offline. Status from a stale heartbeat is stale too,
+            # so it's only applied alongside a forward-moving timestamp.
+
+
+            current = info.get("last_seen")
+            if current is None or timestamp >= current:
+           
+                info["last_seen"] = timestamp
+                info["status"] = status
 
     def check_node_health(self):
         """
