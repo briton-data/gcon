@@ -47,7 +47,7 @@ GCON closes that gap with verifiable execution: every job produces cryptographic
 ## Installation
 
 ```bash
-git clone https://github.com/Jug-data/GCON.git
+git clone https://github.com/briton-data/GCON.git
 cd GCON
 
 pip install -r requirements.txt
