@@ -1,506 +1,654 @@
 # GCON API Reference
 
-## JobRunner
+Complete guide to the GCON REST API, Python SDK, and verification library.
 
-Main interface for executing verified jobs.
+---
 
-### Constructor
+## Table of Contents
 
-```python
-JobRunner(agent_id: Optional[str] = None, storage_dir: str = "./receipts")
+1. [REST API Overview](#rest-api-overview)
+2. [Authentication](#authentication)
+3. [Endpoints](#endpoints)
+4. [Python SDK](#python-sdk)
+5. [Verification API](#verification-api)
+6. [Error Handling](#error-handling)
+7. [Rate Limiting & Quotas](#rate-limiting--quotas)
+
+---
+
+## REST API Overview
+
+**Base URL:**
+```
+http://localhost:8000/api/v1
 ```
 
-**Parameters:**
-- `agent_id` (str, optional): Identifier for this agent. Auto-generated if not provided.
-- `storage_dir` (str): Directory to store receipt files. Default: `./receipts`
+**Protocol:** HTTP/REST
 
-**Example:**
-```python
-from run_job import JobRunner
+**Response Format:** JSON
 
-runner = JobRunner(agent_id="provider-1", storage_dir="./my_receipts")
+**API Version:** v1
+
+---
+
+## Authentication
+
+### Development (Local)
+
+```bash
+# No authentication required for local development
+# All API calls work without credentials
+curl http://localhost:8000/api/v1/cluster
 ```
 
-### run_job()
+### Production (Future)
 
-Execute a job with full verification pipeline.
-
-```python
-run_job(
-    job_script: str,
-    job_id: Optional[str] = None,
-    timeout: Optional[int] = None,
-    input_file: Optional[str] = None,
-    output_file: Optional[str] = None
-) -> Dict[str, Any]
+```bash
+# Bearer token (JWT)
+curl -H "Authorization: Bearer gcon_YOUR_API_KEY" \
+  http://api.gcon.io/api/v1/cluster
 ```
 
-**Parameters:**
-- `job_script` (str): Path to script or command to execute. Required.
-- `job_id` (str, optional): Unique job identifier. Auto-generated if not provided.
-- `timeout` (int, optional): Maximum execution time in seconds. No limit if not provided.
-- `input_file` (str, optional): Path to input file to hash.
-- `output_file` (str, optional): Path to output file to hash.
+**Getting an API Key:**
+1. Log in to the dashboard
+2. Go to Management → API Keys → Create Key
+3. Choose scopes:
+   - `Read` (monitoring, read-only)
+   - `Submit` (submit/cancel jobs)
+   - `Admin` (scale, deregister agents)
+4. Copy the secret (shown only once)
 
-**Returns:** Dictionary with execution result and receipt.
+---
 
-**Example:**
-```python
-result = runner.run_job(
-    job_script="python train.py",
-    job_id="training-001",
-    timeout=300,
-    input_file="data.csv",
-    output_file="model.pkl"
-)
+## Endpoints
+
+### Cluster Information
+
+#### `GET /cluster`
+
+Get overall cluster state.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "coordinator_online": true,
+  "total_nodes": 4,
+  "idle_nodes": 2,
+  "busy_nodes": 2,
+  "offline_nodes": 0,
+  "total_capacity": 16,
+  "available_capacity": 8,
+  "queued_jobs": 0,
+  "running_jobs": 4,
+  "completed_jobs": 127,
+  "failed_jobs": 3
+}
 ```
 
-### get_job_receipt()
+---
 
-Retrieve a receipt by ID.
+### Jobs
 
-```python
-get_job_receipt(receipt_id: str) -> Optional[Dict[str, Any]]
+#### `POST /jobs`
+
+Submit a new job.
+
+**Request:**
+```json
+{
+  "job_id": "my-job-001",
+  "command": "python train.py --epochs 10",
+  "timeout_seconds": 300,
+  "tags": ["training", "v1"]
+}
 ```
 
-**Parameters:**
-- `receipt_id` (str): Receipt identifier. Required.
-
-**Returns:** Receipt dictionary or None if not found.
-
-**Example:**
-```python
-receipt = runner.get_job_receipt("abc123def456")
-if receipt:
-    print(f"Job: {receipt['job_id']}, Status: {receipt['status']}")
-else:
-    print("Receipt not found")
+**Response (201 Created):**
+```json
+{
+  "job_id": "my-job-001",
+  "status": "pending",
+  "command": "python train.py --epochs 10",
+  "created_at": "2026-07-20T13:31:23Z",
+  "assigned_agent": null,
+  "started_at": null,
+  "completed_at": null
+}
 ```
 
-### list_job_receipts()
+**Errors:**
+- `400 Bad Request` — Missing required fields or invalid job_id
+- `409 Conflict` — Job with this ID already exists
+- `503 Service Unavailable` — Coordinator not ready
 
-List all receipts, optionally filtered by job ID.
+---
 
-```python
-list_job_receipts(job_id: Optional[str] = None) -> List[Dict[str, Any]]
+#### `GET /jobs`
+
+List all jobs (optionally filtered).
+
+**Query Parameters:**
+- `status` (optional): `pending`, `running`, `completed`, `failed`
+- `limit` (default: 100)
+- `offset` (default: 0)
+
+**Request:**
+```bash
+GET /jobs?status=running&limit=50
 ```
 
-**Parameters:**
-- `job_id` (str, optional): Filter by job ID.
-
-**Returns:** List of receipt dictionaries.
-
-**Example:**
-```python
-# List all receipts
-all_receipts = runner.list_job_receipts()
-
-# List receipts for specific job
-job_receipts = runner.list_job_receipts(job_id="training-001")
+**Response:**
+```json
+{
+  "total": 127,
+  "limit": 50,
+  "offset": 0,
+  "jobs": [
+    {
+      "job_id": "my-job-001",
+      "status": "completed",
+      "command": "python train.py",
+      "created_at": "2026-07-20T13:31:23Z",
+      "started_at": "2026-07-20T13:31:25Z",
+      "completed_at": "2026-07-20T13:35:50Z",
+      "assigned_agent": "gpu-1",
+      "exit_code": 0,
+      "artifacts_count": 3
+    }
+  ]
+}
 ```
 
-### print_receipt()
+---
 
-Format and print a receipt.
+#### `GET /jobs/{job_id}`
 
-```python
-print_receipt(receipt_id: str, format: str = "summary") -> str
+Get a specific job.
+
+**Response:**
+```json
+{
+  "job_id": "my-job-001",
+  "status": "completed",
+  "command": "python train.py",
+  "created_at": "2026-07-20T13:31:23Z",
+  "started_at": "2026-07-20T13:31:25Z",
+  "completed_at": "2026-07-20T13:35:50Z",
+  "assigned_agent": "gpu-1",
+  "exit_code": 0,
+  "artifacts": [
+    { "path": "model.pkl", "size_bytes": 524288, "hash": "sha256:abc..." },
+    { "path": "metrics.json", "size_bytes": 1024, "hash": "sha256:def..." }
+  ]
+}
 ```
 
-**Parameters:**
-- `receipt_id` (str): Receipt identifier. Required.
-- `format` (str): Output format: "summary", "json", or "csv". Default: "summary"
+**Errors:**
+- `404 Not Found` — Job does not exist
 
-**Returns:** Formatted receipt string.
+---
 
-**Example:**
-```python
-print(runner.print_receipt("abc123def456", format="summary"))
-print(runner.print_receipt("abc123def456", format="json"))
+#### `DELETE /jobs/{job_id}`
+
+Cancel a running job.
+
+**Response (200 OK):**
+```json
+{
+  "job_id": "my-job-001",
+  "status": "cancelled",
+  "cancelled_at": "2026-07-20T13:40:00Z"
+}
 ```
 
-## GCONAgent
+**Errors:**
+- `404 Not Found` — Job does not exist
+- `400 Bad Request` — Job is already completed/failed (can't cancel)
 
-Executes jobs and collects metrics.
+---
 
-### Constructor
+### Workflows
 
-```python
-GCONAgent(job_id: str)
+#### `POST /workflows`
+
+Submit a multi-step workflow (DAG of tasks).
+
+**Request:**
+```json
+{
+  "workflow_id": "training-pipeline-v1",
+  "tasks": [
+    {
+      "task_id": "download",
+      "command": "python download_data.py",
+      "depends_on": []
+    },
+    {
+      "task_id": "preprocess",
+      "command": "python preprocess.py",
+      "depends_on": ["download"]
+    },
+    {
+      "task_id": "train",
+      "command": "python train.py",
+      "depends_on": ["preprocess"]
+    },
+    {
+      "task_id": "evaluate",
+      "command": "python evaluate.py",
+      "depends_on": ["train"]
+    }
+  ]
+}
 ```
 
-**Parameters:**
-- `job_id` (str): Unique identifier for this job. Required.
-
-**Example:**
-```python
-from agent import GCONAgent
-
-agent = GCONAgent("job-001")
+**Response (201 Created):**
+```json
+{
+  "workflow_id": "training-pipeline-v1",
+  "status": "running",
+  "created_at": "2026-07-20T13:31:23Z",
+  "tasks": [
+    {
+      "task_id": "download",
+      "status": "running",
+      "depends_on": [],
+      "job_id": "training-pipeline-v1/download"
+    }
+  ]
+}
 ```
 
-### detect_gpu()
+**Errors:**
+- `400 Bad Request` — Invalid DAG (cycle detected, orphaned task, missing dependency)
+- `409 Conflict` — Workflow with this ID already exists
 
-Detect available GPU hardware.
+---
 
-```python
-detect_gpu() -> Dict[str, Any]
+#### `GET /workflows`
+
+List all workflows.
+
+**Query Parameters:**
+- `status` (optional): `pending`, `running`, `completed`, `failed`
+- `limit` (default: 100)
+
+**Response:**
+```json
+{
+  "total": 23,
+  "workflows": [
+    {
+      "workflow_id": "training-pipeline-v1",
+      "status": "completed",
+      "created_at": "2026-07-20T13:31:23Z",
+      "completed_at": "2026-07-20T13:50:00Z",
+      "task_count": 4,
+      "completed_tasks": 4
+    }
+  ]
+}
 ```
 
-**Returns:** Dictionary with GPU information.
+---
 
-**Example:**
-```python
-gpu_info = agent.detect_gpu()
-print(f"GPU: {gpu_info['gpu_name']}")
-print(f"Memory: {gpu_info['memory_total']}MB")
+#### `GET /workflows/{workflow_id}`
+
+Get workflow details and task status.
+
+**Response:**
+```json
+{
+  "workflow_id": "training-pipeline-v1",
+  "status": "completed",
+  "created_at": "2026-07-20T13:31:23Z",
+  "completed_at": "2026-07-20T13:50:00Z",
+  "tasks": [
+    {
+      "task_id": "download",
+      "status": "completed",
+      "job_id": "training-pipeline-v1/download",
+      "depends_on": [],
+      "started_at": "2026-07-20T13:31:25Z",
+      "completed_at": "2026-07-20T13:32:50Z",
+      "exit_code": 0
+    }
+  ]
+}
 ```
 
-### execute_job()
+---
 
-Execute a job script and monitor execution.
+### Receipts (Execution Proofs)
 
-```python
-execute_job(
-    job_script: str,
-    timeout: Optional[int] = None
-) -> Dict[str, Any]
+#### `GET /receipts`
+
+List all receipts.
+
+**Query Parameters:**
+- `agent_id` (optional): Filter by agent
+- `limit` (default: 100)
+
+**Response:**
+```json
+{
+  "total": 127,
+  "receipts": [
+    {
+      "receipt_id": "receipt-001",
+      "job_id": "my-job-001",
+      "agent_id": "gpu-1",
+      "status": "completed",
+      "timestamp": "2026-07-20T13:35:50Z",
+      "exit_code": 0,
+      "signature_valid": true
+    }
+  ]
+}
 ```
 
-**Parameters:**
-- `job_script` (str): Path to script or command to execute. Required.
-- `timeout` (int, optional): Maximum execution time in seconds.
+---
 
-**Returns:** Dictionary with execution results and metrics.
+#### `GET /receipts/{receipt_id}`
 
-**Example:**
-```python
-result = agent.execute_job("python train.py", timeout=300)
-print(f"Status: {result['status']}")
-print(f"Runtime: {result['runtime_seconds']}s")
-print(f"Return code: {result['return_code']}")
+Get a specific receipt (the signed proof).
+
+**Response:**
+```json
+{
+  "receipt_id": "receipt-001",
+  "job_id": "my-job-001",
+  "agent_id": "gpu-1",
+  "command": "python train.py",
+  "status": "completed",
+  "exit_code": 0,
+  "timestamp": "2026-07-20T13:35:50Z",
+  "stdout": "Epoch 1: loss=0.523\nEpoch 2: loss=0.412\n...",
+  "stderr": "",
+  "artifacts": [
+    {
+      "path": "model.pkl",
+      "size_bytes": 524288,
+      "hash": "sha256:abc123..."
+    }
+  ],
+  "signature": "-----BEGIN RSA SIGNATURE-----\nMIGEAoGBAJR8...\n-----END RSA SIGNATURE-----",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCS...\n-----END PUBLIC KEY-----"
+}
 ```
 
-### collect_metrics()
+---
 
-Collect current system metrics.
+#### `POST /receipts/{receipt_id}/verify`
 
-```python
-collect_metrics() -> ExecutionMetrics
+Verify a receipt offline (check signature, timestamp).
+
+**Request:**
+```json
+{
+  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+}
 ```
 
-**Returns:** ExecutionMetrics dataclass with current metrics.
-
-**Example:**
-```python
-metrics = agent.collect_metrics()
-print(f"CPU: {metrics.cpu_percent}%")
-print(f"Memory: {metrics.memory_percent}%")
-print(f"GPU Memory Used: {metrics.gpu_memory_used}MB")
+**Response:**
+```json
+{
+  "receipt_id": "receipt-001",
+  "valid": true,
+  "signature_valid": true,
+  "timestamp_valid": true,
+  "checks": [
+    { "check": "signature", "passed": true },
+    { "check": "timestamp_recent", "passed": true },
+    { "check": "job_id_binding", "passed": true },
+    { "check": "agent_id_binding", "passed": true }
+  ]
+}
 ```
 
-### get_metrics_summary()
+**Errors:**
+- `400 Bad Request` — Public key format invalid
+- `404 Not Found` — Receipt not found
 
-Get summary of collected metrics.
+---
 
-```python
-get_metrics_summary() -> Dict[str, Any]
+### Nodes (Agents)
+
+#### `GET /nodes`
+
+List all agents in the cluster.
+
+**Response:**
+```json
+{
+  "total": 4,
+  "nodes": [
+    {
+      "agent_id": "gpu-1",
+      "hostname": "worker-1.gcon.internal",
+      "status": "idle",
+      "capacity": 4,
+      "running_jobs": 0,
+      "completed_jobs": 42,
+      "failed_jobs": 1,
+      "last_heartbeat": "2026-07-20T13:40:05Z",
+      "cpu_percent": 5.2,
+      "memory_percent": 12.4
+    }
+  ]
+}
 ```
 
-**Returns:** Summary dictionary with statistics.
+---
 
-**Example:**
-```python
-summary = agent.get_metrics_summary()
-print(f"Samples: {summary['total_samples']}")
-print(f"Avg CPU: {summary['avg_cpu_percent']}%")
+#### `GET /nodes/{agent_id}`
+
+Get details for a specific agent.
+
+**Response:**
+```json
+{
+  "agent_id": "gpu-1",
+  "hostname": "worker-1.gcon.internal",
+  "status": "idle",
+  "capacity": 4,
+  "running_jobs": 0,
+  "completed_jobs": 42,
+  "failed_jobs": 1,
+  "last_heartbeat": "2026-07-20T13:40:05Z",
+  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
+  "registered_at": "2026-07-20T10:00:00Z"
+}
 ```
 
-## ExecutionVerifier
+---
 
-Generates cryptographic proofs and validates receipts.
+#### `DELETE /nodes/{agent_id}`
 
-### Constructor
+Deregister an agent (graceful shutdown, no new jobs assigned).
 
-```python
-ExecutionVerifier(secret_key: Optional[str] = None)
+**Response (200 OK):**
+```json
+{
+  "agent_id": "gpu-1",
+  "status": "deregistering",
+  "deregistered_at": "2026-07-20T13:40:10Z"
+}
 ```
 
-**Parameters:**
-- `secret_key` (str, optional): Secret key for HMAC signing. Default: "gcon-default-key"
+**Errors:**
+- `404 Not Found` — Agent not found
+- `400 Bad Request` — Agent already deregistered
 
-**Example:**
-```python
-from verifier import ExecutionVerifier
+---
 
-verifier = ExecutionVerifier("my-secret-key")
+### Events (Live Updates)
+
+#### `GET /events`
+
+Poll for recent events.
+
+**Query Parameters:**
+- `limit` (default: 50)
+- `since` (optional): ISO 8601 timestamp
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "event_id": "evt-001",
+      "type": "job.submitted",
+      "timestamp": "2026-07-20T13:31:23Z",
+      "job_id": "my-job-001",
+      "details": {
+        "command": "python train.py"
+      }
+    }
+  ]
+}
 ```
 
-### hash_data()
+---
 
-Generate cryptographic hash of data.
+#### `GET /stream`
 
-```python
-@staticmethod
-hash_data(data: Any, algorithm: str = "sha256") -> str
+Server-Sent Events for real-time updates (low-latency dashboard).
+
+**Request:**
+```bash
+curl -H "Accept: text/event-stream" http://localhost:8000/api/v1/stream
 ```
 
-**Parameters:**
-- `data` (str or dict): Data to hash.
-- `algorithm` (str): Hash algorithm: "sha256" or "sha512". Default: "sha256"
+**Response Stream:**
+```
+data: {"type":"job.submitted","job_id":"my-job-001","timestamp":"2026-07-20T13:31:23Z"}
 
-**Returns:** Hex digest of hash.
-
-**Example:**
-```python
-hash1 = ExecutionVerifier.hash_data("input data")
-hash2 = ExecutionVerifier.hash_data({"key": "value"})
-print(f"String hash: {hash1}")
-print(f"Dict hash: {hash2}")
+data: {"type":"job.assigned","job_id":"my-job-001","agent_id":"gpu-1","timestamp":"2026-07-20T13:31:25Z"}
 ```
 
-### hash_file()
+---
 
-Generate hash of a file.
+## Python SDK
 
-```python
-@staticmethod
-hash_file(
-    filepath: str,
-    algorithm: str = "sha256",
-    chunk_size: int = 65536
-) -> str
+### Installation
+
+```bash
+pip install gcon-sdk
+# or, from the repo:
+cd sdk && pip install -e .
 ```
 
-**Parameters:**
-- `filepath` (str): Path to file. Required.
-- `algorithm` (str): Hash algorithm: "sha256" or "sha512". Default: "sha256"
-- `chunk_size` (int): Chunk size for reading large files. Default: 65536
-
-**Returns:** Hex digest of file hash.
-
-**Example:**
-```python
-file_hash = ExecutionVerifier.hash_file("data.csv")
-print(f"File hash: {file_hash}")
-```
-
-### sign_data()
-
-Create HMAC signature of data.
+### Basic Usage
 
 ```python
-sign_data(data: Dict[str, Any]) -> str
-```
+from gcon_sdk import GconClient
 
-**Parameters:**
-- `data` (dict): Data to sign. Required.
+client = GconClient(api_key="gcon_dev", base_url="http://localhost:8000")
 
-**Returns:** Hex digest of HMAC signature.
+# Cluster info
+print(client.get_cluster())
+print(client.list_nodes())
 
-**Example:**
-```python
-data = {"job_id": "job-001", "status": "success"}
-signature = verifier.sign_data(data)
-print(f"Signature: {signature}")
-```
+# Submit a job
+client.submit_job("job-001", "echo hello")
+job = client.get_job("job-001")
 
-### verify_signature()
+# Cancel a job
+client.cancel_job("job-001")
 
-Verify HMAC signature of data.
+# List jobs
+jobs = client.list_jobs(status="completed", limit=50)
 
-```python
-verify_signature(data: Dict[str, Any], signature: str) -> bool
-```
+# Workflows
+workflow = {
+    "workflow_id": "pipeline-v1",
+    "tasks": [
+        {"task_id": "step-1", "command": "python a.py", "depends_on": []},
+        {"task_id": "step-2", "command": "python b.py", "depends_on": ["step-1"]}
+    ]
+}
+client.submit_workflow(workflow)
 
-**Parameters:**
-- `data` (dict): Data to verify. Required.
-- `signature` (str): Expected signature. Required.
+# Receipts
+receipts = client.list_receipts()
+receipt = client.get_receipt("receipt-001")
 
-**Returns:** True if signature is valid, False otherwise.
-
-**Example:**
-```python
-data = {"job_id": "job-001", "status": "success"}
-signature = verifier.sign_data(data)
-is_valid = verifier.verify_signature(data, signature)
+# Verify receipt
+is_valid = client.verify_receipt(receipt)
 print(f"Valid: {is_valid}")
 ```
 
-### generate_execution_proof()
-
-Generate execution proof receipt.
+### Error Handling
 
 ```python
-generate_execution_proof(
-    job_id: str,
-    gpu_name: str,
-    runtime: float,
-    input_hash: str,
-    output_hash: str,
-    metrics: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]
+from gcon_sdk import GconClient, GconAPIError
+
+client = GconClient(api_key="gcon_dev")
+
+try:
+    client.submit_job("dup-id", "echo hi")
+    client.submit_job("dup-id", "echo hi")  # Duplicate
+except GconAPIError as e:
+    print(f"Error {e.status_code}: {e.detail}")
 ```
 
-**Parameters:**
-- `job_id` (str): Job identifier. Required.
-- `gpu_name` (str): GPU used. Required.
-- `runtime` (float): Execution time in seconds. Required.
-- `input_hash` (str): Hash of input data. Required.
-- `output_hash` (str): Hash of output data. Required.
-- `metrics` (dict, optional): Execution metrics.
+---
 
-**Returns:** Proof dictionary with signature.
+## Verification API
 
-**Example:**
-```python
-proof = verifier.generate_execution_proof(
-    job_id="job-001",
-    gpu_name="RTX 4090",
-    runtime=120.5,
-    input_hash="abc123...",
-    output_hash="def456..."
-)
-print(f"Verified: {proof['verified']}")
-```
-
-### validate_proof()
-
-Validate execution proof.
+### Standalone Verification (No Coordinator)
 
 ```python
-validate_proof(proof: Dict[str, Any]) -> Tuple[bool, str]
-```
+from gcon.verification import ReceiptVerifier
+import json
 
-**Parameters:**
-- `proof` (dict): Proof to validate. Required.
+receipt = json.load(open("receipt.json"))
+verifier = ReceiptVerifier()
+is_valid = verifier.verify(receipt)
 
-**Returns:** Tuple of (is_valid: bool, message: str)
-
-**Example:**
-```python
-is_valid, message = verifier.validate_proof(proof)
 if is_valid:
-    print("Proof is valid!")
+    print(f"Receipt is valid")
+    print(f"  Job: {receipt['job_id']}")
+    print(f"  Agent: {receipt['agent_id']}")
 else:
-    print(f"Proof is invalid: {message}")
+    print(f"Receipt failed verification")
 ```
 
-## ReceiptManager
+---
 
-Manages execution receipts.
+## Error Handling
 
-### Constructor
+### HTTP Status Codes
 
-```python
-ReceiptManager(storage_dir: str = "./receipts")
+| Code | Meaning |
+|------|----------|
+| `200 OK` | Request succeeded |
+| `201 Created` | Resource created |
+| `400 Bad Request` | Invalid input |
+| `404 Not Found` | Resource not found |
+| `409 Conflict` | Resource already exists |
+| `500 Internal Server Error` | Server error |
+| `503 Service Unavailable` | Service down |
+
+### Error Response Format
+
+```json
+{
+  "error": "ConflictError",
+  "detail": "Job 'my-job' already exists.",
+  "status_code": 409,
+  "request_id": "req-123456"
+}
 ```
 
-**Parameters:**
-- `storage_dir` (str): Directory to store receipts. Default: "./receipts"
+---
 
-**Example:**
-```python
-from receipt import ReceiptManager
+## Interactive API Docs
 
-manager = ReceiptManager("./my_receipts")
+Once the dashboard is running, access interactive Swagger UI:
+
 ```
-
-### save_receipt()
-
-Save receipt to storage.
-
-```python
-save_receipt(receipt: Dict[str, Any]) -> bool
+http://localhost:8000/api/v1/docs
 ```
-
-**Parameters:**
-- `receipt` (dict): Receipt to save. Required.
-
-**Returns:** True if successful, False otherwise.
-
-### load_receipt()
-
-Load receipt from storage.
-
-```python
-load_receipt(receipt_id: str) -> Optional[Dict[str, Any]]
-```
-
-**Parameters:**
-- `receipt_id` (str): Receipt identifier. Required.
-
-**Returns:** Receipt dictionary or None if not found.
-
-### list_receipts()
-
-List receipts, optionally filtered by job ID.
-
-```python
-list_receipts(job_id: Optional[str] = None) -> List[Dict[str, Any]]
-```
-
-**Parameters:**
-- `job_id` (str, optional): Filter by job ID.
-
-**Returns:** List of receipt dictionaries.
-
-### delete_receipt()
-
-Delete receipt from storage.
-
-```python
-delete_receipt(receipt_id: str) -> bool
-```
-
-**Parameters:**
-- `receipt_id` (str): Receipt identifier. Required.
-
-**Returns:** True if successful, False otherwise.
-
-## ReceiptFormatter
-
-Formats receipts for display and export.
-
-### to_json_string()
-
-Convert receipt to JSON string.
-
-```python
-@staticmethod
-to_json_string(receipt: Dict[str, Any], pretty: bool = True) -> str
-```
-
-**Parameters:**
-- `receipt` (dict): Receipt to convert. Required.
-- `pretty` (bool): Use pretty printing. Default: True
-
-**Returns:** JSON string representation.
-
-### to_summary()
-
-Create human-readable summary.
-
-```python
-@staticmethod
-to_summary(receipt: Dict[str, Any]) -> str
-```
-
-**Parameters:**
-- `receipt` (dict): Receipt to format. Required.
-
-**Returns:** Formatted summary string.
-
-### to_csv()
-
-Convert receipts to CSV format.
-
-```python
-@staticmethod
-to_csv(receipts: List[Dict[str, Any]]) -> str
-```
-
-**Parameters:**
-- `receipts` (list): List of receipts. Required.
-
-**Returns:** CSV formatted string.
