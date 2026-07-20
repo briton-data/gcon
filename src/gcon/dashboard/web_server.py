@@ -93,14 +93,21 @@ class WebServer:
         def jobs(user=Depends(self.current_user)):
             return self.presentation.get_jobs()
 
+        @self.app.get("/jobs/{job_id}")
+        def job_detail(job_id: str, user=Depends(self.current_user)):
+            detail = self.presentation.get_execution_detail(job_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail="Execution not found")
+            return detail
+
         @self.app.get("/events")
-        def events(user=Depends(self.require_permission("Manage users"))):
+        def events(user=Depends(self.current_user)):
             return self.presentation.get_events()
 
         # ---- Cluster Visualization ----
 
         @self.app.get("/topology")
-        def topology():
+        def topology(user=Depends(self.current_user)):
             return self.presentation.get_topology()
 
         # ---- Explorer views ----
@@ -108,6 +115,13 @@ class WebServer:
         @self.app.get("/receipts")
         def receipts(user=Depends(self.current_user)):
             return self.presentation.get_receipts()
+
+        @self.app.get("/receipts/{receipt_id}")
+        def receipt_detail(receipt_id: str, user=Depends(self.current_user)):
+            detail = self.presentation.get_receipt_detail(receipt_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail="Receipt not found")
+            return detail
 
         @self.app.get("/artifacts")
         def artifacts(user=Depends(self.current_user)):
@@ -120,7 +134,7 @@ class WebServer:
             return self.presentation.get_system_metrics()
 
         @self.app.get("/health")
-        def cluster_health():
+        def cluster_health(user=Depends(self.current_user)):
             return self.presentation.get_cluster_health()
 
         # ---- Operations Panel: scheduler control ----
@@ -263,13 +277,20 @@ class WebServer:
             await websocket.accept()
             try:
                 while True:
+                    health = self.presentation.get_cluster_health()
                     payload = {
                         "cluster": self.presentation.get_cluster_state(),
                         "nodes": self.presentation.get_nodes(),
                         "jobs": self.presentation.get_jobs(),
                         "events": self.presentation.get_events(),
-                        "health": self.presentation.get_cluster_health(),
+                        "health": health,
                         "system_metrics": self.presentation.get_system_metrics(),
+                        "global_status": self.presentation.get_global_status(health),
+                        "node_summary": self.presentation.get_node_summary(),
+                        "receipts_summary": self.presentation.get_receipts_summary(),
+                        "storage_summary": self.presentation.get_storage_summary(health),
+                        "critical_alerts": self.presentation.get_critical_alerts(health),
+                        "execution_timeline": self.presentation.get_execution_timeline(),
                     }
                     await websocket.send_json(jsonable_encoder(payload))
                     await asyncio.sleep(2)
@@ -440,7 +461,7 @@ class WebServer:
         
         
         @self.app.get("/health/details")
-        def cluster_health_details():
+        def cluster_health_details(user=Depends(self.current_user)):
             return self.presentation.get_health_details()
         
         # ---- Management: export ----
