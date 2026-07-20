@@ -1,0 +1,35 @@
+<div class="gcon-panel h-100">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-hdd-network me-2"></i>Node Summary</h5>
+        <a href="#" class="gcon-panel-link" data-tab="explorer">View all &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="node-summary-body" style="min-height:auto;">
+
+        <div class="gcon-summary-widget">
+
+            <div class="gcon-summary-headline">
+                <span class="value" id="node-summary-total">{{ dashboard.node_summary.total }}</span>
+                <span class="label">registered node(s)</span>
+            </div>
+
+            <div class="gcon-summary-bar" id="node-summary-bar">
+                {% set total = dashboard.node_summary.total or 1 %}
+                <div class="seg" style="width:{{ (dashboard.node_summary.idle / total * 100) | round(1) }}%; background: var(--success);"></div>
+                <div class="seg" style="width:{{ (dashboard.node_summary.busy / total * 100) | round(1) }}%; background: var(--primary);"></div>
+                <div class="seg" style="width:{{ (dashboard.node_summary.offline / total * 100) | round(1) }}%; background: var(--danger);"></div>
+            </div>
+
+            <div class="gcon-summary-legend" id="node-summary-legend">
+                <span class="item"><span class="swatch" style="background:var(--success);"></span>Idle {{ dashboard.node_summary.idle }}</span>
+                <span class="item"><span class="swatch" style="background:var(--primary);"></span>Busy {{ dashboard.node_summary.busy }}</span>
+                <span class="item"><span class="swatch" style="background:var(--danger);"></span>Offline {{ dashboard.node_summary.offline }}</span>
+                <span class="item"><span class="swatch" style="background:var(--warning);"></span>Draining {{ dashboard.node_summary.draining }}</span>
+            </div>
+
+        </div>
+
+    </div>
+
+</div>

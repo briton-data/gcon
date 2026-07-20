@@ -199,8 +199,17 @@ class PresentationLayer:
 
     def get_dashboard(self):
         """
-        Return all data required by the dashboard.
+        Return all data required by the Home Dashboard, including the
+        live-derived widgets (health, alerts, summaries) it needs to
+        answer "is this trustworthy and does it need my attention?"
+        within a glance.
+
+        Health is computed once here and threaded into the widgets
+        that depend on it, rather than recomputing the same live
+        health-service pass multiple times per request.
         """
+        health = self.get_cluster_health()
+
         return {
             "metrics": self.get_dashboard_metrics(),
             "nodes": self.get_nodes(),
@@ -209,7 +218,136 @@ class PresentationLayer:
             "storage": self.get_storage(),
             "workflows": self.get_workflows(),
             "receipts_count": len(self.coordinator.get_receipts()),
+            "health": health,
+            "global_status": self.get_global_status(health),
+            "node_summary": self.get_node_summary(),
+            "receipts_summary": self.get_receipts_summary(),
+            "storage_summary": self.get_storage_summary(health),
+            "critical_alerts": self.get_critical_alerts(health),
+            "execution_timeline": self.get_execution_timeline(),
     }
+
+    # ------------------------------------------------------------------
+    # Home Dashboard widgets
+    # ------------------------------------------------------------------
+
+    def get_node_summary(self):
+        """
+        Return a live breakdown of registered nodes by status, for the
+        Node Summary widget.
+        """
+        return self.coordinator.get_node_summary()
+
+    def get_receipts_summary(self):
+        """
+        Return live verification counts across all receipts, for the
+        Receipt Summary widget. Verification is recomputed against
+        each receipt's real signed proof (see Coordinator.get_receipts),
+        never cached as a stale flag.
+        """
+        receipts = self.coordinator.get_receipts()
+        verified = sum(1 for r in receipts if r.get("verified"))
+
+        return {
+            "total": len(receipts),
+            "verified": verified,
+            "unverified": len(receipts) - verified,
+        }
+
+    def get_storage_summary(self, health=None):
+        """
+        Return artifact counts/size alongside live disk capacity, for
+        the Storage Summary widget. Disk figures are reused from the
+        health service's storage branch rather than recomputed here.
+        """
+        health = health or self.get_cluster_health()
+        artifacts = self.get_artifacts()
+        total_bytes = sum(a.get("size") or 0 for a in artifacts)
+        disk = health.get("checks", {}).get("storage", {}).get("metrics", {})
+
+        return {
+            "artifact_count": len(artifacts),
+            "artifacts_total_bytes": total_bytes,
+            "disk_free_bytes": disk.get("free_bytes", 0),
+            "disk_total_bytes": disk.get("total_bytes", 0),
+            "disk_remaining_pct": disk.get("remaining_capacity_pct", 0),
+        }
+
+    def get_critical_alerts(self, health=None):
+        """
+        Return operator-actionable alerts. This is a re-shaping of
+        data already computed by the health service and job state —
+        not a separate alerting engine — so it can never disagree
+        with what Cluster Health and Executions already show.
+        """
+        health = health or self.get_cluster_health()
+        alerts = []
+
+        for reason in health.get("reasons", []):
+            if not reason["healthy"]:
+                alerts.append({
+                    "id": f"health:{reason['check']}",
+                    "severity": "critical" if health["state"] == "critical" else "warning",
+                    "source": reason["label"],
+                    "message": reason["detail"],
+                })
+
+        failed_jobs = [j for j in self.get_jobs() if j.get("status") == "failed"]
+        if failed_jobs:
+            alerts.append({
+                "id": "jobs:failed",
+                "severity": "warning",
+                "source": "Executions",
+                "message": f"{len(failed_jobs)} job(s) failed and may need attention.",
+            })
+
+        return alerts
+
+    def get_execution_timeline(self, limit=8):
+        """
+        Return the most recently created jobs, newest first, for the
+        Home Dashboard's Execution Timeline widget.
+        """
+        jobs = self.get_jobs()
+        jobs_sorted = sorted(jobs, key=lambda j: j.get("created_at") or "", reverse=True)
+        return jobs_sorted[:limit]
+
+    def get_global_status(self, health=None):
+        """
+        Return the top-line system statuses shown in the Global Status
+        Bar — each sourced from the same live health checks used
+        elsewhere, never re-derived or hardcoded. Heartbeat age is the
+        longest time since any active node last reported in.
+        """
+        health = health or self.get_cluster_health()
+        checks = health.get("checks", {})
+        coordinator_check = checks.get("coordinator", {})
+
+        now = datetime.now(UTC)
+        heartbeat_age_seconds = None
+        for node in self.get_nodes():
+            last_seen = node.get("last_seen")
+            if not last_seen or last_seen == "N/A":
+                continue
+            try:
+                seen_at = datetime.fromisoformat(last_seen)
+            except ValueError:
+                continue
+            age = (now - seen_at).total_seconds()
+            if heartbeat_age_seconds is None or age > heartbeat_age_seconds:
+                heartbeat_age_seconds = age
+
+        return {
+            "coordinator_id": self.coordinator.coordinator_id,
+            "cluster_state": health.get("state"),
+            "coordinator_online": coordinator_check.get("healthy", False),
+            "scheduler_running": coordinator_check.get("metrics", {}).get("running", False),
+            "storage_online": checks.get("storage", {}).get("healthy", False),
+            "receipt_engine_online": checks.get("receipt_service", {}).get("healthy", False),
+            "heartbeat_age_seconds": (
+                round(heartbeat_age_seconds) if heartbeat_age_seconds is not None else None
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Cluster Visualization
@@ -218,17 +356,31 @@ class PresentationLayer:
     def get_topology(self):
         """
         Return a coordinator/node graph describing the current cluster
-        shape, for the live topology view.
+        shape, for the live topology view. Includes enough detail per
+        node (cpu/memory/heartbeat/draining) to power click-to-inspect
+        without a second round-trip.
         """
         nodes = self.coordinator.get_nodes()
+        global_status = self.get_global_status()
 
         return {
-            "coordinator": {"id": "Coordinator-1"},
+            "coordinator": {
+                "id": self.coordinator.coordinator_id,
+                "online": global_status["coordinator_online"],
+                "scheduler_running": global_status["scheduler_running"],
+                "started_at": self.coordinator.started_at.isoformat(),
+                "total_nodes": len(nodes),
+                "running_jobs": sum(1 for j in self.get_jobs() if j.get("status") == "running"),
+            },
             "nodes": [
                 {
                     "node_id": node["node_id"],
                     "status": node["status"],
+                    "cpu": node["cpu"],
+                    "memory": node["memory"],
                     "running_jobs": node["running_jobs"],
+                    "last_seen": node["last_seen"],
+                    "draining": node["draining"],
                 }
                 for node in nodes
             ],
@@ -243,6 +395,22 @@ class PresentationLayer:
         Return all generated job receipts.
         """
         return self.coordinator.get_receipts()
+
+    def get_receipt_detail(self, receipt_id):
+        """
+        Return the full record for one receipt (proof, live
+        verification, execution details, artifacts) for the Receipt
+        Explorer's detail view.
+        """
+        return self.coordinator.get_receipt_detail(receipt_id)
+
+    def get_execution_detail(self, job_id):
+        """
+        Return the full lifecycle record for one execution (status,
+        timestamps, artifacts, and its receipt's live verification if
+        one exists) for the Executions page's detail view.
+        """
+        return self.coordinator.get_execution_detail(job_id)
 
     def get_artifacts(self):
         """

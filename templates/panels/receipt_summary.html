@@ -1,0 +1,32 @@
+<div class="gcon-panel h-100">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-patch-check me-2"></i>Receipt Summary</h5>
+        <a href="#" class="gcon-panel-link" data-tab="receipts">View all &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="receipt-summary-body" style="min-height:auto;">
+
+        <div class="gcon-summary-widget">
+
+            <div class="gcon-summary-headline">
+                <span class="value" id="receipt-summary-total">{{ dashboard.receipts_summary.total }}</span>
+                <span class="label">execution receipt(s)</span>
+            </div>
+
+            <div class="gcon-summary-bar" id="receipt-summary-bar">
+                {% set total = dashboard.receipts_summary.total or 1 %}
+                <div class="seg" style="width:{{ (dashboard.receipts_summary.verified / total * 100) | round(1) }}%; background: var(--success);"></div>
+                <div class="seg" style="width:{{ (dashboard.receipts_summary.unverified / total * 100) | round(1) }}%; background: var(--danger);"></div>
+            </div>
+
+            <div class="gcon-summary-legend" id="receipt-summary-legend">
+                <span class="item"><span class="swatch" style="background:var(--success);"></span>Verified {{ dashboard.receipts_summary.verified }}</span>
+                <span class="item"><span class="swatch" style="background:var(--danger);"></span>Unverified {{ dashboard.receipts_summary.unverified }}</span>
+            </div>
+
+        </div>
+
+    </div>
+
+</div>

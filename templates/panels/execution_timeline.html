@@ -1,0 +1,40 @@
+<div class="gcon-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-activity me-2"></i>Execution Timeline</h5>
+        <a href="#" class="gcon-panel-link" data-tab="explorer">Full history &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="execution-timeline-body" style="min-height:auto;">
+
+        <div class="gcon-timeline" id="execution-timeline-list">
+
+            {% if dashboard.execution_timeline %}
+
+                {% for job in dashboard.execution_timeline %}
+                <div class="gcon-timeline-item">
+                    <span class="gcon-timeline-dot {{ job.status }}"></span>
+                    <span class="gcon-timeline-id">{{ job.job_id }}</span>
+                    <span class="badge
+                        {% if job.status == 'running' %}bg-primary
+                        {% elif job.status == 'completed' %}bg-success
+                        {% elif job.status == 'failed' %}bg-danger
+                        {% elif job.status == 'pending' %}bg-warning text-dark
+                        {% else %}bg-secondary{% endif %}">
+                        {{ job.status }}
+                    </span>
+                    <span class="gcon-timeline-meta">{{ job.node_id or "unassigned" }} &middot; {{ job.created_at }}</span>
+                </div>
+                {% endfor %}
+
+            {% else %}
+
+                <div class="text-secondary small">No executions submitted yet.</div>
+
+            {% endif %}
+
+        </div>
+
+    </div>
+
+</div>

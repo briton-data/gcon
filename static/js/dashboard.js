@@ -9,7 +9,7 @@
 
 
 let currentTab = "control-center";
-let explorerView = "jobs";
+let explorerView = "nodes";
 let explorerData = [];
 let isPaused = false;
 // How often the dashboard re-polls REST endpoints (cluster state,
@@ -21,6 +21,25 @@ const REFRESH_INTERVAL_MS = 5000;
 // ---------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------
+
+function showToast(message, isError) {
+    const stack = document.getElementById("gcon-toast-stack");
+    if (!stack) return;
+
+    const toast = document.createElement("div");
+    toast.className = `gcon-toast ${isError ? "error" : "success"}`;
+    toast.innerHTML = `
+        <i class="bi ${isError ? "bi-exclamation-triangle-fill" : "bi-check-circle-fill"}"></i>
+        <span>${escapeHtml(message)}</span>
+    `;
+    stack.appendChild(toast);
+
+    setTimeout(() => toast.classList.add("show"), 10);
+    setTimeout(() => {
+        toast.classList.remove("show");
+        setTimeout(() => toast.remove(), 250);
+    }, isError ? 6000 : 3500);
+}
 
 function escapeHtml(value) {
     if (value === null || value === undefined) return "";
@@ -63,6 +82,21 @@ function formatUptime(seconds) {
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);
     return `${h}h ${m}m ${s}s`;
+}
+
+function formatBytes(bytes) {
+    if (bytes === undefined || bytes === null || isNaN(bytes)) return "--";
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatAge(seconds) {
+    if (seconds === undefined || seconds === null) return "--";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${Math.round(seconds / 3600)}h`;
 }
 
 async function fetchJson(url, options) {
@@ -118,7 +152,9 @@ function renderFeed(containerId, events) {
 
 const TAB_TITLES = {
     "control-center": "Control Center",
+    "executions": "Executions",
     "topology": "Cluster Visualization",
+    "receipts": "Receipts",
     "explorer": "Explorer",
     "monitoring": "Real-Time Monitoring",
     "analytics": "Analytics & History",
@@ -158,7 +194,9 @@ function setupTabNav() {
 
 function loadActiveTab() {
     if (currentTab === "control-center") loadControlCenter();
+    else if (currentTab === "executions") loadExecutionsTab();
     else if (currentTab === "topology") loadTopology();
+    else if (currentTab === "receipts") loadReceiptsTab();
     else if (currentTab === "explorer") loadExplorer();
     else if (currentTab === "monitoring") loadMonitoring();
     else if (currentTab === "analytics") loadAnalytics();
@@ -327,7 +365,7 @@ function bindNodeActionButtons() {
 
                 console.error(`Failed to ${action} node:`, err);
 
-                alert(err.message || `Failed to ${action} node.`);
+                showToast(err.message || `Failed to ${action} node.`, true);
 
                 btn.disabled = false;
 
@@ -342,11 +380,13 @@ async function loadNodes() {
 
     const body = document.getElementById("nodes-body");
 
-    if (!body) return [];
-
     try {
 
         const nodes = await fetchJson("/nodes");
+
+        if (!body) {
+            return nodes;
+        }
 
         if (nodes.length === 0) {
 
@@ -437,7 +477,7 @@ function bindJobActionButtons() {
 
                 console.error("Failed to cancel job:", err);
 
-                alert(err.message || "Failed to cancel job.");
+                showToast(err.message || "Failed to cancel job.", true);
 
                 btn.disabled = false;
 
@@ -454,11 +494,13 @@ async function loadJobs() {
 
     const body = document.getElementById("jobs-body");
 
-    if (!body) return [];
-
     try {
 
         const jobs = await fetchJson("/jobs");
+
+        if (!body) {
+            return jobs;
+        }
 
         if (jobs.length === 0) {
 
@@ -523,11 +565,211 @@ async function loadControlCenter() {
         loadNodes(),
         loadJobs(),
         loadClusterHealth(),
-        loadEvents()
+        loadEvents(),
+        loadTopologyMini()
     ]);
 
     populateOperationsSelectors(nodes, jobs);
 
+}
+
+// ---------------------------------------------------------------
+// Home Dashboard widgets — Global Status, Alerts, Summaries,
+// Execution Timeline, mini Topology. All driven by the same
+// payload shape the server embeds on first paint (#dashboard-
+// bootstrap-data) and the /ws socket pushes every 2s, so there is
+// exactly one render path regardless of data source.
+// ---------------------------------------------------------------
+
+async function loadTopologyMini() {
+    const container = document.getElementById("topology-mini-container");
+    if (!container) return;
+
+    try {
+        const topo = await fetchJson("/topology");
+        container.innerHTML = buildTopologySvg(topo);
+    } catch (err) {
+        console.error("Failed to load mini topology:", err);
+    }
+}
+
+function renderGlobalStatus(status) {
+    if (!status) return;
+
+    const pill = (id, healthy, label) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.remove("ok", "warn", "bad");
+        el.classList.add(healthy ? "ok" : "bad");
+        el.innerHTML = `<span class="dot"></span>${label}`;
+    };
+
+    pill("status-pill-coordinator", status.coordinator_online, "Coordinator");
+    pill("status-pill-scheduler", status.scheduler_running, "Scheduler");
+    pill("status-pill-storage", status.storage_online, "Storage");
+    pill("status-pill-receipts", status.receipt_engine_online, "Receipts");
+
+    const heartbeatEl = document.getElementById("status-pill-heartbeat");
+    if (heartbeatEl) {
+        const age = status.heartbeat_age_seconds;
+        heartbeatEl.classList.remove("ok", "warn", "bad");
+        heartbeatEl.classList.add(age === null ? "warn" : age < 30 ? "ok" : age < 120 ? "warn" : "bad");
+        heartbeatEl.innerHTML = `<span class="dot"></span>Heartbeat ${formatAge(age)}`;
+    }
+
+    const coordEl = document.getElementById("overview-coordinator-id");
+    if (coordEl && status.coordinator_id) {
+        coordEl.textContent = status.coordinator_id;
+        coordEl.title = status.coordinator_id;
+    }
+}
+
+function renderCriticalAlerts(alerts) {
+    alerts = alerts || [];
+
+    const panel = document.getElementById("critical-alerts-panel");
+    const body = document.getElementById("critical-alerts-body");
+    const count = document.getElementById("critical-alerts-count");
+    if (!body || !count || !panel) return;
+
+    count.textContent = alerts.length;
+    count.className = `badge ${alerts.length ? "bg-danger" : "bg-success"}`;
+    panel.classList.toggle("has-alerts", alerts.length > 0);
+
+    if (alerts.length === 0) {
+        body.innerHTML = `
+            <div class="gcon-alerts-empty">
+                <i class="bi bi-check-circle-fill"></i>
+                No critical alerts. Every monitored system is within normal range.
+            </div>`;
+        return;
+    }
+
+    body.innerHTML = alerts.map(a => `
+        <div class="gcon-alert-item ${escapeHtml(a.severity)}">
+            <i class="bi bi-exclamation-triangle-fill gcon-alert-icon"></i>
+            <div>
+                <div class="gcon-alert-source">${escapeHtml(a.source)}</div>
+                <div class="gcon-alert-message">${escapeHtml(a.message)}</div>
+            </div>
+        </div>
+    `).join("");
+}
+
+function renderNodeSummary(summary) {
+    if (!summary) return;
+    const total = summary.total || 0;
+    const pct = (n) => total ? (n / total * 100).toFixed(1) : 0;
+
+    setText("node-summary-total", total);
+
+    const bar = document.getElementById("node-summary-bar");
+    if (bar) {
+        bar.innerHTML = `
+            <div class="seg" style="width:${pct(summary.idle)}%; background: var(--success);"></div>
+            <div class="seg" style="width:${pct(summary.busy)}%; background: var(--primary);"></div>
+            <div class="seg" style="width:${pct(summary.offline)}%; background: var(--danger);"></div>
+        `;
+    }
+
+    const legend = document.getElementById("node-summary-legend");
+    if (legend) {
+        legend.innerHTML = `
+            <span class="item"><span class="swatch" style="background:var(--success);"></span>Idle ${summary.idle}</span>
+            <span class="item"><span class="swatch" style="background:var(--primary);"></span>Busy ${summary.busy}</span>
+            <span class="item"><span class="swatch" style="background:var(--danger);"></span>Offline ${summary.offline}</span>
+            <span class="item"><span class="swatch" style="background:var(--warning);"></span>Draining ${summary.draining}</span>
+        `;
+    }
+}
+
+function renderReceiptsSummary(summary) {
+    if (!summary) return;
+    const total = summary.total || 0;
+    const pct = (n) => total ? (n / total * 100).toFixed(1) : 0;
+
+    setText("receipt-summary-total", total);
+
+    const bar = document.getElementById("receipt-summary-bar");
+    if (bar) {
+        bar.innerHTML = `
+            <div class="seg" style="width:${pct(summary.verified)}%; background: var(--success);"></div>
+            <div class="seg" style="width:${pct(summary.unverified)}%; background: var(--danger);"></div>
+        `;
+    }
+
+    const legend = document.getElementById("receipt-summary-legend");
+    if (legend) {
+        legend.innerHTML = `
+            <span class="item"><span class="swatch" style="background:var(--success);"></span>Verified ${summary.verified}</span>
+            <span class="item"><span class="swatch" style="background:var(--danger);"></span>Unverified ${summary.unverified}</span>
+        `;
+    }
+}
+
+function renderStorageSummary(summary) {
+    if (!summary) return;
+
+    setText("storage-summary-artifacts", summary.artifact_count);
+    setText("storage-summary-bytes", formatBytes(summary.artifacts_total_bytes));
+
+    const usedPct = Math.max(0, 100 - (summary.disk_remaining_pct || 0));
+    const seg = document.getElementById("storage-summary-used-seg");
+    if (seg) seg.style.width = `${usedPct.toFixed(1)}%`;
+
+    setText("storage-summary-disk-pct", `${summary.disk_remaining_pct ?? "--"}%`);
+}
+
+function renderExecutionTimeline(jobs) {
+    const list = document.getElementById("execution-timeline-list");
+    if (!list) return;
+
+    jobs = jobs || [];
+
+    if (jobs.length === 0) {
+        list.innerHTML = `<div class="text-secondary small">No executions submitted yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = jobs.map(job => `
+        <div class="gcon-timeline-item">
+            <span class="gcon-timeline-dot ${escapeHtml(job.status)}"></span>
+            <span class="gcon-timeline-id">${escapeHtml(job.job_id)}</span>
+            ${statusBadge(job.status)}
+            <span class="gcon-timeline-meta">${escapeHtml(job.node_id || "unassigned")} &middot; ${escapeHtml(job.created_at || "-")}</span>
+        </div>
+    `).join("");
+}
+
+function renderHomeDashboard(data) {
+    if (!data) return;
+    renderGlobalStatus(data.global_status);
+    renderCriticalAlerts(data.critical_alerts);
+    renderNodeSummary(data.node_summary);
+    renderReceiptsSummary(data.receipts_summary);
+    renderStorageSummary(data.storage_summary);
+    renderExecutionTimeline(data.execution_timeline);
+}
+
+function bindPanelLinks() {
+    document.querySelectorAll(".gcon-panel-link[data-tab]").forEach(link => {
+        link.addEventListener("click", (e) => {
+            e.preventDefault();
+            const tabLink = document.querySelector(`#tab-nav a[data-tab="${link.dataset.tab}"], #tab-nav-top a[data-tab="${link.dataset.tab}"]`);
+            if (tabLink) tabLink.click();
+        });
+    });
+}
+
+function bootstrapHomeDashboard() {
+    const el = document.getElementById("dashboard-bootstrap-data");
+    if (!el) return;
+    try {
+        const data = JSON.parse(el.textContent);
+        renderHomeDashboard(data);
+    } catch (err) {
+        console.error("Failed to parse bootstrap dashboard data:", err);
+    }
 }
 
 function populateOperationsSelectors(nodes, jobs) {
@@ -904,7 +1146,8 @@ async function loadTopology() {
 
     try {
         const topo = await fetchJson("/topology");
-        container.innerHTML = buildTopologySvg(topo);
+        container.innerHTML = buildTopologySvg(topo, true) + buildTopologyLegend();
+        attachTopologyHandlers(container, topo);
     } catch (err) {
         console.error("Failed to load topology:", err);
         setConnectionStatus(false);
@@ -912,33 +1155,46 @@ async function loadTopology() {
     }
 }
 
-function buildTopologySvg(topo) {
+function nodeHeartbeatAgeSeconds(lastSeen) {
+    if (!lastSeen || lastSeen === "N/A") return null;
+    const seen = new Date(lastSeen).getTime();
+    if (isNaN(seen)) return null;
+    return (Date.now() - seen) / 1000;
+}
+
+function buildTopologySvg(topo, interactive) {
     const nodes = topo.nodes || [];
+    const coordinator = topo.coordinator || {};
     const width = 800;
     const height = Math.max(320, 140 + Math.ceil(nodes.length / 6) * 110);
     const centerX = width / 2;
     const centerY = 80;
 
     const statusColor = {
-        idle: "#6c757d", healthy: "#22c55e", busy: "#3b82f6", offline: "#ef4444",
+        idle: "#10B981", healthy: "#10B981", busy: "#3B82F6", offline: "#EF4444",
     };
+
+    const cursor = interactive ? ' style="cursor:pointer"' : "";
 
     let svg = `<svg viewBox="0 0 ${width} ${height}" width="100%" style="max-width:100%">`;
 
     // Coordinator node
+    const coordFresh = coordinator.online;
     svg += `
-        <circle cx="${centerX}" cy="${centerY}" r="34" fill="#7c3aed" />
-        <text x="${centerX}" y="${centerY + 5}" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Coordinator</text>
+        <g class="gcon-topo-coordinator" data-coordinator="1"${cursor}>
+            ${coordFresh ? `<circle cx="${centerX}" cy="${centerY}" r="42" fill="none" stroke="#8B5CF6" stroke-width="2" opacity=".35" class="gcon-topo-pulse-ring" />` : ""}
+            <circle cx="${centerX}" cy="${centerY}" r="34" fill="#8B5CF6" />
+            <text x="${centerX}" y="${centerY + 5}" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Coordinator</text>
+        </g>
     `;
 
     if (nodes.length === 0) {
-        svg += `<text x="${centerX}" y="${centerY + 80}" text-anchor="middle" fill="#94a3b8" font-size="13">No worker nodes registered</text>`;
+        svg += `<text x="${centerX}" y="${centerY + 80}" text-anchor="middle" fill="#8A8F9B" font-size="13">No worker nodes registered</text>`;
         svg += "</svg>";
         return svg;
     }
 
     const perRow = 6;
-    const spacingX = width / (Math.min(nodes.length, perRow) + 1);
 
     nodes.forEach((node, i) => {
         const row = Math.floor(i / perRow);
@@ -948,18 +1204,494 @@ function buildTopologySvg(topo) {
         const x = rowSpacingX * (col + 1);
         const y = centerY + 140 + row * 110;
 
-        const color = statusColor[(node.status || "").toLowerCase()] || "#6c757d";
+        const status = (node.status || "").toLowerCase();
+        const color = statusColor[status] || "#8A8F9B";
+        const age = nodeHeartbeatAgeSeconds(node.last_seen);
+        const isFresh = age !== null && age < 15 && status !== "offline";
+        const isBusy = (node.running_jobs || 0) > 0;
+        const isOffline = status === "offline";
 
-        svg += `<line x1="${centerX}" y1="${centerY + 34}" x2="${x}" y2="${y - 26}" stroke="#334155" stroke-width="2" />`;
+        const edgeStroke = isOffline ? "rgba(239,68,68,0.35)" : isBusy ? "#3B82F6" : "rgba(255,255,255,0.14)";
+        const edgeDash = isBusy ? ' stroke-dasharray="6 5" class="gcon-topo-edge-active"' : "";
+
+        svg += `<line x1="${centerX}" y1="${centerY + 34}" x2="${x}" y2="${y - 26}" stroke="${edgeStroke}" stroke-width="2"${edgeDash} />`;
+
+        svg += `<g class="gcon-topo-node" data-node-id="${escapeHtml(node.node_id)}"${cursor}>`;
+
+        if (isFresh) {
+            svg += `<circle cx="${x}" cy="${y}" r="32" fill="none" stroke="${color}" stroke-width="2" opacity=".35" class="gcon-topo-pulse-ring" />`;
+        }
+
+        svg += `<circle cx="${x}" cy="${y}" r="26" fill="${color}" ${node.draining ? 'stroke="#F59E0B" stroke-width="3"' : ""} />`;
+
+        if (isOffline) {
+            svg += `<text x="${x}" y="${y + 5}" text-anchor="middle" fill="white" font-size="16" font-weight="bold">!</text>`;
+        } else if (isBusy) {
+            svg += `
+                <circle cx="${x + 18}" cy="${y - 18}" r="9" fill="#0B0D10" stroke="${color}" stroke-width="1.5" />
+                <text x="${x + 18}" y="${y - 14}" text-anchor="middle" fill="white" font-size="9" font-weight="bold">${escapeHtml(node.running_jobs)}</text>
+            `;
+        }
+
         svg += `
-            <circle cx="${x}" cy="${y}" r="26" fill="${color}" />
-            <text x="${x}" y="${y + 4}" text-anchor="middle" fill="white" font-size="10" font-weight="bold">${escapeHtml(node.node_id)}</text>
-            <text x="${x}" y="${y + 44}" text-anchor="middle" fill="#94a3b8" font-size="11">${escapeHtml(node.status)} · ${escapeHtml(node.running_jobs)} jobs</text>
+            <text x="${x}" y="${isOffline ? y + 22 : y + 4}" text-anchor="middle" fill="white" font-size="10" font-weight="bold">${isOffline ? "" : escapeHtml(node.node_id)}</text>
+            <text x="${x}" y="${y + 44}" text-anchor="middle" fill="#8A8F9B" font-size="11">${escapeHtml(node.node_id)} · ${escapeHtml(node.status)}${node.draining ? " · draining" : ""}</text>
         `;
+
+        svg += `</g>`;
     });
 
     svg += "</svg>";
     return svg;
+}
+
+function buildTopologyLegend() {
+    return `
+        <div class="gcon-topo-legend">
+            <span class="item"><span class="swatch" style="background:#10B981;"></span>Idle</span>
+            <span class="item"><span class="swatch" style="background:#3B82F6;"></span>Busy</span>
+            <span class="item"><span class="swatch" style="background:#EF4444;"></span>Offline</span>
+            <span class="item"><span class="swatch" style="border:2px solid #F59E0B;"></span>Draining</span>
+            <span class="item"><span class="ring"></span>Fresh heartbeat</span>
+        </div>
+    `;
+}
+
+function openNodeTopologyDetail(node) {
+    setText("drawer-title", "Node Inspector");
+    const body = document.getElementById("drawer-body");
+    const age = nodeHeartbeatAgeSeconds(node.last_seen);
+
+    body.innerHTML = `
+        <div class="gcon-panel mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>${escapeHtml(node.node_id)}</strong>
+                <span class="badge ${node.status === "offline" ? "bg-danger" : node.status === "busy" ? "bg-primary" : "bg-success"}">
+                    ${escapeHtml(node.status)}
+                </span>
+            </div>
+            ${node.draining ? `<div class="text-warning small"><i class="bi bi-exclamation-triangle me-1"></i>Draining — not accepting new jobs</div>` : ""}
+        </div>
+        <div class="gcon-panel mb-3">
+            <strong class="d-block mb-2">Live State</strong>
+            ${receiptDetailRow("CPU", escapeHtml(node.cpu))}
+            ${receiptDetailRow("Memory", escapeHtml(node.memory))}
+            ${receiptDetailRow("Running Jobs", escapeHtml(node.running_jobs))}
+            ${receiptDetailRow("Last Heartbeat", escapeHtml(node.last_seen || "-"))}
+            ${receiptDetailRow("Heartbeat Age", age === null ? "--" : formatAge(age))}
+        </div>
+    `;
+    openDrawer();
+}
+
+function openCoordinatorTopologyDetail(coordinator) {
+    setText("drawer-title", "Coordinator Inspector");
+    const body = document.getElementById("drawer-body");
+
+    body.innerHTML = `
+        <div class="gcon-panel mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>${escapeHtml(coordinator.id)}</strong>
+                <span class="badge ${coordinator.online ? "bg-success" : "bg-danger"}">
+                    ${coordinator.online ? "Online" : "Offline"}
+                </span>
+            </div>
+        </div>
+        <div class="gcon-panel mb-3">
+            <strong class="d-block mb-2">State</strong>
+            ${receiptDetailRow("Scheduler", coordinator.scheduler_running ? "Running" : "Paused")}
+            ${receiptDetailRow("Started", escapeHtml(coordinator.started_at || "-"))}
+            ${receiptDetailRow("Registered Nodes", escapeHtml(coordinator.total_nodes))}
+            ${receiptDetailRow("Running Jobs", escapeHtml(coordinator.running_jobs))}
+        </div>
+    `;
+    openDrawer();
+}
+
+function attachTopologyHandlers(container, topo) {
+    const nodesById = {};
+    (topo.nodes || []).forEach(n => { nodesById[n.node_id] = n; });
+
+    container.querySelectorAll(".gcon-topo-node").forEach(el => {
+        el.addEventListener("click", () => {
+            const node = nodesById[el.dataset.nodeId];
+            if (node) openNodeTopologyDetail(node);
+        });
+    });
+
+    const coordEl = container.querySelector(".gcon-topo-coordinator");
+    if (coordEl) {
+        coordEl.addEventListener("click", () => openCoordinatorTopologyDetail(topo.coordinator || {}));
+    }
+}
+
+// always the live result from /receipts (HMAC re-check), never a
+// cached flag; detail comes from /receipts/{id}, which stitches
+// together the receipt's proof with the job it attests to and the
+// artifacts that job produced.
+// ---------------------------------------------------------------
+
+let receiptsData = [];
+
+function filterReceiptsData(query) {
+    if (!query) return receiptsData;
+    const q = query.toLowerCase();
+    return receiptsData.filter(r =>
+        (r.receipt_id || "").toLowerCase().includes(q) ||
+        (r.job_id || "").toLowerCase().includes(q)
+    );
+}
+
+function renderReceiptSummaryTiles(receipts) {
+    const verified = receipts.filter(r => r.verified).length;
+    setText("receipts-tab-total", receipts.length);
+    setText("receipts-tab-verified", verified);
+    setText("receipts-tab-unverified", receipts.length - verified);
+}
+
+function renderReceiptCards(receipts) {
+    const grid = document.getElementById("receipts-grid");
+    if (!grid) return;
+
+    if (receipts.length === 0) {
+        grid.innerHTML = `<div class="text-secondary text-center py-4">No receipts generated yet.</div>`;
+        return;
+    }
+
+    grid.innerHTML = receipts.map(r => `
+        <div class="gcon-receipt-card" data-receipt-id="${escapeHtml(r.receipt_id)}">
+            <div class="d-flex justify-content-between align-items-start">
+                <span class="gcon-receipt-id" title="${escapeHtml(r.receipt_id)}">${escapeHtml(r.receipt_id)}</span>
+                <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
+                    <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
+                </span>
+            </div>
+            <div class="gcon-receipt-meta">
+                <span><i class="bi bi-braces me-1"></i>${escapeHtml(r.job_id || "-")}</span>
+                ${statusBadge(r.status)}
+            </div>
+            <div class="gcon-receipt-meta text-secondary small">
+                <i class="bi bi-clock-history me-1"></i>${escapeHtml(r.created_at || "-")}
+            </div>
+            <button class="btn btn-sm btn-outline-light w-100 mt-2 gcon-receipt-inspect-btn" data-receipt-id="${escapeHtml(r.receipt_id)}">
+                <i class="bi bi-search me-1"></i>Inspect
+            </button>
+        </div>
+    `).join("");
+
+    grid.querySelectorAll(".gcon-receipt-inspect-btn").forEach(btn => {
+        btn.addEventListener("click", () => openReceiptDetail(btn.dataset.receiptId));
+    });
+}
+
+async function loadReceiptsTab() {
+    try {
+        receiptsData = await fetchJson("/receipts");
+        renderReceiptSummaryTiles(receiptsData);
+
+        const search = document.getElementById("receipts-search");
+        renderReceiptCards(filterReceiptsData(search ? search.value : ""));
+    } catch (err) {
+        console.error("Failed to load receipts:", err);
+        setConnectionStatus(false);
+    }
+}
+
+function setupReceiptsTab() {
+    const search = document.getElementById("receipts-search");
+    if (search) {
+        search.addEventListener("input", () => renderReceiptCards(filterReceiptsData(search.value)));
+    }
+
+    const verifyBtn = document.getElementById("receipts-tab-verify-all-btn");
+    if (verifyBtn) {
+        verifyBtn.addEventListener("click", async () => {
+            verifyBtn.disabled = true;
+            const originalHtml = verifyBtn.innerHTML;
+            verifyBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Verifying...`;
+            try {
+                await opCall("/receipts/verify-all", { method: "POST" }, "Receipt verification started.");
+                await loadReceiptsTab();
+            } catch (err) {
+                // opCall already surfaced the failure via setOpResult
+            } finally {
+                verifyBtn.disabled = false;
+                verifyBtn.innerHTML = originalHtml;
+            }
+        });
+    }
+}
+
+function receiptDetailRow(label, value, mono) {
+    return `
+        <div class="gcon-kv-row">
+            <span class="gcon-kv-label">${escapeHtml(label)}</span>
+            <span class="gcon-kv-value ${mono ? "mono" : ""}">${value}</span>
+        </div>
+    `;
+}
+
+function copyableValue(value) {
+    if (!value) return `<span class="text-secondary">&mdash;</span>`;
+    const safe = escapeHtml(value);
+    return `
+        <span class="gcon-copy-value" title="Click to copy" onclick="navigator.clipboard.writeText('${safe.replace(/'/g, "\\'")}')">
+            ${safe}<i class="bi bi-copy ms-2"></i>
+        </span>
+    `;
+}
+
+async function openReceiptDetail(receiptId) {
+    try {
+        const r = await fetchJson(`/receipts/${encodeURIComponent(receiptId)}`);
+
+        setText("drawer-title", "Receipt Inspector");
+        const body = document.getElementById("drawer-body");
+
+        const metricsRows = Object.entries(r.proof.metrics || {})
+            .map(([k, v]) => receiptDetailRow(k, escapeHtml(v)))
+            .join("") || `<div class="text-secondary small">No additional metrics recorded.</div>`;
+
+        const artifactRows = (r.artifacts || []).map(a => `
+            <div class="gcon-kv-row">
+                <span class="gcon-kv-label">${escapeHtml(a.filename)}</span>
+                <span class="gcon-kv-value mono small">${escapeHtml(a.sha256.slice(0, 16))}&hellip; &middot; ${formatBytes(a.size)}</span>
+            </div>
+        `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
+
+        body.innerHTML = `
+            <div class="gcon-panel mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>Verification</strong>
+                    <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
+                        <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
+                    </span>
+                </div>
+                <div class="text-secondary small">${escapeHtml(r.verification_message)}</div>
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Signature</strong>
+                ${receiptDetailRow("Algorithm", escapeHtml(r.proof.algorithm), true)}
+                ${receiptDetailRow("Signature", copyableValue(r.proof.signature), true)}
+                ${receiptDetailRow("Input Hash", copyableValue(r.input_hash), true)}
+                ${receiptDetailRow("Output Hash", copyableValue(r.output_hash), true)}
+                ${receiptDetailRow("Timestamp", escapeHtml(r.proof.timestamp))}
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Execution Details</strong>
+                ${receiptDetailRow("Job ID", copyableValue(r.job_id), true)}
+                ${receiptDetailRow("Node", escapeHtml(r.execution.node_id || "-"))}
+                ${receiptDetailRow("GPU", escapeHtml(r.proof.gpu || "-"))}
+                ${receiptDetailRow("Runtime", `${escapeHtml(r.proof.runtime_seconds ?? "-")}s`)}
+                ${receiptDetailRow("Started", escapeHtml(r.execution.created_at || "-"))}
+                ${receiptDetailRow("Completed", escapeHtml(r.execution.completed_at || "-"))}
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Metrics</strong>
+                ${metricsRows}
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Artifacts</strong>
+                ${artifactRows}
+            </div>
+
+            <button class="btn btn-sm btn-outline-light w-100" id="receipt-export-btn">
+                <i class="bi bi-download me-1"></i>Export Receipt (JSON)
+            </button>
+        `;
+
+        document.getElementById("receipt-export-btn").addEventListener("click", () => {
+            const blob = new Blob([JSON.stringify(r, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${r.receipt_id}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        openDrawer();
+    } catch (err) {
+        console.error("Failed to load receipt detail:", err);
+        setOpResult("Could not load that receipt.", true);
+    }
+}
+
+// ---------------------------------------------------------------
+// Executions — visualizes each job's real lifecycle. The list view
+// uses only fields already on /jobs (no live crypto check per row,
+// per poll); the detail drawer fetches /jobs/{id} for the one-off
+// live receipt verification, the same pattern the Receipt Explorer
+// uses.
+// ---------------------------------------------------------------
+
+let executionsData = [];
+
+function filterExecutionsData(query) {
+    if (!query) return executionsData;
+    const q = query.toLowerCase();
+    return executionsData.filter(j =>
+        (j.job_id || "").toLowerCase().includes(q) ||
+        (j.node_id || "").toLowerCase().includes(q)
+    );
+}
+
+function buildLifecycleStepper(job) {
+    const terminal = ["completed", "failed", "cancelled"].includes(job.status);
+    const running = job.status === "running" || terminal;
+
+    const outcomeLabel = job.status === "failed" ? "Failed"
+        : job.status === "cancelled" ? "Cancelled"
+        : job.status === "completed" ? "Completed"
+        : "Outcome";
+
+    const outcomeState = !terminal ? "pending"
+        : job.status === "completed" ? "done"
+        : "failed";
+
+    const steps = [
+        { label: "Submitted", state: "done" },
+        { label: "Running", state: running ? "done" : (terminal ? "skipped" : "current") },
+        { label: outcomeLabel, state: outcomeState },
+        { label: "Receipt", state: job.receipt_id ? "done" : (terminal && job.status === "completed" ? "current" : "skipped") },
+    ];
+
+    return `
+        <div class="gcon-stepper">
+            ${steps.map((s, i) => `
+                <div class="gcon-step ${s.state}">
+                    <span class="gcon-step-dot"></span>
+                    <span class="gcon-step-label">${escapeHtml(s.label)}</span>
+                </div>
+                ${i < steps.length - 1 ? `<span class="gcon-step-connector ${s.state === "done" ? "done" : ""}"></span>` : ""}
+            `).join("")}
+        </div>
+    `;
+}
+
+function renderExecutionCards(jobs) {
+    const list = document.getElementById("executions-list");
+    if (!list) return;
+
+    if (jobs.length === 0) {
+        list.innerHTML = `<div class="text-secondary text-center py-4">No executions submitted yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = jobs.map(job => `
+        <div class="gcon-exec-card" data-job-id="${escapeHtml(job.job_id)}">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="gcon-receipt-id" title="${escapeHtml(job.job_id)}">${escapeHtml(job.job_id)}</span>
+                <span class="text-secondary small">${escapeHtml(job.node_id || "unassigned")} &middot; ${escapeHtml(job.created_at || "-")}</span>
+            </div>
+            ${buildLifecycleStepper(job)}
+        </div>
+    `).join("");
+
+    list.querySelectorAll(".gcon-exec-card").forEach(card => {
+        card.addEventListener("click", () => openExecutionDetail(card.dataset.jobId));
+    });
+}
+
+function renderExecutionSummaryTiles(jobs) {
+    const running = jobs.filter(j => j.status === "running").length;
+    const completed = jobs.filter(j => j.status === "completed").length;
+    const failed = jobs.filter(j => j.status === "failed" || j.status === "cancelled").length;
+    setText("exec-tab-total", jobs.length);
+    setText("exec-tab-running", running);
+    setText("exec-tab-completed", completed);
+    setText("exec-tab-failed", failed);
+}
+
+async function loadExecutionsTab() {
+    try {
+        executionsData = await fetchJson("/jobs");
+        renderExecutionSummaryTiles(executionsData);
+
+        const search = document.getElementById("executions-search");
+        renderExecutionCards(filterExecutionsData(search ? search.value : ""));
+    } catch (err) {
+        console.error("Failed to load executions:", err);
+        setConnectionStatus(false);
+    }
+}
+
+function setupExecutionsTab() {
+    const search = document.getElementById("executions-search");
+    if (search) {
+        search.addEventListener("input", () => renderExecutionCards(filterExecutionsData(search.value)));
+    }
+}
+
+async function openExecutionDetail(jobId) {
+    try {
+        const j = await fetchJson(`/jobs/${encodeURIComponent(jobId)}`);
+
+        setText("drawer-title", "Execution Inspector");
+        const body = document.getElementById("drawer-body");
+
+        const artifactRows = (j.artifacts || []).map(a => `
+            <div class="gcon-kv-row">
+                <span class="gcon-kv-label">${escapeHtml(a.filename)}</span>
+                <span class="gcon-kv-value mono small">${escapeHtml(a.sha256.slice(0, 16))}&hellip; &middot; ${formatBytes(a.size)}</span>
+            </div>
+        `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
+
+        body.innerHTML = `
+            <div class="gcon-panel mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>${escapeHtml(j.job_id)}</strong>
+                    ${statusBadge(j.status)}
+                </div>
+                ${buildLifecycleStepper(j)}
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Execution Details</strong>
+                ${receiptDetailRow("Node", escapeHtml(j.node_id || "unassigned"))}
+                ${receiptDetailRow("Created", escapeHtml(j.created_at || "-"))}
+                ${receiptDetailRow("Completed", escapeHtml(j.completed_at || "-"))}
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Receipt</strong>
+                ${j.receipt_id
+                    ? `
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="gcon-kv-value mono small">${escapeHtml(j.receipt_id)}</span>
+                            <span class="badge ${j.verified ? "bg-success" : "bg-danger"}">
+                                <i class="bi ${j.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${j.verified ? "Verified" : "Unverified"}
+                            </span>
+                        </div>
+                        <div class="text-secondary small">${escapeHtml(j.verification_message || "")}</div>
+                        <button class="btn btn-sm btn-outline-light w-100 mt-2" id="exec-view-receipt-btn">
+                            <i class="bi bi-patch-check me-1"></i>Open in Receipt Explorer
+                        </button>
+                    `
+                    : `<div class="text-secondary small">No receipt generated yet for this execution.</div>`
+                }
+            </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Artifacts</strong>
+                ${artifactRows}
+            </div>
+        `;
+
+        const viewReceiptBtn = document.getElementById("exec-view-receipt-btn");
+        if (viewReceiptBtn) {
+            viewReceiptBtn.addEventListener("click", () => openReceiptDetail(j.receipt_id));
+        }
+
+        openDrawer();
+    } catch (err) {
+        console.error("Failed to load execution detail:", err);
+        setOpResult("Could not load that execution.", true);
+    }
 }
 
 // ---------------------------------------------------------------
@@ -967,16 +1699,12 @@ function buildTopologySvg(topo) {
 // ---------------------------------------------------------------
 
 const EXPLORER_COLUMNS = {
-    jobs: ["job_id", "status", "node_id", "artifacts", "created_at", "completed_at"],
     nodes: ["node_id", "status", "running_jobs", "cpu", "memory", "last_seen"],
-    receipts: ["receipt_id", "job_id", "status", "created_at"],
     artifacts: ["artifact_id", "filename", "sha256", "size", "uploaded_at"],
 };
 
 const EXPLORER_HEADERS = {
-    jobs: ["Job ID", "Status", "Node", "Artifacts", "Created", "Completed"],
     nodes: ["Node ID", "Status", "Running Jobs", "CPU", "Memory", "Last Seen"],
-    receipts: ["Receipt ID", "Job ID", "Status", "Created"],
     artifacts: ["Artifact ID", "Filename", "SHA-256", "Size (bytes)", "Uploaded"],
 };
 
@@ -1165,7 +1893,7 @@ function renderBarChart(totals) {
     if (!container) return;
 
     const max = Math.max(1, ...Object.values(totals));
-    const colors = { completed: "#22c55e", failed: "#ef4444", running: "#3b82f6", pending: "#f59e0b" };
+    const colors = { completed: "#10B981", failed: "#EF4444", running: "#3B82F6", pending: "#F59E0B" };
 
     let html = `<div class="gcon-bars-row">`;
     for (const [key, value] of Object.entries(totals)) {
@@ -1173,7 +1901,7 @@ function renderBarChart(totals) {
         html += `
             <div class="gcon-bar-col">
                 <div class="gcon-bar-track">
-                    <div class="gcon-bar-fill" style="height:${heightPct}%; background:${colors[key] || "#64748b"}"></div>
+                    <div class="gcon-bar-fill" style="height:${heightPct}%; background:${colors[key] || "#8A8F9B"}"></div>
                 </div>
                 <div class="gcon-bar-label">${escapeHtml(key)}</div>
                 <div class="gcon-bar-value">${escapeHtml(value)}</div>
@@ -1280,10 +2008,11 @@ async function loadAdminNodes() {
                 btn.disabled = true;
                 try {
                     await fetchJson(`/admin/nodes/${encodeURIComponent(btn.dataset.nodeId)}/deregister`, { method: "POST" });
+                    showToast(`Node ${btn.dataset.nodeId} deregistered.`, false);
                     await loadAdmin();
                 } catch (err) {
                     console.error("Failed to deregister node:", err);
-                    alert(err.message || "Failed to deregister node.");
+                    showToast(err.message || "Failed to deregister node.", true);
                     btn.disabled = false;
                 }
             });
@@ -1301,10 +2030,11 @@ async function loadAdmin() {
 async function triggerScale(direction) {
     try {
         await fetchJson(`/admin/scale-${direction}`, { method: "POST" });
+        showToast(direction === "up" ? "Scaling up." : "Scaling down.", false);
         await refreshDashboard();
     } catch (err) {
         console.error(`Failed to scale ${direction}:`, err);
-        alert(err.message || `Failed to scale ${direction}.`);
+        showToast(err.message || `Failed to scale ${direction}.`, true);
     }
 }
 
@@ -1352,12 +2082,6 @@ function setupControls() {
     });
 
     setupOperationsPanel();
-
-    const nodesRefreshBtn = document.getElementById("nodes-refresh-btn");
-    if (nodesRefreshBtn) nodesRefreshBtn.addEventListener("click", loadNodes);
-
-    const jobsRefreshBtn = document.getElementById("jobs-refresh-btn");
-    if (jobsRefreshBtn) jobsRefreshBtn.addEventListener("click", loadJobs);
 
     const inspectorBtn =
         document.getElementById("open-health-inspector-btn");
@@ -1520,7 +2244,7 @@ function renderUsersTable() {
                 await loadUsersTab();
             } catch (err) {
                 console.error("Failed to delete user:", err);
-                alert(err.message || "Failed to delete user.");
+                showToast(err.message || "Failed to delete user.", true);
             }
         });
     });
@@ -1575,7 +2299,7 @@ function setupUsersTab() {
                 await loadUsersTab();
             } catch (err) {
                 console.error("Failed to create user:", err);
-                alert(err.message || "Failed to create user.");
+                showToast(err.message || "Failed to create user.", true);
             }
         });
     }
@@ -1716,7 +2440,7 @@ async function openUserDrawer(userId) {
                 if (currentTab === "users") await loadUsersTab();
             } catch (err) {
                 console.error("Failed to update user:", err);
-                alert(err.message || "Failed to update user.");
+                showToast(err.message || "Failed to update user.", true);
             }
         });
     }
@@ -1808,7 +2532,7 @@ function setupOrganizationsTab() {
                 await loadOrganizationsTab();
             } catch (err) {
                 console.error("Failed to create organization:", err);
-                alert(err.message || "Failed to create organization.");
+                showToast(err.message || "Failed to create organization.", true);
             }
         });
     }
@@ -1871,6 +2595,7 @@ function connectLiveSocket() {
         const data = JSON.parse(event.data);
         if (currentTab === "control-center") {
             renderFeed("activity-feed", data.events);
+            renderHomeDashboard(data);
         }
         setConnectionStatus(true);
     };
@@ -1922,7 +2647,7 @@ async function loadApiKeysTab() {
                     await loadApiKeysTab();
                 } catch (err) {
                     console.error("Failed to revoke API key:", err);
-                    alert(err.message || "Failed to revoke API key.");
+                    showToast(err.message || "Failed to revoke API key.", true);
                 }
             });
         });
@@ -1934,7 +2659,7 @@ async function loadApiKeysTab() {
                     await loadApiKeysTab();
                 } catch (err) {
                     console.error("Failed to regenerate API key:", err);
-                    alert(err.message || "Failed to regenerate API key.");
+                    showToast(err.message || "Failed to regenerate API key.", true);
                 }
             });
         });
@@ -1984,7 +2709,7 @@ async function setupApiKeysTab() {
                 await loadApiKeysTab();
             } catch (err) {
                 console.error("Failed to create API key:", err);
-                alert(err.message || "Failed to create API key.");
+                showToast(err.message || "Failed to create API key.", true);
             }
         });
     }
@@ -2052,40 +2777,152 @@ async function loadAuditLogsTab() {
 const NOTIF_ICONS = {
     user_registered: "bi-person-plus", invitation_accepted: "bi-envelope-check",
     password_changed: "bi-shield-lock", api_key_created: "bi-key",
-    workflow_completed: "bi-check-circle", node_failure: "bi-exclamation-triangle",
-    storage_warning: "bi-hdd",
+    node_failure: "bi-exclamation-triangle", node_registered: "bi-hdd-network",
+    job_failed: "bi-x-circle", receipt_generated: "bi-patch-check",
+    storage_warning: "bi-hdd", workflow_completed: "bi-check-circle",
 };
 
-async function loadNotificationsTab() {
-    const list = document.getElementById("notifications-list");
-    try {
-        const entries = await fetchJson("/management/notifications");
-        await refreshNotifBadge();
+// Real notification types (from ManagementLayer._EVENT_NOTIFICATIONS and
+// the direct .notify() call sites) grouped into the categories shown in
+// the Notifications tab filter. Anything not listed falls back to "account".
+const NOTIF_CATEGORIES = {
+    node: ["node_failure", "node_registered"],
+    execution: ["job_failed", "workflow_completed"],
+    receipt: ["receipt_generated"],
+    account: ["user_registered", "invitation_accepted", "password_changed", "api_key_created", "storage_warning"],
+};
 
-        if (!list) return;
-        if (entries.length === 0) {
-            list.innerHTML = `<div class="text-secondary">No notifications.</div>`;
-            return;
-        }
-        list.innerHTML = entries.map(n => `
-            <div class="gcon-activity-item ${n.read ? "" : "gcon-notif-unread"}">
-                <div class="gcon-activity-time"><i class="bi ${NOTIF_ICONS[n.type] || "bi-bell"} me-1"></i>${new Date(n.timestamp).toLocaleTimeString()}</div>
-                <div class="gcon-activity-message">${escapeHtml(n.message)}</div>
+function notifCategory(type) {
+    for (const [category, types] of Object.entries(NOTIF_CATEGORIES)) {
+        if (types.includes(type)) return category;
+    }
+    return "account";
+}
+
+let notificationsData = [];
+let notifFilter = "all";
+
+function filterNotifications(entries, filter) {
+    if (filter === "all") return entries;
+    if (filter === "unread") return entries.filter(n => !n.read);
+    return entries.filter(n => notifCategory(n.type) === filter);
+}
+
+function renderNotificationItem(n, compact) {
+    return `
+        <div class="gcon-activity-item gcon-notif-item ${n.read ? "" : "gcon-notif-unread"}" data-notif-id="${escapeHtml(n.notification_id)}">
+            <div class="gcon-activity-time">
+                <i class="bi ${NOTIF_ICONS[n.type] || "bi-bell"} me-1"></i>${new Date(n.timestamp).toLocaleString()}
             </div>
-        `).join("");
+            <div class="gcon-activity-message">${escapeHtml(n.message)}</div>
+            ${!n.read ? `<button class="btn btn-sm btn-link p-0 gcon-notif-read-btn" title="Mark as read"><i class="bi bi-check2"></i></button>` : ""}
+        </div>
+    `;
+}
+
+async function markNotificationRead(notificationId) {
+    try {
+        await fetchJson(`/management/notifications/${encodeURIComponent(notificationId)}/read`, { method: "POST" });
+        const entry = notificationsData.find(n => n.notification_id === notificationId);
+        if (entry) entry.read = true;
+        renderNotificationsList();
+        renderNotifDropdown();
+        updateNotifBadge();
     } catch (err) {
-        console.error("Failed to load notifications:", err);
-        setConnectionStatus(false);
+        console.error("Failed to mark notification read:", err);
     }
 }
 
-async function refreshNotifBadge() {
+function attachNotifClickHandlers(container) {
+    container.querySelectorAll(".gcon-notif-read-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            markNotificationRead(btn.closest(".gcon-notif-item").dataset.notifId);
+        });
+    });
+}
+
+function renderNotificationsList() {
+    const list = document.getElementById("notifications-list");
+    if (!list) return;
+
+    const filtered = filterNotifications(notificationsData, notifFilter);
+
+    if (filtered.length === 0) {
+        list.innerHTML = `<div class="text-secondary">No notifications${notifFilter !== "all" ? " in this filter" : ""}.</div>`;
+        return;
+    }
+
+    list.innerHTML = filtered.map(n => renderNotificationItem(n, false)).join("");
+    attachNotifClickHandlers(list);
+}
+
+function renderNotifDropdown() {
+    const list = document.getElementById("notif-dropdown-list");
+    if (!list) return;
+
+    const recent = notificationsData.slice(0, 8);
+
+    if (recent.length === 0) {
+        list.innerHTML = `<div class="text-secondary small p-3">No notifications yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = recent.map(n => renderNotificationItem(n, true)).join("");
+    attachNotifClickHandlers(list);
+}
+
+function updateNotifBadge() {
+    const unread = notificationsData.filter(n => !n.read).length;
+    const badge = document.getElementById("notif-count-badge");
+    if (badge) {
+        badge.textContent = unread > 9 ? "9+" : unread;
+        badge.classList.toggle("d-none", unread === 0);
+    }
+}
+
+async function refreshNotifications() {
     try {
-        const entries = await fetchJson("/management/notifications");
-        const unread = entries.filter(n => !n.read).length;
-        const badge = document.getElementById("notif-count-badge");
-        if (badge) badge.textContent = unread > 0 ? unread : "";
-    } catch (err) { /* non-fatal */ }
+        notificationsData = await fetchJson("/management/notifications");
+        updateNotifBadge();
+        renderNotifDropdown();
+        if (currentTab === "notifications") renderNotificationsList();
+    } catch (err) {
+        // non-fatal — the badge just won't update this tick
+    }
+}
+
+async function loadNotificationsTab() {
+    await refreshNotifications();
+}
+
+async function refreshNotifBadge() {
+    await refreshNotifications();
+}
+
+function setupNotifications() {
+    document.querySelectorAll("#notif-filter-group [data-notif-filter]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            notifFilter = btn.dataset.notifFilter;
+            document.querySelectorAll("#notif-filter-group [data-notif-filter]").forEach(b => {
+                b.classList.toggle("btn-primary", b === btn);
+                b.classList.toggle("btn-outline-primary", b !== btn);
+            });
+            renderNotificationsList();
+        });
+    });
+
+    const markAll = async () => {
+        const unread = notificationsData.filter(n => !n.read);
+        await Promise.all(unread.map(n => fetchJson(`/management/notifications/${encodeURIComponent(n.notification_id)}/read`, { method: "POST" })));
+        await refreshNotifications();
+        showToast(unread.length ? `${unread.length} notification(s) marked read.` : "Nothing to mark read.", false);
+    };
+
+    const markAllBtn1 = document.getElementById("notif-mark-all-read-btn");
+    const markAllBtn2 = document.getElementById("notif-tab-mark-all-read-btn");
+    if (markAllBtn1) markAllBtn1.addEventListener("click", markAll);
+    if (markAllBtn2) markAllBtn2.addEventListener("click", markAll);
 }
 
 // ---------------------------------------------------------------
@@ -2269,7 +3106,12 @@ setupTeamsTab();
 setupGlobalSearch();
 setupDrawer();
 setupAuthMenu();
+setupReceiptsTab();
+setupExecutionsTab();
+setupNotifications();
+bindPanelLinks();
 
+bootstrapHomeDashboard();
 loadCurrentUser();
 refreshDashboard();
 loadHealthBadge();
