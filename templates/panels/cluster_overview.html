@@ -1,49 +1,41 @@
-<div class="row gy-3">
+<div class="gcon-panel h-100">
 
-    <div class="col-6">
-
-        <small class="text-secondary">
-            Coordinator
-        </small>
-
-        <div class="fw-bold">
-            Coordinator-1
-        </div>
-
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-diagram-3-fill me-2"></i>Cluster Overview</h5>
     </div>
 
-    <div class="col-6">
+    <div class="gcon-panel-body" style="min-height:auto;">
 
-        <small class="text-secondary">
-            Registered Nodes
-        </small>
+        <div class="row gy-3">
 
-        <div class="fw-bold gcon-counter" id="overview-registered-nodes" data-raw-value="0">
-            0
-        </div>
+            <div class="col-6">
+                <small class="text-secondary">Coordinator</small>
+                <div class="fw-bold text-truncate" id="overview-coordinator-id" title="{{ dashboard.global_status.coordinator_id }}">
+                    {{ dashboard.global_status.coordinator_id }}
+                </div>
+            </div>
 
-    </div>
+            <div class="col-6">
+                <small class="text-secondary">Registered Nodes</small>
+                <div class="fw-bold gcon-counter" id="overview-registered-nodes" data-raw-value="0">
+                    0
+                </div>
+            </div>
 
-    <div class="col-6">
+            <div class="col-6">
+                <small class="text-secondary">Active Jobs</small>
+                <div class="fw-bold gcon-counter" id="overview-active-jobs" data-raw-value="0">
+                    0
+                </div>
+            </div>
 
-        <small class="text-secondary">
-            Active Jobs
-        </small>
+            <div class="col-6">
+                <small class="text-secondary">Receipts</small>
+                <div class="fw-bold" id="overview-receipts">
+                    {{ dashboard.receipts_count }}
+                </div>
+            </div>
 
-        <div class="fw-bold gcon-counter" id="overview-active-jobs" data-raw-value="0">
-            0
-        </div>
-
-    </div>
-
-    <div class="col-6">
-
-        <small class="text-secondary">
-            Receipts
-        </small>
-
-        <div class="fw-bold" id="overview-receipts">
-            {{ dashboard.receipts_count }}
         </div>
 
     </div>

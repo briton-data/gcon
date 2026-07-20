@@ -1,5 +1,7 @@
 import time
 import threading
+import socket
+import uuid
 from queue import Queue
 from datetime import datetime, UTC
 
@@ -23,6 +25,12 @@ class GCONCoordinator:
     Coordinates GCON agents, job execution, and receipt management.
     """
     def __init__(self, network=None):
+        # A real, stable identity for this coordinator process — not a
+        # hardcoded display string. Hostname makes it recognizable in a
+        # multi-host deployment; the short uuid disambiguates restarts.
+        self.coordinator_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+        self.started_at = datetime.now(UTC)
+
         self.network = network
         self.registry = NodeRegistry()
         self.nodes = {}
@@ -934,13 +942,14 @@ class GCONCoordinator:
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
         for job_id, job in jobs_snapshot:
+            receipt = self.receipts.get(job_id)
             jobs.append({
                 "job_id": job_id,
                 "status": job["status"],
                 "node_id": job.get("node_id"),
                 "created_at": job.get("created_at"),
                 "completed_at": job.get("completed_at"),
-                "receipt_id": job_id if job_id in self.receipts else None,
+                "receipt_id": receipt.get("receipt_id", job_id) if receipt else None,
                 "artifacts": len(job.get("artifacts", [])),
             })
         return jobs
@@ -967,19 +976,166 @@ class GCONCoordinator:
     def get_receipts(self):
         """
         Return a dashboard-friendly summary of all receipts.
+
+        `verified` is computed live against the real signed proof via
+        the verifier's HMAC check (the same check `verify_all_receipts`
+        uses) rather than trusting a stored flag, so it can never go
+        stale.
         """
         receipts = []
 
-        for receipt_id, receipt in self.receipts.items():
+        for job_id, receipt in self.receipts.items():
+
+            is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
 
             receipts.append({
-                "receipt_id": receipt_id,
-                "job_id": receipt.get("job_id"),
+                # self.receipts is keyed by job_id (see receive_receipt),
+                # but the receipt's own real identity is its receipt_id
+                # field — a content hash — so that is what's displayed
+                # and what get_receipt_detail() looks callers up by.
+                "receipt_id": receipt.get("receipt_id", job_id),
+                "job_id": receipt.get("job_id", job_id),
                 "status": receipt.get("status", "unknown"),
-                "created_at": receipt.get("issued_at", "N/A")
+                "created_at": receipt.get("issued_at", "N/A"),
+                "verified": is_valid,
         })
 
         return receipts
+
+    def _resolve_artifacts(self, artifact_ids):
+        """
+        Shared artifact-resolution used by both get_receipt_detail and
+        get_execution_detail, so the two views can never disagree
+        about what an execution actually produced.
+        """
+        artifacts = []
+        for artifact_id in artifact_ids:
+            artifact = self.artifact_registry.get_artifact(artifact_id)
+            if artifact:
+                artifacts.append({
+                    "artifact_id": artifact.artifact_id,
+                    "filename": artifact.filename,
+                    "sha256": artifact.sha256,
+                    "size": artifact.size,
+                    "uploaded_at": artifact.uploaded_at,
+                })
+        return artifacts
+
+    def get_receipt_detail(self, receipt_id):
+        """
+        Return the full record for a single receipt, for the Receipt
+        Explorer: proof (hash/signature/timestamp/metrics), live
+        verification, the execution it attests to, and the artifacts
+        that execution produced. Returns None if not found.
+
+        Reuses the job and artifact registries rather than storing a
+        second copy of this data on the receipt itself.
+        """
+        receipt = None
+        for candidate in self.receipts.values():
+            if candidate.get("receipt_id") == receipt_id:
+                receipt = candidate
+                break
+
+        if receipt is None:
+            return None
+
+        proof = receipt.get("proof", {})
+        is_valid, message = self.verifier.validate_proof(proof)
+
+        job_id = receipt.get("job_id")
+        with self.jobs_lock:
+            job = self.jobs.get(job_id, {})
+
+        artifacts = self._resolve_artifacts(job.get("artifacts", []))
+
+        return {
+            "receipt_id": receipt.get("receipt_id"),
+            "job_id": job_id,
+            "agent_id": receipt.get("agent_id"),
+            "status": receipt.get("status", "unknown"),
+            "issued_at": receipt.get("issued_at"),
+            "input_hash": receipt.get("input_hash"),
+            "output_hash": receipt.get("output_hash"),
+            "verified": is_valid,
+            "verification_message": message,
+            "proof": {
+                "algorithm": "HMAC-SHA256",
+                "gpu": proof.get("gpu"),
+                "runtime_seconds": proof.get("runtime_seconds"),
+                "timestamp": proof.get("timestamp"),
+                "metrics": proof.get("metrics", {}),
+                "signature": proof.get("signature"),
+            },
+            "execution": {
+                "node_id": job.get("node_id"),
+                "created_at": job.get("created_at"),
+                "completed_at": job.get("completed_at"),
+                "status": job.get("status"),
+            },
+            "artifacts": artifacts,
+        }
+
+    def get_execution_detail(self, job_id):
+        """
+        Return the full lifecycle record for a single execution, for
+        the Executions page: the job itself, the artifacts it
+        produced, and — if one exists — its receipt's live
+        verification. Returns None if the job isn't found.
+
+        A job only ever reaches "receipt generated" by actually
+        having an entry in self.receipts keyed to its job_id; there
+        is no separate flag to go stale.
+        """
+        with self.jobs_lock:
+            job = self.jobs.get(job_id)
+
+        if job is None:
+            return None
+
+        receipt = None
+        for candidate in self.receipts.values():
+            if candidate.get("job_id") == job_id:
+                receipt = candidate
+                break
+
+        verified = None
+        verification_message = None
+        if receipt is not None:
+            verified, verification_message = self.verifier.validate_proof(receipt.get("proof", {}))
+
+        artifacts = self._resolve_artifacts(job.get("artifacts", []))
+
+        return {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "node_id": job.get("node_id"),
+            "created_at": job.get("created_at"),
+            "completed_at": job.get("completed_at"),
+            "artifacts": artifacts,
+            "receipt_id": receipt.get("receipt_id") if receipt else None,
+            "verified": verified,
+            "verification_message": verification_message,
+        }
+
+    def get_node_summary(self):
+        """
+        Return a live breakdown of registered nodes by status, for the
+        dashboard's Node Summary widget. Always derived from the
+        current registry snapshot — never stored.
+        """
+        nodes = self.get_nodes()
+
+        summary = {"total": len(nodes), "idle": 0, "busy": 0, "offline": 0, "draining": 0}
+
+        for node in nodes:
+            status = node.get("status", "unknown")
+            if status in summary:
+                summary[status] += 1
+            if node.get("draining"):
+                summary["draining"] += 1
+
+        return summary
     
     def get_artifacts(self):
         """

@@ -1,0 +1,31 @@
+<div class="gcon-panel h-100">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-server me-2"></i>Storage Summary</h5>
+        <a href="#" class="gcon-panel-link" data-tab="explorer">View artifacts &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="storage-summary-body" style="min-height:auto;">
+
+        <div class="gcon-summary-widget">
+
+            <div class="gcon-summary-headline">
+                <span class="value" id="storage-summary-artifacts">{{ dashboard.storage_summary.artifact_count }}</span>
+                <span class="label">artifact(s) &middot; <span id="storage-summary-bytes">{{ (dashboard.storage_summary.artifacts_total_bytes / 1048576) | round(1) }} MB</span></span>
+            </div>
+
+            <div class="gcon-summary-bar" id="storage-summary-bar">
+                <div class="seg" id="storage-summary-used-seg" style="width:{{ (100 - (dashboard.storage_summary.disk_remaining_pct or 0)) | round(1) }}%; background: var(--info);"></div>
+            </div>
+
+            <div class="gcon-summary-legend">
+                <span class="item"><span class="swatch" style="background:var(--info);"></span>
+                    <span id="storage-summary-disk-pct">{{ dashboard.storage_summary.disk_remaining_pct }}%</span> disk free
+                </span>
+            </div>
+
+        </div>
+
+    </div>
+
+</div>

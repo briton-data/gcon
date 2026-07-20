@@ -143,23 +143,38 @@
                 </div>
 
                 <div class="row mb-4">
-                    <div class="col-lg-6">
-                        {% include "panels/cluster_overview.html" %}
-                    </div>
-                    <div class="col-lg-6">
-                        {% include "panels/cluster_health.html" %}
+                    <div class="col-lg-12">
+                        {% include "panels/critical_alerts.html" %}
                     </div>
                 </div>
 
-                <div class="row mb-4">
-                    <div class="col-lg-12">
-                        {% include "panels/nodes.html" %}
+                <div class="row mb-4 align-items-stretch">
+                    <div class="col-lg-4">
+                        {% include "panels/cluster_overview.html" %}
+                    </div>
+                    <div class="col-lg-4">
+                        {% include "panels/cluster_health.html" %}
+                    </div>
+                    <div class="col-lg-4">
+                        {% include "panels/topology_mini.html" %}
+                    </div>
+                </div>
+
+                <div class="row mb-4 align-items-stretch">
+                    <div class="col-lg-4">
+                        {% include "panels/node_summary.html" %}
+                    </div>
+                    <div class="col-lg-4">
+                        {% include "panels/receipt_summary.html" %}
+                    </div>
+                    <div class="col-lg-4">
+                        {% include "panels/storage_summary.html" %}
                     </div>
                 </div>
 
                 <div class="row">
                     <div class="col-lg-6">
-                        {% include "panels/jobs.html" %}
+                        {% include "panels/execution_timeline.html" %}
                     </div>
                     <div class="col-lg-6">
                         {% include "panels/activity.html" %}
@@ -168,9 +183,78 @@
 
             </div>
 
+            <script type="application/json" id="dashboard-bootstrap-data">
+                {{ dashboard | tojson }}
+            </script>
+
             <!-- ================================================= -->
             <!-- TAB: Cluster Visualization                         -->
             <!-- ================================================= -->
+            <!-- ================================================= -->
+            <!-- TAB: Executions                                    -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-executions">
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Total Executions</span>
+                                <span class="gcon-metric-icon"><i class="bi bi-play-circle"></i></span>
+                            </div>
+                            <div class="gcon-metric-value" id="exec-tab-total">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Running</span>
+                                <span class="gcon-metric-icon" style="color:var(--primary); background:var(--primary-dim);">
+                                    <i class="bi bi-lightning-charge"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="exec-tab-running">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Completed</span>
+                                <span class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
+                                    <i class="bi bi-check-circle"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="exec-tab-completed">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Failed / Cancelled</span>
+                                <span class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
+                                    <i class="bi bi-x-circle"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="exec-tab-failed">--</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-play-circle me-2"></i>Executions</h5>
+                        <input type="text" id="executions-search" class="form-control form-control-sm w-auto"
+                               placeholder="Filter by job or node ID...">
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-exec-list" id="executions-list">
+                            <div class="text-secondary text-center py-4">Loading executions...</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
             <div class="gcon-tab d-none" id="tab-topology">
 
                 <div class="gcon-panel">
@@ -188,6 +272,68 @@
             </div>
 
             <!-- ================================================= -->
+            <!-- TAB: Receipt Explorer                              -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-receipts">
+
+                <div class="row g-4 mb-4">
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Total Receipts</span>
+                                <span class="gcon-metric-icon"><i class="bi bi-patch-check"></i></span>
+                            </div>
+                            <div class="gcon-metric-value" id="receipts-tab-total">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Verified</span>
+                                <span class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
+                                    <i class="bi bi-shield-check"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="receipts-tab-verified">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Unverified</span>
+                                <span class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
+                                    <i class="bi bi-shield-x"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="receipts-tab-unverified">--</div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card d-flex flex-column justify-content-center" style="cursor:default;">
+                            <span class="gcon-metric-title mb-2">Re-check every signature</span>
+                            <button class="btn btn-sm btn-primary" id="receipts-tab-verify-all-btn">
+                                <i class="bi bi-arrow-repeat me-1"></i>Verify All Receipts
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-patch-check me-2"></i>Execution Receipts</h5>
+                        <input type="text" id="receipts-search" class="form-control form-control-sm w-auto"
+                               placeholder="Filter by receipt or job ID...">
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="gcon-receipt-grid" id="receipts-grid">
+                            <div class="text-secondary text-center py-4">Loading receipts...</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
             <!-- TAB: Explorer                                      -->
             <!-- ================================================= -->
             <div class="gcon-tab d-none" id="tab-explorer">
@@ -196,9 +342,7 @@
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
 
                         <div class="btn-group" id="explorer-subnav">
-                            <button class="btn btn-sm btn-primary" data-explorer="jobs">Jobs</button>
-                            <button class="btn btn-sm btn-outline-primary" data-explorer="nodes">Nodes</button>
-                            <button class="btn btn-sm btn-outline-primary" data-explorer="receipts">Receipts</button>
+                            <button class="btn btn-sm btn-primary" data-explorer="nodes">Nodes</button>
                             <button class="btn btn-sm btn-outline-primary" data-explorer="artifacts">Artifacts</button>
                         </div>
 
@@ -635,9 +779,21 @@
             <!-- Notifications -->
             <div class="gcon-tab d-none" id="tab-notifications">
                 <div class="gcon-panel">
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h5 class="mb-0"><i class="bi bi-bell me-2"></i>Notifications</h5>
-                        <span class="badge bg-success">Live</span>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <div class="btn-group" id="notif-filter-group">
+                                <button class="btn btn-sm btn-primary" data-notif-filter="all">All</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="unread">Unread</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="node">Node</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="execution">Executions</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="receipt">Receipts</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="account">Account &amp; Security</button>
+                            </div>
+                            <button class="btn btn-sm btn-outline-light" id="notif-tab-mark-all-read-btn">
+                                <i class="bi bi-check2-all me-1"></i>Mark all read
+                            </button>
+                        </div>
                     </div>
                     <div class="gcon-panel-body">
                         <div class="gcon-activity-feed gcon-activity-feed-lg" id="notifications-list">

@@ -1,0 +1,37 @@
+<div class="gcon-panel gcon-alerts-panel {% if dashboard.critical_alerts %}has-alerts{% endif %}" id="critical-alerts-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">
+            <i class="bi bi-shield-exclamation me-2"></i>Critical Alerts
+        </h5>
+        <span class="badge {% if dashboard.critical_alerts %}bg-danger{% else %}bg-success{% endif %}" id="critical-alerts-count">
+            {{ dashboard.critical_alerts | length }}
+        </span>
+    </div>
+
+    <div class="gcon-panel-body" id="critical-alerts-body" style="min-height:auto;">
+
+        {% if dashboard.critical_alerts %}
+
+            {% for alert in dashboard.critical_alerts %}
+            <div class="gcon-alert-item {{ alert.severity }}">
+                <i class="bi bi-exclamation-triangle-fill gcon-alert-icon"></i>
+                <div>
+                    <div class="gcon-alert-source">{{ alert.source }}</div>
+                    <div class="gcon-alert-message">{{ alert.message }}</div>
+                </div>
+            </div>
+            {% endfor %}
+
+        {% else %}
+
+            <div class="gcon-alerts-empty">
+                <i class="bi bi-check-circle-fill"></i>
+                No critical alerts. Every monitored system is within normal range.
+            </div>
+
+        {% endif %}
+
+    </div>
+
+</div>

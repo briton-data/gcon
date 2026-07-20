@@ -7,19 +7,144 @@
 /* ---------- Design Tokens ---------- */
 
 :root {
-    --bg: #0F172A;
-    --surface: #1E293B;
-    --sidebar: #111827;
+    /* Layered charcoal surfaces (not navy) */
+    --bg: #0B0D10;
+    --bg-elevated: #101317;
+    --surface: #15181D;
+    --surface-2: #1B1F26;
+    --sidebar: #0D0F13;
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.14);
 
-    --primary: #3B82F6;
-    --success: #22C55E;
-    --warning: #F59E0B;
-    --danger: #EF4444;
+    /* Accent pair */
+    --primary: #3B82F6;      /* electric blue */
+    --primary-dim: rgba(59, 130, 246, 0.16);
+    --violet: #8B5CF6;       /* secondary accent */
+    --violet-dim: rgba(139, 92, 246, 0.16);
 
-    --text: #F8FAFC;
-    --muted: #94A3B8;
+    /* Status */
+    --success: #10B981;      /* emerald */
+    --success-dim: rgba(16, 185, 129, 0.14);
+    --warning: #F59E0B;      /* amber */
+    --warning-dim: rgba(245, 158, 11, 0.14);
+    --danger: #EF4444;       /* crimson */
+    --danger-dim: rgba(239, 68, 68, 0.14);
+    --info: #06B6D4;         /* cyan */
+    --info-dim: rgba(6, 182, 212, 0.14);
 
-    --radius: 12px;
+    --text: #F4F5F7;
+    --text-dim: #C9CDD4;
+    --muted: #8A8F9B;
+
+    --radius: 14px;
+    --radius-sm: 10px;
+    --radius-lg: 20px;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.45);
+
+    --gradient-brand: linear-gradient(135deg, #3B82F6 0%, #8B5CF6 100%);
+}
+
+/* ---------- Bootstrap 5.3 theme retint ----------
+   Bootstrap ships CSS custom properties per component; overriding
+   them here retints every stock Bootstrap element (buttons, badges,
+   tables, modals, dropdowns, forms, nav-tabs, pagination) app-wide
+   to the new palette, instead of hand-patching dozens of templates. */
+
+[data-bs-theme="dark"] {
+    --bs-body-bg: var(--bg);
+    --bs-body-color: var(--text);
+    --bs-emphasis-color: var(--text);
+    --bs-secondary-color: var(--text-dim);
+    --bs-tertiary-color: var(--muted);
+
+    --bs-border-color: var(--border-subtle);
+    --bs-border-color-translucent: var(--border-subtle);
+
+    --bs-primary: var(--primary);
+    --bs-primary-rgb: 59, 130, 246;
+    --bs-secondary: #6B7280;
+    --bs-secondary-rgb: 107, 114, 128;
+    --bs-success: var(--success);
+    --bs-success-rgb: 16, 185, 129;
+    --bs-warning: var(--warning);
+    --bs-warning-rgb: 245, 158, 11;
+    --bs-danger: var(--danger);
+    --bs-danger-rgb: 239, 68, 68;
+    --bs-info: var(--info);
+    --bs-info-rgb: 6, 182, 212;
+
+    --bs-link-color: var(--primary);
+    --bs-link-hover-color: var(--violet);
+    --bs-focus-ring-color: var(--primary-dim);
+
+    --bs-secondary-bg: var(--surface-2);
+    --bs-tertiary-bg: var(--surface);
+
+    --bs-tooltip-bg: var(--surface-2);
+}
+
+[data-bs-theme="dark"] .modal-content,
+[data-bs-theme="dark"] .dropdown-menu,
+[data-bs-theme="dark"] .offcanvas {
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-lg);
+}
+
+[data-bs-theme="dark"] .dropdown-item:hover,
+[data-bs-theme="dark"] .dropdown-item:focus {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+[data-bs-theme="dark"] .form-control,
+[data-bs-theme="dark"] .form-select {
+    background-color: var(--surface-2);
+    border-color: var(--border-subtle);
+    color: var(--text);
+}
+
+[data-bs-theme="dark"] .form-control:focus,
+[data-bs-theme="dark"] .form-select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 .2rem var(--primary-dim);
+}
+
+[data-bs-theme="dark"] .table {
+    --bs-table-bg: transparent;
+    --bs-table-color: var(--text);
+    --bs-table-border-color: var(--border-subtle);
+    --bs-table-striped-bg: var(--surface-2);
+    --bs-table-hover-bg: var(--surface-2);
+}
+
+[data-bs-theme="dark"] .nav-tabs {
+    border-bottom-color: var(--border-subtle);
+}
+
+[data-bs-theme="dark"] .nav-tabs .nav-link.active {
+    background: var(--surface-2);
+    border-color: var(--border-subtle) var(--border-subtle) transparent;
+    color: var(--text);
+}
+
+[data-bs-theme="dark"] .btn-primary {
+    background: var(--gradient-brand);
+    border: none;
+}
+
+[data-bs-theme="dark"] .btn-outline-light {
+    border-color: var(--border-strong);
+    color: var(--text-dim);
+}
+
+[data-bs-theme="dark"] .btn-outline-light:hover {
+    background: var(--surface-2);
+    border-color: var(--border-strong);
+    color: var(--text);
 }
 
 /* ---------- Global ---------- */
@@ -31,9 +156,13 @@
 }
 
 body {
-    background: var(--bg);
+    background:
+        radial-gradient(1200px 600px at 15% -10%, rgba(59, 130, 246, 0.08), transparent 60%),
+        radial-gradient(1000px 500px at 100% 0%, rgba(139, 92, 246, 0.06), transparent 55%),
+        var(--bg);
     color: var(--text);
     font-family: "Inter", sans-serif;
+    letter-spacing: -0.005em;
 }
 
 /* ==========================================================
@@ -42,15 +171,15 @@ body {
 
 .gcon-metric-card {
 
-    background: var(--surface);
+    background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%);
 
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
 
-    padding: 22px;
+    padding: 22px 24px;
 
-    border: 1px solid #334155;
+    border: 1px solid var(--border-subtle);
 
-    transition: .25s ease;
+    transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
 
     cursor: pointer;
 
@@ -62,15 +191,17 @@ body {
 
     justify-content: space-between;
 
+    box-shadow: var(--shadow-sm);
+
 }
 
 .gcon-metric-card:hover {
 
-    transform: translateY(-6px);
+    transform: translateY(-3px);
 
-    border-color: var(--primary);
+    border-color: var(--border-strong);
 
-    box-shadow: 0 12px 30px rgba(0,0,0,.30);
+    box-shadow: var(--shadow-md);
 
 }
 
@@ -86,27 +217,47 @@ body {
 
 .gcon-metric-icon {
 
-    font-size: 2rem;
+    font-size: 1.4rem;
 
     color: var(--primary);
+
+    width: 40px;
+
+    height: 40px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    border-radius: var(--radius-sm);
+
+    background: var(--primary-dim);
 
 }
 
 .gcon-metric-value {
 
-    font-size: 2.3rem;
+    font-size: 2.1rem;
 
     font-weight: 700;
+
+    letter-spacing: -0.02em;
+
+    font-variant-numeric: tabular-nums;
 
 }
 
 .gcon-metric-title {
 
-    font-size: .95rem;
+    font-size: .82rem;
 
     color: var(--muted);
 
-    letter-spacing: .5px;
+    letter-spacing: .02em;
+
+    font-weight: 500;
 
 }
 /* ==========================================================
@@ -115,22 +266,23 @@ body {
 
 .gcon-panel {
     background: var(--surface);
-    border: 1px solid #334155;
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
-    padding: 20px;
+    padding: 22px;
     margin-bottom: 20px;
-    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+    box-shadow: var(--shadow-sm);
 }
 
 .gcon-panel-header {
-    margin-bottom: 15px;
-    border-bottom: 1px solid #334155;
-    padding-bottom: 10px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    padding-bottom: 14px;
 }
 
 .gcon-panel-header h5 {
     margin: 0;
     font-weight: 600;
+    letter-spacing: -0.01em;
 }
 
 .gcon-panel-body {
@@ -141,9 +293,10 @@ body {
 
 .gcon-status-badge {
     border-radius: 999px;
-    padding: 4px 10px;
-    font-size: 0.8rem;
+    padding: 5px 12px;
+    font-size: 0.78rem;
     font-weight: 600;
+    letter-spacing: .01em;
 }
 
 /* ==========================================================
@@ -152,10 +305,28 @@ body {
 
 .gcon-navbar {
 
-    background: var(--surface);
+    background: rgba(21, 24, 29, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
 
-    border-bottom: 1px solid #334155;
+    border-bottom: 1px solid var(--border-subtle);
 
+    padding-top: 10px;
+    padding-bottom: 10px;
+
+}
+
+.gcon-navbar .navbar-brand {
+    background: var(--gradient-brand);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.gcon-navbar .navbar-brand i {
+    -webkit-text-fill-color: var(--primary);
 }
 
 /* ==========================================================
@@ -168,13 +339,21 @@ body {
 
     min-height: calc(100vh - 56px);
 
-    border-right: 1px solid #334155;
+    border-right: 1px solid var(--border-subtle);
 
+}
+
+.gcon-sidebar h5 {
+    color: var(--muted);
+    font-size: .72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
 }
 
 .gcon-sidebar .list-group {
 
-    gap: 8px;
+    gap: 4px;
 
 }
 
@@ -184,25 +363,33 @@ body {
 
     border: none;
 
-    color: var(--muted);
+    color: var(--text-dim);
 
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
+
+    font-size: .9rem;
+
+    padding: 9px 12px;
+
+    transition: background .15s ease, color .15s ease;
 
 }
 
 .gcon-sidebar .list-group-item:hover {
 
-    background: #1E293B;
+    background: var(--surface-2);
 
-    color: white;
+    color: var(--text);
 
 }
 
 .gcon-sidebar .active {
 
-    background: var(--primary) !important;
+    background: var(--primary-dim) !important;
 
-    color: white !important;
+    color: #BFDBFE !important;
+
+    box-shadow: inset 2px 0 0 var(--primary);
 
 }
 
@@ -222,7 +409,7 @@ body {
 
     font-weight: 600;
 
-    border-bottom: 1px solid #334155;
+    border-bottom: 1px solid var(--border-subtle);
 
 }
 
@@ -520,19 +707,19 @@ body {
 .gcon-modal {
     background: var(--surface);
     color: var(--text);
-    border: 1px solid #334155;
+    border: 1px solid var(--border-subtle);
 }
 
 .gcon-modal .modal-header,
 .gcon-modal .modal-footer {
-    border-color: #334155;
+    border-color: var(--border-subtle);
 }
 
 .gcon-modal .form-control,
 .gcon-modal .form-select {
     background: var(--bg);
     color: var(--text);
-    border-color: #334155;
+    border-color: var(--border-subtle);
 }
 
 .gcon-modal .form-control:focus,
@@ -565,7 +752,7 @@ body {
     height: 100vh;
     width: min(440px, 92vw);
     background: var(--surface);
-    border-left: 1px solid #334155;
+    border-left: 1px solid var(--border-subtle);
     box-shadow: -8px 0 24px rgba(0, 0, 0, .35);
     transform: translateX(100%);
     transition: transform .2s ease;
@@ -583,7 +770,7 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 18px 20px;
-    border-bottom: 1px solid #334155;
+    border-bottom: 1px solid var(--border-subtle);
 }
 
 .gcon-drawer-body {
@@ -616,7 +803,7 @@ body {
     left: 0;
     right: 0;
     background: var(--surface);
-    border: 1px solid #334155;
+    border: 1px solid var(--border-subtle);
     border-radius: 8px;
     max-height: 360px;
     overflow-y: auto;
@@ -763,4 +950,584 @@ body {
         margin-bottom: 4px;
         flex-basis: 100%;
     }
+}
+
+/* ==========================================================
+   Home Dashboard — Global Status Bar (per-service pills)
+   ========================================================== */
+
+.gcon-status-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.gcon-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: .74rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    white-space: nowrap;
+}
+
+.gcon-status-pill .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+}
+
+.gcon-status-pill.ok .dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.gcon-status-pill.warn .dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+.gcon-status-pill.bad .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+/* ==========================================================
+   Home Dashboard — Critical Alerts
+   ========================================================== */
+
+.gcon-alerts-panel {
+    border-color: var(--border-subtle);
+}
+
+.gcon-alerts-panel.has-alerts {
+    border-color: rgba(239, 68, 68, 0.35);
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.08), var(--shadow-sm);
+}
+
+.gcon-alert-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    margin-bottom: 8px;
+}
+
+.gcon-alert-item:last-child { margin-bottom: 0; }
+
+.gcon-alert-item.critical { border-left: 3px solid var(--danger); }
+.gcon-alert-item.warning { border-left: 3px solid var(--warning); }
+
+.gcon-alert-icon {
+    font-size: 1rem;
+    line-height: 1;
+    margin-top: 2px;
+}
+
+.gcon-alert-item.critical .gcon-alert-icon { color: var(--danger); }
+.gcon-alert-item.warning .gcon-alert-icon { color: var(--warning); }
+
+.gcon-alert-source {
+    font-size: .72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-weight: 700;
+}
+
+.gcon-alert-message {
+    font-size: .88rem;
+    color: var(--text);
+}
+
+.gcon-alerts-empty {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--success);
+    font-size: .88rem;
+    padding: 6px 2px;
+}
+
+/* ==========================================================
+   Home Dashboard — Summary Widgets (Node / Receipt / Storage)
+   ========================================================== */
+
+.gcon-summary-widget {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.gcon-summary-headline {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.gcon-summary-headline .value {
+    font-size: 1.9rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+}
+
+.gcon-summary-headline .label {
+    font-size: .82rem;
+    color: var(--muted);
+}
+
+.gcon-summary-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    overflow: hidden;
+    display: flex;
+}
+
+.gcon-summary-bar .seg {
+    height: 100%;
+}
+
+.gcon-summary-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: .78rem;
+    color: var(--text-dim);
+}
+
+.gcon-summary-legend .item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.gcon-summary-legend .swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+}
+
+/* ==========================================================
+   Home Dashboard — Execution Timeline
+   ========================================================== */
+
+.gcon-timeline {
+    display: flex;
+    flex-direction: column;
+}
+
+.gcon-timeline-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.gcon-timeline-item:last-child { border-bottom: none; }
+
+.gcon-timeline-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.gcon-timeline-dot.running { background: var(--primary); box-shadow: 0 0 6px var(--primary); }
+.gcon-timeline-dot.completed { background: var(--success); }
+.gcon-timeline-dot.failed { background: var(--danger); }
+.gcon-timeline-dot.pending { background: var(--warning); }
+.gcon-timeline-dot.cancelled,
+.gcon-timeline-dot.unknown { background: var(--muted); }
+
+.gcon-timeline-id {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: .8rem;
+    color: var(--text-dim);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gcon-timeline-meta {
+    font-size: .76rem;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* ==========================================================
+   Home Dashboard — Mini Topology Preview
+   ========================================================== */
+
+.gcon-topology-mini {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    position: relative;
+    overflow: hidden;
+}
+
+.gcon-topology-mini svg { width: 100%; height: 100%; }
+
+.gcon-panel-link {
+    font-size: .78rem;
+    color: var(--primary);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.gcon-panel-link:hover { color: var(--violet); }
+
+/* ==========================================================
+   Receipt Explorer
+   ========================================================== */
+
+.gcon-receipt-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+}
+
+.gcon-receipt-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    transition: border-color .15s ease, transform .15s ease;
+}
+
+.gcon-receipt-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+}
+
+.gcon-receipt-id {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: .82rem;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 65%;
+}
+
+.gcon-receipt-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: .82rem;
+    color: var(--text-dim);
+}
+
+/* Detail drawer key/value rows (Receipt Inspector, etc.) */
+
+.gcon-kv-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: .85rem;
+}
+
+.gcon-kv-row:last-child { border-bottom: none; }
+
+.gcon-kv-label {
+    color: var(--muted);
+    flex-shrink: 0;
+}
+
+.gcon-kv-value {
+    text-align: right;
+    word-break: break-all;
+    color: var(--text);
+}
+
+.gcon-kv-value.mono {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: .78rem;
+}
+
+.gcon-copy-value {
+    cursor: pointer;
+}
+
+.gcon-copy-value:hover {
+    color: var(--primary);
+}
+
+.gcon-copy-value i {
+    font-size: .75rem;
+    opacity: .6;
+}
+
+/* ==========================================================
+   Topology — interactivity, pulse, legend
+   ========================================================== */
+
+.gcon-topo-pulse-ring {
+    animation: gcon-topo-pulse 2s ease-out infinite;
+    transform-origin: center;
+    transform-box: fill-box;
+}
+
+@keyframes gcon-topo-pulse {
+    0%   { transform: scale(0.9); opacity: .5; }
+    70%  { transform: scale(1.35); opacity: 0; }
+    100% { transform: scale(1.35); opacity: 0; }
+}
+
+.gcon-topo-edge-active {
+    animation: gcon-topo-dash 1s linear infinite;
+}
+
+@keyframes gcon-topo-dash {
+    to { stroke-dashoffset: -22; }
+}
+
+.gcon-topo-node:hover circle:first-of-type,
+.gcon-topo-coordinator:hover circle:first-of-type {
+    filter: brightness(1.15);
+}
+
+.gcon-topo-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+    font-size: .8rem;
+    color: var(--text-dim);
+}
+
+.gcon-topo-legend .item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.gcon-topo-legend .swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.gcon-topo-legend .ring {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--muted);
+    display: inline-block;
+}
+
+/* ==========================================================
+   Executions — lifecycle stepper
+   ========================================================== */
+
+.gcon-exec-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gcon-exec-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: border-color .15s ease, transform .15s ease;
+}
+
+.gcon-exec-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+}
+
+.gcon-stepper {
+    display: flex;
+    align-items: center;
+}
+
+.gcon-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.gcon-step-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 2px solid var(--border-strong);
+}
+
+.gcon-step.done .gcon-step-dot {
+    background: var(--success);
+    border-color: var(--success);
+}
+
+.gcon-step.current .gcon-step-dot {
+    background: var(--primary);
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-dim);
+}
+
+.gcon-step.failed .gcon-step-dot {
+    background: var(--danger);
+    border-color: var(--danger);
+}
+
+.gcon-step.skipped .gcon-step-dot {
+    background: transparent;
+    border-color: var(--border-subtle);
+}
+
+.gcon-step-label {
+    font-size: .7rem;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.gcon-step.done .gcon-step-label,
+.gcon-step.current .gcon-step-label {
+    color: var(--text-dim);
+}
+
+.gcon-step.failed .gcon-step-label {
+    color: var(--danger);
+}
+
+.gcon-step-connector {
+    flex: 1;
+    height: 2px;
+    background: var(--border-subtle);
+    margin: 0 4px;
+    margin-bottom: 16px;
+}
+
+.gcon-step-connector.done {
+    background: var(--success);
+}
+
+/* ==========================================================
+   Toasts — replaces native alert() dialogs app-wide
+   ========================================================== */
+
+.gcon-toast-stack {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+}
+
+.gcon-toast {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    box-shadow: var(--shadow-lg);
+    font-size: .85rem;
+    color: var(--text);
+    max-width: 340px;
+    opacity: 0;
+    transform: translateX(20px);
+    transition: opacity .2s ease, transform .2s ease;
+}
+
+.gcon-toast.show {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.gcon-toast.error {
+    border-left: 3px solid var(--danger);
+}
+
+.gcon-toast.error i {
+    color: var(--danger);
+}
+
+.gcon-toast.success {
+    border-left: 3px solid var(--success);
+}
+
+.gcon-toast.success i {
+    color: var(--success);
+}
+
+/* ==========================================================
+   Notification Center — bell dropdown, unread badge, list items
+   ========================================================== */
+
+.gcon-notif-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--danger);
+    color: white;
+    font-size: .65rem;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+}
+
+.gcon-notif-dropdown {
+    width: 340px;
+    max-width: 90vw;
+    padding: 0;
+    overflow: hidden;
+}
+
+.gcon-notif-dropdown-list {
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.gcon-notif-item {
+    position: relative;
+    padding-right: 34px !important;
+}
+
+.gcon-notif-unread {
+    background: var(--primary-dim);
+    border-left: 2px solid var(--primary);
+}
+
+.gcon-notif-read-btn {
+    position: absolute;
+    top: 10px;
+    right: 8px;
+    color: var(--muted);
+}
+
+.gcon-notif-read-btn:hover {
+    color: var(--success);
 }
