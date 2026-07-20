@@ -51,6 +51,12 @@ class GCONCoordinator:
         self.health_service = HealthService(self)
         self.verifier = ExecutionVerifier()
         self.scheduler_paused = False
+
+        # Signals scheduler_loop/health_check_loop to exit; set by
+        # shutdown(). Without this there is no way to stop these
+        # daemon threads short of process exit, so every coordinator
+        # ever constructed (e.g. one per test) keeps running forever.
+        self._shutdown_event = threading.Event()
         
         self.scheduler_thread = threading.Thread(
                 target=self.scheduler_loop,                       
@@ -415,20 +421,34 @@ class GCONCoordinator:
     def scheduler_loop(self):
         """
         Continuously assign waiting jobs to idle nodes.
+
+        This loop runs on a single daemon thread with no supervisor to
+        restart it, so it must never let an exception escape and kill
+        the thread -- doing so would silently stop ALL future job
+        dispatch for the life of the process, even though submit_job()
+        keeps happily accepting new work into the queue.
+
+        RuntimeError is assign_job()'s expected "no available node
+        right now" signal and is handled by simply retrying later.
+        Anything else (a bug in select_node/assign_job, a transient
+        fault, etc.) is unexpected -- it must NOT propagate out of
+        this loop. It is logged and the job is put back on the queue
+        so it isn't lost/stuck pending forever because of a one-off
+        failure.
         """
 
-        while True:
+        while not self._shutdown_event.is_set():
 
             if self.scheduler_paused:
-                time.sleep(0.2)
+                self._shutdown_event.wait(0.2)
                 continue
 
             if self.job_queue.empty():
-                time.sleep(0.1)
+                self._shutdown_event.wait(0.1)
                 continue
             
             if not self.scheduler.has_available_node():
-                time.sleep(0.1)
+                self._shutdown_event.wait(0.1)
                 continue
 
             job_id = self.job_queue.get()
@@ -439,8 +459,12 @@ class GCONCoordinator:
                 self.assign_job(job_id)
             except RuntimeError:
                 self.job_queue.put(job_id)
+            except Exception as e:
+                print(f"[SCHEDULER] Unexpected error assigning '{job_id}', "
+                      f"requeuing: {e!r}")
+                self.job_queue.put(job_id)
                 
-            time.sleep(0.05)    
+            self._shutdown_event.wait(0.05)    
             
     def health_check_loop(self):
         """
@@ -450,8 +474,9 @@ class GCONCoordinator:
         loss is detected in real time, not just when a button is
         clicked.
         """
-        while True:
-            time.sleep(3)
+        while not self._shutdown_event.is_set():
+            if self._shutdown_event.wait(3):
+                break
             try:
                 self.check_cluster_health()
             except Exception as e:
@@ -510,6 +535,24 @@ class GCONCoordinator:
             source="Coordinator", payload={},
         ))
         print("[SCHEDULER] Resumed.")
+
+    def shutdown(self, timeout=5.0):
+        """
+        Stop this coordinator's background daemon threads
+        (scheduler_loop, health_check_loop) cleanly.
+
+        Without this there was no way to stop them short of process
+        exit, so every constructed coordinator (e.g. one per test)
+        kept running forever, accumulating threads and competing for
+        the GIL/CPU with everything created afterward. Safe to call
+        more than once. Does not touch already-running jobs; their
+        worker threads (_run_job) are independent and short-lived, so
+        they finish on their own.
+        """
+        self._shutdown_event.set()
+        self.scheduler_thread.join(timeout=timeout)
+        self.health_check_thread.join(timeout=timeout)
+        print("[COORDINATOR] Shutdown complete.")
 
     # ------------------------------------------------------------
     # Node lifecycle control
