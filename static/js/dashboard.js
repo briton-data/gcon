@@ -175,7 +175,7 @@ function switchTab(tab) {
     const target = document.getElementById(`tab-${tab}`);
     if (target) target.classList.remove("d-none");
 
-    document.querySelectorAll("#tab-nav a, #tab-nav-top a, #tab-nav-mgmt a").forEach(el => {
+    document.querySelectorAll("#tab-nav a, #tab-nav-mgmt a").forEach(el => {
         el.classList.toggle("active", el.dataset.tab === tab);
     });
 
@@ -184,7 +184,7 @@ function switchTab(tab) {
 }
 
 function setupTabNav() {
-    document.querySelectorAll("#tab-nav a, #tab-nav-top a, #tab-nav-mgmt a").forEach(el => {
+    document.querySelectorAll("#tab-nav a, #tab-nav-mgmt a").forEach(el => {
         el.addEventListener("click", (e) => {
             e.preventDefault();
             switchTab(el.dataset.tab);
@@ -755,7 +755,7 @@ function bindPanelLinks() {
     document.querySelectorAll(".gcon-panel-link[data-tab]").forEach(link => {
         link.addEventListener("click", (e) => {
             e.preventDefault();
-            const tabLink = document.querySelector(`#tab-nav a[data-tab="${link.dataset.tab}"], #tab-nav-top a[data-tab="${link.dataset.tab}"]`);
+            const tabLink = document.querySelector(`#tab-nav a[data-tab="${link.dataset.tab}"]`);
             if (tabLink) tabLink.click();
         });
     });
@@ -2043,7 +2043,14 @@ async function triggerScale(direction) {
 // ---------------------------------------------------------------
 
 async function refreshDashboard() {
-   await loadActiveTab();
+    // Control Center is kept live by the WebSocket push in
+    // connectLiveSocket() (every 2s, via renderHomeDashboard/renderFeed).
+    // Re-fetching it here too on a separate 5s cadence would double-update
+    // the same panels from two independent sources. Every other tab has
+    // no socket coverage, so it still refreshes on this interval.
+    if (currentTab !== "control-center") {
+        await loadActiveTab();
+    }
     refreshHealthInspector();
     setText(
         "last-updated",
@@ -2596,6 +2603,7 @@ function connectLiveSocket() {
         if (currentTab === "control-center") {
             renderFeed("activity-feed", data.events);
             renderHomeDashboard(data);
+            setText("last-updated", new Date().toLocaleTimeString());
         }
         setConnectionStatus(true);
     };
