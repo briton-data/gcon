@@ -54,10 +54,10 @@ docs = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/Jug-data/GCON"
-"Bug Tracker" = "https://github.com/Jug-data/GCON/issues"
+"Homepage" = "https://github.com/briton-data/gcon"
+"Bug Tracker" = "https://github.com/briton-data/gcon/issues"
 "Documentation" = "https://gcon.network/docs"
-"Repository" = "https://github.com/Jug-data/GCON.git"
+"Repository" = "https://github.com/briton-data/gcon.git"
 
 [tool.setuptools.packages.find]
 where = ["src"]
