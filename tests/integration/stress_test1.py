@@ -63,11 +63,9 @@ SLEEP_CMD_TEMPLATE = "python3 -c \"import time; time.sleep({secs})\""
 def cluster():
     """
     A real GCONCoordinator with 5 real GCONAgent nodes registered.
-    Fresh instance per test — GCON has no reset/shutdown API (another
-    gap: there is no coordinator.shutdown() to stop the daemon threads
-    cleanly, so each test simply builds a new coordinator and its
-    daemon threads accumulate for the life of the pytest process; this
-    is acceptable for a bounded test run but is itself worth noting).
+    Fresh instance per test. coordinator.shutdown() stops its daemon
+    threads on teardown so they don't accumulate for the life of the
+    pytest process (previously a documented gap; see coordinator.py).
     """
     from gcon.cluster.coordinator import GCONCoordinator
     from gcon.execution.agent import GCONAgent
@@ -79,6 +77,7 @@ def cluster():
         coordinator.register_agent(agent)
         agents.append(agent)
     yield coordinator, agents
+    coordinator.shutdown()
 
 
 @pytest.fixture
@@ -90,6 +89,7 @@ def single_node_cluster():
     agent = GCONAgent(node_id="solo-node")
     coordinator.register_agent(agent)
     yield coordinator, agent
+    coordinator.shutdown()
 
 
 # =======================================================================

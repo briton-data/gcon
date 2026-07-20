@@ -1,0 +1,104 @@
+{
+  "generated_at": "2026-07-20T20:04:58.138336+00:00",
+  "node_count_final": 100,
+  "results": {
+    "job_throughput": {
+      "job_count": 100,
+      "node_count": 100,
+      "wall_seconds": 25.902,
+      "jobs_per_second": 3.861,
+      "completed": 100,
+      "failed": 0,
+      "sample_count": 2,
+      "error_count": 0,
+      "error_rate": 0.0,
+      "throughput_per_sec": 0.077,
+      "counters": {},
+      "gauges": {},
+      "latency_seconds": {
+        "min": 0.570529,
+        "max": 25.330303,
+        "mean": 12.950416,
+        "median": 12.950416,
+        "p95": 24.092314,
+        "p99": 25.082705,
+        "stdev": 12.379887
+      }
+    },
+    "dispatch_latency": {
+      "sample_count": 50,
+      "node_count": 10,
+      "error_count": 0,
+      "error_rate": 0.0,
+      "wall_seconds": 39.476,
+      "throughput_per_sec": 1.267,
+      "counters": {},
+      "gauges": {},
+      "latency_seconds": {
+        "min": 0.051278,
+        "max": 0.182751,
+        "mean": 0.097988,
+        "median": 0.101858,
+        "p95": 0.153366,
+        "p99": 0.169454,
+        "stdev": 0.02696
+      }
+    },
+    "concurrent_submission": {
+      "submitters": 50,
+      "jobs_per_submitter": 5,
+      "total_submitted": 250,
+      "submit_errors": 0,
+      "error_samples": [],
+      "wall_seconds": 1.369,
+      "submits_per_second": 182.67,
+      "sample_count": 250,
+      "error_count": 0,
+      "error_rate": 0.0,
+      "throughput_per_sec": 182.591,
+      "counters": {},
+      "gauges": {},
+      "latency_seconds": {
+        "min": 0.00119,
+        "max": 0.619345,
+        "mean": 0.100703,
+        "median": 0.078927,
+        "p95": 0.266852,
+        "p99": 0.48721,
+        "stdev": 0.094404
+      }
+    },
+    "resource_usage": {
+      "duration_seconds": 15.0,
+      "jobs_submitted": 47,
+      "samples": 15,
+      "rss_mb_start": 45.07,
+      "rss_mb_end": 45.33,
+      "rss_mb_peak": 45.78,
+      "rss_growth_mb": 0.25,
+      "thread_count_start": 29,
+      "thread_count_end": 31,
+      "thread_growth": 2
+    },
+    "scalability_curve": {
+      "curve": [
+        {
+          "node_count": 5,
+          "jobs_per_second": 2.3
+        },
+        {
+          "node_count": 20,
+          "jobs_per_second": 3.012
+        },
+        {
+          "node_count": 50,
+          "jobs_per_second": 3.892
+        },
+        {
+          "node_count": 100,
+          "jobs_per_second": 3.861
+        }
+      ]
+    }
+  }
+}
