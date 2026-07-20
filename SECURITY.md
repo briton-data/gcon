@@ -17,7 +17,7 @@ If you discover a security vulnerability in GCON, please **do not** open a publi
 
 ### Contact
 
-- **Email**: [Add maintainer email]
+- **Email**: [nyongesabriton620@gmail.com]
 - **GitHub**: [@briton-data](https://github.com/briton-data)
 
 ---
