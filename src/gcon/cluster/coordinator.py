@@ -454,7 +454,8 @@ class GCONCoordinator:
             job_id = self.job_queue.get()
             print(f"[QUEUE] Dispatching {job_id}")
             print(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
-
+            
+            dispatched = True
             try:
                 self.assign_job(job_id)
             except RuntimeError:
@@ -463,8 +464,9 @@ class GCONCoordinator:
                 print(f"[SCHEDULER] Unexpected error assigning '{job_id}', "
                       f"requeuing: {e!r}")
                 self.job_queue.put(job_id)
-                
-            self._shutdown_event.wait(0.05)    
+                dispatched = False
+            if not dispatched:
+                self._shutdown_event.wait(0.05)    
             
     def health_check_loop(self):
         """
