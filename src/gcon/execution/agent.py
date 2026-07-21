@@ -124,7 +124,7 @@ class GCONAgent:
             gpu_name=gpu_info.get("gpu_name", "Unknown"),
             gpu_memory_total=gpu_info.get("memory_total", 0),
             gpu_memory_used=gpu_info.get("memory_used", 0),
-            cpu_percent=psutil.cpu_percent(interval=0.1),
+            cpu_percent=psutil.cpu_percent(interval=None),
             memory_percent=psutil.virtual_memory().percent,
             runtime_seconds=time.time() - self.start_time if self.start_time else 0,
             timestamp=datetime.now(UTC).isoformat()
