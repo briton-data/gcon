@@ -462,7 +462,7 @@ class GCONCoordinator:
                 self.job_queue.put(job_id)
             except Exception as e:
                 print(f"[SCHEDULER] Unexpected error assigning '{job_id}', "
-                      f"requeuing: {e!r}")
+                    f"requeuing: {e!r}")
                 self.job_queue.put(job_id)
                 dispatched = False
             if not dispatched:
