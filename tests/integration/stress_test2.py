@@ -67,9 +67,14 @@ def management():
     A real ManagementLayer with no coordinator attached (event-bridge
     tests aren't the concern here — everything below exercises the
     management layer's own internal state under concurrency).
+
+    db_path=":memory:" is deliberate: ManagementLayer now persists to
+    SQLite by default (see database.py), and tests must NOT share or
+    accumulate state in the real production database file across
+    runs — each test needs a clean, isolated store.
     """
     from gcon.management.management_layer import ManagementLayer
-    return ManagementLayer(coordinator=None)
+    return ManagementLayer(coordinator=None, db_path=":memory:")
 
 
 @pytest.fixture

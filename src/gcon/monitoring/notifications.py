@@ -11,10 +11,18 @@ dimensions:
 Both are derived from the notification `type_` via the maps below,
 never chosen ad hoc at the call site, so the same event type always
 renders the same way everywhere in the UI.
+
+Persistence: every notification is written through to the shared
+`Database`, and the most recent `max_entries` are loaded back on
+construction. The append + trim sequence (and mark_read/mark_all_read)
+now happen under the database's write lock, closing the same
+lost-update race fixed in audit_log.py.
 """
 
 from datetime import datetime, UTC
 from uuid import uuid4
+
+from ..storage.database import Database
 
 NOTIFICATION_TYPES = [
     "user_registered", "invitation_accepted", "password_changed",
@@ -67,35 +75,68 @@ TYPE_CATEGORY = {
 
 
 class NotificationCenter:
-    def __init__(self, max_entries=200):
-        self.entries = []
+    def __init__(self, max_entries=200, db: Database = None):
+        self.db = db or Database(":memory:")
         self.max_entries = max_entries
+        rows = self.db.query(
+            "SELECT * FROM notifications ORDER BY seq DESC LIMIT ?", (max_entries,)
+        )
+        self.entries = [self._row_to_entry(r) for r in reversed(rows)]
+
+    @staticmethod
+    def _row_to_entry(row):
+        return {
+            "notification_id": row["notification_id"],
+            "type": row["type"],
+            "message": row["message"],
+            "severity": row["severity"],
+            "category": row["category"],
+            "timestamp": row["timestamp"],
+            "read": bool(row["read"]),
+        }
 
     def notify(self, type_, message, severity=None, category=None):
-        entry = {
-            "notification_id": f"notif_{uuid4().hex[:8]}",
-            "type": type_,
-            "message": message,
-            "severity": severity or TYPE_SEVERITY.get(type_, "information"),
-            "category": category or TYPE_CATEGORY.get(type_, "cluster_events"),
-            "timestamp": datetime.now(UTC).isoformat(),
-            "read": False,
-        }
-        self.entries.append(entry)
-        if len(self.entries) > self.max_entries:
-            self.entries = self.entries[-self.max_entries:]
+        with self.db.transaction() as conn:
+            seq = self.db.next_seq("notifications")
+            entry = {
+                "notification_id": f"notif_{uuid4().hex[:8]}",
+                "type": type_,
+                "message": message,
+                "severity": severity or TYPE_SEVERITY.get(type_, "information"),
+                "category": category or TYPE_CATEGORY.get(type_, "cluster_events"),
+                "timestamp": datetime.now(UTC).isoformat(),
+                "read": False,
+            }
+            conn.execute(
+                "INSERT INTO notifications (notification_id, type, message, severity, "
+                "category, timestamp, read, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["notification_id"], entry["type"], entry["message"],
+                 entry["severity"], entry["category"], entry["timestamp"], 0, seq),
+            )
+            self.entries.append(entry)
+            if len(self.entries) > self.max_entries:
+                self.entries = self.entries[-self.max_entries:]
+                cutoff_seq = seq - self.max_entries + 1
+                conn.execute("DELETE FROM notifications WHERE seq < ?", (cutoff_seq,))
         return entry
 
     def mark_read(self, notification_id):
-        for entry in self.entries:
-            if entry["notification_id"] == notification_id:
-                entry["read"] = True
-                return entry
+        with self.db.transaction() as conn:
+            for entry in self.entries:
+                if entry["notification_id"] == notification_id:
+                    entry["read"] = True
+                    conn.execute(
+                        "UPDATE notifications SET read = 1 WHERE notification_id = ?",
+                        (notification_id,),
+                    )
+                    return entry
         raise ValueError(f"Notification '{notification_id}' does not exist.")
 
     def mark_all_read(self):
-        for entry in self.entries:
-            entry["read"] = True
+        with self.db.transaction() as conn:
+            for entry in self.entries:
+                entry["read"] = True
+            conn.execute("UPDATE notifications SET read = 1")
         return self.entries
 
     def list_entries(self, limit=50):

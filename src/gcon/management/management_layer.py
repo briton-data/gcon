@@ -27,6 +27,7 @@ from .api_keys import APIKeyManager
 from .audit_log import AuditLogger
 
 from gcon.monitoring.notifications import NotificationCenter
+from gcon.storage.database import Database
 
 # Bootstrap owner account, created once on first boot. Overridable
 # via environment variables for deployments that don't want this
@@ -36,14 +37,21 @@ BOOTSTRAP_OWNER_EMAIL = os.environ.get("GCON_OWNER_EMAIL", "nyongesabriton620@gm
 BOOTSTRAP_OWNER_PASSWORD = os.environ.get("GCON_OWNER_PASSWORD", "GCON2024")
 
 class ManagementLayer:
-    def __init__(self, coordinator=None):
+    def __init__(self, coordinator=None, db_path=None):
+        """
+        db_path: where the durable SQLite store lives. Defaults to
+        `Database`'s own default (env var GCON_DB_PATH, or
+        data/gcon.db). Pass db_path=":memory:" for tests/ephemeral
+        use that should NOT survive a restart on purpose.
+        """
         self.coordinator = coordinator
+        self.db = Database(db_path)
 
-        self.user_registry = UserRegistry()
-        self.org_registry = OrganizationRegistry()
-        self.api_key_manager = APIKeyManager()
-        self.audit_logger = AuditLogger()
-        self.notification_center = NotificationCenter()
+        self.user_registry = UserRegistry(db=self.db)
+        self.org_registry = OrganizationRegistry(db=self.db)
+        self.api_key_manager = APIKeyManager(db=self.db)
+        self.audit_logger = AuditLogger(db=self.db)
+        self.notification_center = NotificationCenter(db=self.db)
         self.session_manager = SessionManager()
 
         self._bootstrap_owner_account()
@@ -55,14 +63,21 @@ class ManagementLayer:
         Create the one real account that exists on first boot, so
         there's a way to log in. No demo users, organizations, API
         keys, or audit entries are created.
+
+        Persistence-aware: on a restart, the owner account is loaded
+        back from the database (see UserRegistry.__init__), so this
+        only actually creates anything — and only logs an audit
+        entry — on a genuine first boot.
         """
+        is_first_boot = self.user_registry.get_user_by_email(BOOTSTRAP_OWNER_EMAIL) is None
         bootstrap_owner_account(
             self.user_registry,
             BOOTSTRAP_OWNER_NAME,
             BOOTSTRAP_OWNER_EMAIL,
             BOOTSTRAP_OWNER_PASSWORD,
     )
-        self.audit_logger.log("System", "created user", BOOTSTRAP_OWNER_NAME)
+        if is_first_boot:
+            self.audit_logger.log("System", "created user", BOOTSTRAP_OWNER_NAME)
 
     # Real coordinator events -> notifications. This replaces the old
     # seed_notifications() demo text: every notification below is
@@ -146,9 +161,9 @@ class ManagementLayer:
         if owner is not None and owner.status != "Active":
             raise ValueError("Invalid or expired API key.")
 
-        key.mark_used()
+        self.api_key_manager.mark_used(key)
         if owner is not None:
-            owner.stats["api_requests"] += 1
+            self.user_registry.increment_stat(owner.user_id, "api_requests")
 
         return key, owner   
     
@@ -232,8 +247,8 @@ class ManagementLayer:
             self.audit_logger.log(user.name, f"blocked login attempt (status: {user.status})")
             raise ValueError(f"This account is {user.status.lower()} and cannot log in.")
 
-        user.last_active = datetime.now(UTC)
-        user.stats["login_count"] += 1
+        self.user_registry.touch_last_active(user.user_id)
+        self.user_registry.increment_stat(user.user_id, "login_count")
 
         token = self.session_manager.create_session(user.user_id)
         self.audit_logger.log(user.name, "logged in")

@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 
 class StorageManager:
     """
@@ -118,7 +119,7 @@ class StorageManager:
                 return False
 
         # If it's still locked after retries, propagate the error.
-        raise
+        raise FileNotFoundError(artifact_path)
     
     def list_node_artifacts(self, node_id):
         """
