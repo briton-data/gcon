@@ -14,13 +14,13 @@
     --surface-2: #1B1F26;
     --sidebar: #0D0F13;
     --border-subtle: rgba(255, 255, 255, 0.07);
-    --border-strong: rgba(255, 255, 255, 0.14);
+    --border-strong: rgba(17, 17, 17, 0.185);
 
     /* Accent pair */
-    --primary: #3B82F6;      /* electric blue */
-    --primary-dim: rgba(59, 130, 246, 0.16);
-    --violet: #8B5CF6;       /* secondary accent */
-    --violet-dim: rgba(139, 92, 246, 0.16);
+    --primary:  #00C2A8;      
+    --primary-dim: rgba(0,194,168,.1);
+    --violet:#14B8A6;       /* secondary accent */
+    --violet-dim: rgba(20,184,166,.15);
 
     /* Status */
     --success: #10B981;      /* emerald */
@@ -44,7 +44,7 @@
     --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
     --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.45);
 
-    --gradient-brand: linear-gradient(135deg, #3B82F6 0%, #8B5CF6 100%);
+    --gradient-brand: linear-gradient(135deg, #00C2A8, #14B8A6, #0F766E);
 }
 
 /* ---------- Bootstrap 5.3 theme retint ----------
@@ -398,9 +398,8 @@ body {
 ========================================================== */
 
 .gcon-table {
-
+    color: var(--text);
     margin-bottom: 0;
-
 }
 
 .gcon-table thead th {
@@ -488,11 +487,6 @@ body {
 /* ==========================================================
    Explorer
 ========================================================== */
-
-.gcon-table {
-    color: var(--text);
-    margin-bottom: 0;
-}
 
 .gcon-table thead th {
     color: var(--muted);
@@ -832,10 +826,6 @@ body {
 /* ---------------------------------------------------------------
    Notifications & row links
    --------------------------------------------------------------- */
-
-.gcon-notif-unread {
-    border-left-color: var(--warning);
-}
 
 .gcon-row-link {
     cursor: pointer;
@@ -1514,6 +1504,9 @@ body {
 .gcon-notif-item {
     position: relative;
     padding-right: 34px !important;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
 }
 
 .gcon-notif-unread {
@@ -1531,3 +1524,307 @@ body {
 .gcon-notif-read-btn:hover {
     color: var(--success);
 }
+
+/* ==========================================================
+   Hero Header — product identity + live headline stats
+   ========================================================== */
+
+.gcon-hero {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 20px 32px;
+  background:
+    radial-gradient(circle at top left, rgba(0,194,168,.08), transparent 60%),
+    radial-gradient(circle at bottom right, rgba(59,130,246,.08), transparent),
+    linear-gradient(180deg, #1B1F24 0%, #14171C 100%);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 24px 28px;
+  box-shadow: var(--shadow-md);
+}
+
+.gcon-hero-brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding-right: 28px;
+    border-right: 1px solid var(--border-subtle);
+}
+
+.gcon-hero-mark {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    color: #06131a;
+    background: var(--gradient-brand);
+    box-shadow: 0 0 22px rgba(59, 130, 246, .35);
+    flex: 0 0 auto;
+}
+
+.gcon-hero-title {
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+}
+
+.gcon-hero-tagline {
+    font-size: .78rem;
+    color: var(--muted);
+    letter-spacing: .02em;
+}
+
+.gcon-hero-stats {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 26px;
+    flex: 1;
+}
+
+.gcon-hero-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 88px;
+}
+
+.gcon-hero-stat .v {
+    font-size: 1.5rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+    color: var(--text);
+}
+
+.gcon-hero-stat .v .of {
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--muted);
+}
+
+.gcon-hero-stat .l {
+    font-size: .72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+}
+
+.gcon-hero-stat.gcon-hero-trust .v {
+    color: var(--violet);
+}
+
+.gcon-hero-coordinator {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+}
+
+.gcon-hero-coordinator .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-dim);
+}
+
+.gcon-hero-coordinator.offline .dot {
+    background: var(--danger);
+    box-shadow: 0 0 0 3px var(--danger-dim);
+}
+
+@media (max-width: 991px) {
+    .gcon-hero { flex-direction: column; align-items: flex-start; }
+    .gcon-hero-brand { border-right: none; padding-right: 0; }
+    .gcon-hero-coordinator { margin-left: 0; }
+}
+
+/* ==========================================================
+   Trust & Health panel
+   ========================================================== */
+
+.gcon-trust-score-row {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 18px;
+}
+
+.gcon-trust-gauge {
+    flex: 0 0 auto;
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: conic-gradient(var(--gauge-color, var(--success)) calc(var(--gauge-pct, 0) * 1%), var(--surface-2) 0);
+    position: relative;
+}
+
+.gcon-trust-gauge::before {
+    content: "";
+    position: absolute;
+    inset: 8px;
+    border-radius: 50%;
+    background: var(--surface);
+}
+
+.gcon-trust-gauge span {
+    position: relative;
+    font-weight: 700;
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.gcon-trust-meta .badge {
+    font-size: .72rem;
+    letter-spacing: .02em;
+    padding: 5px 10px;
+}
+
+.gcon-trust-submetrics {
+    margin-top: 6px;
+}
+
+.gcon-health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.gcon-health-branch {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--success);
+    transition: border-color .15s ease, background .15s ease;
+}
+
+.gcon-health-branch.unhealthy {
+    border-left-color: var(--danger);
+    background: var(--danger-dim);
+}
+
+.gcon-health-branch .dot {
+    width: 7px;
+    height: 7px;
+    margin-top: 5px;
+    border-radius: 50%;
+    background: var(--success);
+    flex: 0 0 auto;
+}
+
+.gcon-health-branch.unhealthy .dot {
+    background: var(--danger);
+}
+
+.gcon-health-branch .label {
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.gcon-health-branch .detail {
+    font-size: .72rem;
+    color: var(--muted);
+    line-height: 1.3;
+}
+
+.gcon-health-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-subtle);
+    font-size: .78rem;
+    color: var(--text-dim);
+}
+
+.gcon-heartbeat-status,
+.gcon-last-issue {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.gcon-heartbeat-status.ok i,
+.gcon-last-issue.ok i { color: var(--success); }
+.gcon-heartbeat-status.warn i { color: var(--warning); }
+.gcon-heartbeat-status.bad i,
+.gcon-last-issue.bad i { color: var(--danger); }
+
+.gcon-stat-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px 12px;
+}
+
+.gcon-stat-list .cell .fw-bold {
+    font-size: 1.15rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================
+   Trust Center — score history strip
+   ========================================================== */
+
+.gcon-trust-history-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 160px;
+    padding: 4px 2px;
+}
+
+.gcon-trust-history-chart .bar {
+    flex: 1;
+    min-width: 3px;
+    border-radius: 2px 2px 0 0;
+    background: linear-gradient(180deg, var(--violet), var(--primary));
+    transition: opacity .15s ease;
+}
+
+.gcon-trust-history-chart .bar:hover {
+    opacity: .75;
+}
+
+/* ==========================================================
+   Notification severity indicators
+   ========================================================== */
+
+.gcon-notif-sev-dot {
+    width: 8px;
+    height: 8px;
+    margin-top: 6px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--info);
+}
+
+.gcon-notif-sev-critical .gcon-notif-sev-dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-dim); }
+.gcon-notif-sev-warning .gcon-notif-sev-dot { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-dim); }
+.gcon-notif-sev-security .gcon-notif-sev-dot { background: var(--violet); box-shadow: 0 0 0 3px var(--violet-dim); }
+.gcon-notif-sev-information .gcon-notif-sev-dot { background: var(--info); box-shadow: 0 0 0 3px var(--info-dim); }
+
+.gcon-notif-badge.gcon-badge-critical { background: var(--danger); }
+.gcon-notif-badge.gcon-badge-warning { background: var(--warning); color: #1a1300; }
+.gcon-notif-badge.gcon-badge-security { background: var(--violet); }
+.gcon-notif-badge.gcon-badge-info { background: var(--info); color: #04181d; }
+

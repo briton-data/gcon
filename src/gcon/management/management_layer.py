@@ -85,6 +85,26 @@ class ManagementLayer:
             "receipt_generated",
             lambda p: f"Receipt generated for job {p.get('job_id')}",
         ),
+        "RECEIPT_VERIFICATION_FAILED": (
+            "receipt_verification_failed",
+            lambda p: f"Receipt {p.get('receipt_id')} for job {p.get('job_id')} failed verification",
+        ),
+        "RECEIPT_VERIFICATION_RECOVERED": (
+            "receipt_verification_recovered",
+            lambda p: f"Receipt {p.get('receipt_id')} for job {p.get('job_id')} is verified again",
+        ),
+        "HEALTH_DEGRADED": (
+            "health_degraded",
+            lambda p: f"Cluster health degraded: {p.get('reason')}",
+        ),
+        "HEALTH_CRITICAL": (
+            "health_critical",
+            lambda p: f"Cluster health is critical: {p.get('reason')}",
+        ),
+        "HEALTH_RECOVERED": (
+            "health_recovered",
+            lambda p: "Cluster health recovered to normal",
+        ),
     }
 
     def create_organization(self, name, plan="Standard"):
@@ -341,8 +361,14 @@ class ManagementLayer:
     def get_unread_notification_count(self):
         return self.notification_center.unread_count()
 
+    def get_unread_notification_count_by_severity(self):
+        return self.notification_center.unread_count_by_severity()
+
     def mark_notification_read(self, notification_id):
         return self.notification_center.mark_read(notification_id)
+
+    def mark_all_notifications_read(self):
+        return self.notification_center.mark_all_read()
 
     # ------------------------------------------------------------
     # Dashboard cards

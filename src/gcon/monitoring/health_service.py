@@ -79,6 +79,29 @@ class HealthService:
             {"running": running, "response_time_ms": response_ms, "queue_size": queue_size},
         )
 
+    def check_scheduler(self):
+        """
+        Scheduler health is distinct from the Coordinator branch: a
+        coordinator can be online while its scheduler is deliberately
+        paused (an operator action, not a fault) or its thread has
+        died independently of the coordinator process itself.
+        """
+        running = self.coordinator.scheduler_thread.is_alive()
+        paused = getattr(self.coordinator, "scheduler_paused", False)
+        queue_size = self.coordinator.job_queue.qsize()
+
+        if not running:
+            healthy, detail = False, "Scheduler thread is not running"
+        elif paused:
+            healthy, detail = False, "Scheduler is paused — no new jobs are being assigned"
+        else:
+            healthy, detail = True, f"Assigning jobs normally ({queue_size} queued)"
+
+        return HealthCheck(
+            "scheduler", "Scheduler", healthy, detail,
+            {"running": running, "paused": paused, "queue_size": queue_size},
+        )
+
     def check_receipt_service(self):
         start = time.perf_counter()
         reachable = isinstance(self.coordinator.receipts, dict)
@@ -191,6 +214,7 @@ class HealthService:
     def compute(self):
         checks = [
             self.check_coordinator(),
+            self.check_scheduler(),
             self.check_receipt_service(),
             self.check_node_registry(),
             self.check_workers(),
@@ -229,3 +253,70 @@ class HealthService:
         if not failing:
             return "All systems operating normally."
         return "; ".join(failing)
+
+    # ------------------------------------------------------------
+    # Trust score
+    # ------------------------------------------------------------
+
+    def compute_trust(self):
+        """
+        Compute an execution-trust score, distinct from operational
+        Cluster Health. Cluster Health asks "is the system running
+        correctly?"; Trust asks "can I believe what it produced?" —
+        so it is weighted toward receipt verification integrity
+        rather than raw uptime, and is always derived live from the
+        coordinator's real receipt store and node registry (never
+        cached or hardcoded).
+        """
+        receipts = self.coordinator.get_receipts()
+        total_receipts = len(receipts)
+        verified = sum(1 for r in receipts if r.get("verified"))
+        verification_rate = (verified / total_receipts * 100) if total_receipts else 100.0
+
+        nodes = self.coordinator.get_nodes()
+        online = [n for n in nodes if n["status"] != "offline"]
+        node_trust_rate = (len(online) / len(nodes) * 100) if nodes else 100.0
+
+        coordinator_check = self.check_coordinator()
+        scheduler_check = self.check_scheduler()
+        storage_check = self.check_storage()
+        operational_score = (
+            sum(
+                100 if c.healthy else 0
+                for c in (coordinator_check, scheduler_check, storage_check)
+            )
+            / 3
+        )
+
+        # Verification integrity carries the most weight for a trust
+        # score, node reliability next, baseline operational health last.
+        score = round(
+            verification_rate * 0.5 + node_trust_rate * 0.3 + operational_score * 0.2, 1
+        )
+
+        return {
+            "trust_score": score,
+            "verification_rate": round(verification_rate, 1),
+            "node_trust_rate": round(node_trust_rate, 1),
+            "operational_score": round(operational_score, 1),
+            "verified_receipts": verified,
+            "total_receipts": total_receipts,
+            "computed_at": datetime.now(UTC).isoformat(),
+        }
+
+    def last_detected_issue(self, health=None):
+        """
+        Return the most significant currently-unhealthy branch (or
+        None if everything is healthy), for the "Last detected issue"
+        line in the Trust & Health panel.
+        """
+        health = health or self.compute()
+        for reason in health["reasons"]:
+            if not reason["healthy"]:
+                return {
+                    "check": reason["check"],
+                    "label": reason["label"],
+                    "detail": reason["detail"],
+                    "detected_at": health["computed_at"],
+                }
+        return None

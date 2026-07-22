@@ -53,14 +53,14 @@ function statusBadge(status) {
     const normalized = (status || "").toLowerCase();
 
     const classMap = {
-        healthy: "bg-success", idle: "bg-secondary", offline: "bg-secondary",
+        healthy: "bg-success", idle: "bg-secondary", offline: "bg-danger",
         running: "bg-primary", completed: "bg-success", failed: "bg-danger",
         pending: "bg-warning text-dark", verified: "bg-success",
         active: "bg-success", suspended: "bg-warning text-dark",
         disabled: "bg-secondary", revoked: "bg-danger", expired: "bg-secondary",
     };
     const labelMap = {
-        healthy: "Healthy", idle: "Idle", offline: "Idle", running: "Running",
+        healthy: "Healthy", idle: "Idle", offline: "Offline", running: "Running",
         completed: "Completed", failed: "Failed", pending: "Pending", verified: "Verified",
         active: "Active", suspended: "Suspended", disabled: "Disabled",
         revoked: "Revoked", expired: "Expired",
@@ -155,6 +155,7 @@ const TAB_TITLES = {
     "executions": "Executions",
     "topology": "Cluster Visualization",
     "receipts": "Receipts",
+    "trust-center": "Trust Center",
     "explorer": "Explorer",
     "monitoring": "Real-Time Monitoring",
     "analytics": "Analytics & History",
@@ -197,6 +198,7 @@ function loadActiveTab() {
     else if (currentTab === "executions") loadExecutionsTab();
     else if (currentTab === "topology") loadTopology();
     else if (currentTab === "receipts") loadReceiptsTab();
+    else if (currentTab === "trust-center") loadTrustCenter();
     else if (currentTab === "explorer") loadExplorer();
     else if (currentTab === "monitoring") loadMonitoring();
     else if (currentTab === "analytics") loadAnalytics();
@@ -218,66 +220,83 @@ function loadActiveTab() {
 
 async function loadClusterHealth() {
     try {
-        const health = await fetchJson("/health");
-
-        // Overall score
-        setText("health-score", `${health.score}%`);
-
-        // Overall state badge
-        const badge = document.getElementById("health-state-badge");
-        if (badge) {
-
-            const classMap = {
-                healthy: "badge bg-success",
-                degraded: "badge bg-warning text-dark",
-                critical: "badge bg-danger",
-            };
-
-            badge.className = classMap[health.state] || "badge bg-secondary";
-            badge.textContent =
-                health.state.charAt(0).toUpperCase() +
-                health.state.slice(1);
-        }
-
-        // Main reason
-        setText("health-reason", health.reason);
-
-        // Detailed reasons
-        const list = document.getElementById("health-reasons-list");
-
-        if (list) {
-
-            list.innerHTML = "";
-
-            if (health.reasons && health.reasons.length) {
-
-                health.reasons.forEach(reason => {
-                    const item = document.createElement("div");
-                    item.className = `small ${reason.healthy ? "text-secondary" : "text-warning"}`;
-                    item.innerHTML = `
-                    <i class="bi bi-dot"></i>
-                    <strong>${escapeHtml(reason.label)}:</strong> ${escapeHtml(reason.detail)}
-    `;
-                    list.appendChild(item);
-
-
-                });
-
-            } else {
-
-                list.innerHTML =
-                    `<div class="small text-success">No issues detected.</div>`;
-
-            }
-
-        }
-
+        const [health, trust] = await Promise.all([
+            fetchJson("/health"),
+            fetchJson("/trust-score"),
+        ]);
+        renderTrustHealth(health, trust);
     } catch (err) {
-
         console.error("Failed to load cluster health:", err);
-
         setConnectionStatus(false);
+    }
+}
 
+// Single render path for the Trust & Health panel — called both from
+// loadClusterHealth() (fetch, used on tab switch / initial load) and
+// from renderHomeDashboard() (the bootstrap payload + every /ws tick),
+// so the panel never has two different code paths deciding what it
+// shows.
+function renderTrustHealth(health, trust, globalStatus) {
+    if (!health) return;
+
+    const stateClassMap = {
+        healthy: "badge bg-success",
+        degraded: "badge bg-warning text-dark",
+        critical: "badge bg-danger",
+    };
+    const badge = document.getElementById("health-state-badge");
+    if (badge) {
+        badge.className = stateClassMap[health.state] || "badge bg-secondary";
+        badge.textContent = health.state ? health.state.charAt(0).toUpperCase() + health.state.slice(1) : "--";
+    }
+    setText("health-reason", health.reason);
+
+    if (trust) {
+        const gauge = document.getElementById("trust-score-gauge");
+        if (gauge) {
+            const pct = trust.trust_score ?? 0;
+            gauge.style.setProperty("--gauge-pct", pct);
+            gauge.style.setProperty(
+                "--gauge-color",
+                pct >= 90 ? "var(--success)" : pct >= 70 ? "var(--warning)" : "var(--danger)"
+            );
+        }
+        setText("trust-score-value", `${trust.trust_score ?? "--"}%`);
+        setText("trust-verification-rate", `Verification ${trust.verification_rate ?? "--"}%`);
+        setText("trust-node-rate", `Node trust ${trust.node_trust_rate ?? "--"}%`);
+    }
+
+    const grid = document.getElementById("health-branch-grid");
+    if (grid && health.checks) {
+        grid.innerHTML = Object.values(health.checks).map(c => `
+            <div class="gcon-health-branch ${c.healthy ? "" : "unhealthy"}">
+                <span class="dot"></span>
+                <div>
+                    <div class="label">${escapeHtml(c.label)}</div>
+                    <div class="detail">${escapeHtml(c.detail)}</div>
+                </div>
+            </div>
+        `).join("");
+    }
+
+    const heartbeatEl = document.getElementById("health-heartbeat-status");
+    if (heartbeatEl && globalStatus) {
+        const age = globalStatus.heartbeat_age_seconds;
+        heartbeatEl.classList.remove("ok", "warn", "bad");
+        heartbeatEl.classList.add(age === null || age === undefined ? "warn" : age < 30 ? "ok" : age < 120 ? "warn" : "bad");
+        setText("health-heartbeat-age", formatAge(age));
+    }
+
+    const issueEl = document.getElementById("health-last-issue");
+    if (issueEl) {
+        issueEl.classList.remove("ok", "bad");
+        if (health.last_issue) {
+            issueEl.classList.add("bad");
+            issueEl.innerHTML = `<i class="bi bi-exclamation-triangle"></i> ${escapeHtml(health.last_issue.label)}: ${escapeHtml(health.last_issue.detail)}`;
+        } else {
+            issueEl.classList.add("ok");
+            issueEl.innerHTML = `<i class="bi bi-check-circle"></i> No issues detected`;
+        }
     }
 }
 
@@ -741,14 +760,130 @@ function renderExecutionTimeline(jobs) {
     `).join("");
 }
 
+function renderHero(hero) {
+    if (!hero) return;
+    setText("hero-connected-nodes", hero.connected_nodes);
+    setText("hero-total-nodes", hero.total_nodes);
+    setText("hero-running-executions", hero.running_executions);
+    setText("hero-verified-receipts", hero.verified_receipts);
+    setText("hero-total-receipts", hero.total_receipts);
+    setText("hero-trust-score", hero.trust_score);
+    setText("hero-coordinator-id", hero.coordinator_id);
+
+    const status = document.getElementById("hero-coordinator-status");
+    if (status) status.classList.toggle("offline", !hero.coordinator_online);
+}
+
 function renderHomeDashboard(data) {
     if (!data) return;
+    renderHero(data.hero);
     renderGlobalStatus(data.global_status);
+    renderTrustHealth(data.health, data.trust, data.global_status);
     renderCriticalAlerts(data.critical_alerts);
     renderNodeSummary(data.node_summary);
     renderReceiptsSummary(data.receipts_summary);
     renderStorageSummary(data.storage_summary);
     renderExecutionTimeline(data.execution_timeline);
+}
+
+// ---------------------------------------------------------------
+// Trust Center
+// ---------------------------------------------------------------
+
+function renderTrustCenter(data) {
+    if (!data) return;
+    const trust = data.trust || {};
+
+    setText("tc-trust-score", `${trust.trust_score ?? "--"}%`);
+    setText("tc-verification-rate", `${trust.verification_rate ?? "--"}%`);
+    setText("tc-node-trust-rate", `${trust.node_trust_rate ?? "--"}%`);
+    setText("tc-verification-failures", (data.verification_failures || []).length);
+
+    // Trust score history — simple bar strip, one bar per sample.
+    const chart = document.getElementById("trust-history-chart");
+    if (chart) {
+        const history = data.history || [];
+        if (history.length === 0) {
+            chart.innerHTML = `<div class="text-secondary text-center py-4 w-100">Collecting samples…</div>`;
+        } else {
+            chart.innerHTML = history.map(h => `
+                <div class="bar" style="height:${Math.max(2, h.score)}%"
+                     title="${escapeHtml(h.score)}% at ${new Date(h.timestamp).toLocaleTimeString()}"></div>
+            `).join("");
+        }
+    }
+
+    // Signature validation summary
+    const sigEl = document.getElementById("tc-signature-summary");
+    if (sigEl) {
+        const summary = data.receipts_summary || {};
+        sigEl.innerHTML = `
+            <div class="gcon-stat-list">
+                <div class="cell"><div class="text-secondary small">Total Receipts</div><div class="fw-bold">${summary.total ?? 0}</div></div>
+                <div class="cell"><div class="text-secondary small">Verified</div><div class="fw-bold text-success">${summary.verified ?? 0}</div></div>
+                <div class="cell"><div class="text-secondary small">Unverified</div><div class="fw-bold text-danger">${summary.unverified ?? 0}</div></div>
+                <div class="cell"><div class="text-secondary small">Verification Rate</div><div class="fw-bold">${trust.verification_rate ?? "--"}%</div></div>
+            </div>
+        `;
+    }
+
+    // Verification failures
+    const failuresList = document.getElementById("tc-failures-list");
+    const failuresCount = document.getElementById("tc-failures-count");
+    if (failuresCount) failuresCount.textContent = (data.verification_failures || []).length;
+    if (failuresList) {
+        const failures = data.verification_failures || [];
+        failuresList.innerHTML = failures.length === 0
+            ? `<div class="text-secondary text-center py-3"><i class="bi bi-check-circle-fill text-success me-1"></i>No verification failures.</div>`
+            : failures.map(r => `
+                <div class="gcon-activity-item">
+                    <div class="gcon-activity-time"><i class="bi bi-shield-x text-danger me-1"></i>${escapeHtml(r.receipt_id)}</div>
+                    <div class="gcon-activity-message">Job ${escapeHtml(r.job_id)} on ${escapeHtml(r.node_id || "unassigned")}</div>
+                </div>
+            `).join("");
+    }
+
+    // Node trust status
+    const nodeTrustBody = document.getElementById("tc-node-trust-body");
+    if (nodeTrustBody) {
+        const nodes = data.node_trust || [];
+        nodeTrustBody.innerHTML = nodes.length === 0
+            ? `<tr><td colspan="4" class="text-center text-secondary">No registered nodes.</td></tr>`
+            : nodes.map(n => `
+                <tr>
+                    <td>${escapeHtml(n.node_id)}</td>
+                    <td>${statusBadge(n.status)}</td>
+                    <td>${n.trusted ? '<i class="bi bi-shield-check text-success"></i> Trusted' : '<i class="bi bi-shield-x text-danger"></i> Untrusted'}</td>
+                    <td class="text-secondary small">${escapeHtml(n.last_seen || "-")}</td>
+                </tr>
+            `).join("");
+    }
+
+    // Verification timeline (recent receipt/verification-related events)
+    const timelineEl = document.getElementById("tc-verification-timeline");
+    if (timelineEl) {
+        const events = (data.verification_timeline || []).filter(e =>
+            (e.event_type || "").toLowerCase().includes("receipt") ||
+            (e.event_type || "").toLowerCase().includes("health")
+        );
+        timelineEl.innerHTML = events.length === 0
+            ? `<div class="text-secondary text-center py-3">No verification activity yet.</div>`
+            : events.slice(0, 15).map(e => `
+                <div class="gcon-activity-item">
+                    <div class="gcon-activity-time">${new Date(e.timestamp).toLocaleString()}</div>
+                    <div class="gcon-activity-message">${escapeHtml(e.event_type)} &middot; ${escapeHtml(e.source || "")}</div>
+                </div>
+            `).join("");
+    }
+}
+
+async function loadTrustCenter() {
+    try {
+        const data = await fetchJson("/trust-center");
+        renderTrustCenter(data);
+    } catch (err) {
+        console.error("Failed to load trust center:", err);
+    }
 }
 
 function bindPanelLinks() {
@@ -2790,22 +2925,15 @@ const NOTIF_ICONS = {
     storage_warning: "bi-hdd", workflow_completed: "bi-check-circle",
 };
 
-// Real notification types (from ManagementLayer._EVENT_NOTIFICATIONS and
-// the direct .notify() call sites) grouped into the categories shown in
-// the Notifications tab filter. Anything not listed falls back to "account".
-const NOTIF_CATEGORIES = {
-    node: ["node_failure", "node_registered"],
-    execution: ["job_failed", "workflow_completed"],
-    receipt: ["receipt_generated"],
-    account: ["user_registered", "invitation_accepted", "password_changed", "api_key_created", "storage_warning"],
+// Severity/category are computed once, authoritatively, by the backend
+// (NotificationCenter.notify — see TYPE_SEVERITY / TYPE_CATEGORY) and
+// arrive on every notification entry as n.severity / n.category. The
+// client never re-derives them, so there is exactly one place that
+// decides what a notification type means.
+const SEVERITY_LABEL = {
+    critical: "Critical", warning: "Warning",
+    information: "Information", security: "Security",
 };
-
-function notifCategory(type) {
-    for (const [category, types] of Object.entries(NOTIF_CATEGORIES)) {
-        if (types.includes(type)) return category;
-    }
-    return "account";
-}
 
 let notificationsData = [];
 let notifFilter = "all";
@@ -2813,12 +2941,15 @@ let notifFilter = "all";
 function filterNotifications(entries, filter) {
     if (filter === "all") return entries;
     if (filter === "unread") return entries.filter(n => !n.read);
-    return entries.filter(n => notifCategory(n.type) === filter);
+    if (SEVERITY_LABEL[filter]) return entries.filter(n => n.severity === filter);
+    return entries.filter(n => n.category === filter);
 }
 
 function renderNotificationItem(n, compact) {
+    const severity = n.severity || "information";
     return `
-        <div class="gcon-activity-item gcon-notif-item ${n.read ? "" : "gcon-notif-unread"}" data-notif-id="${escapeHtml(n.notification_id)}">
+        <div class="gcon-activity-item gcon-notif-item gcon-notif-sev-${escapeHtml(severity)} ${n.read ? "" : "gcon-notif-unread"}" data-notif-id="${escapeHtml(n.notification_id)}">
+            <span class="gcon-notif-sev-dot" title="${escapeHtml(SEVERITY_LABEL[severity] || severity)}"></span>
             <div class="gcon-activity-time">
                 <i class="bi ${NOTIF_ICONS[n.type] || "bi-bell"} me-1"></i>${new Date(n.timestamp).toLocaleString()}
             </div>
@@ -2880,19 +3011,38 @@ function renderNotifDropdown() {
     attachNotifClickHandlers(list);
 }
 
-function updateNotifBadge() {
-    const unread = notificationsData.filter(n => !n.read).length;
+function updateNotifBadge(unreadBySeverity) {
+    const unreadEntries = notificationsData.filter(n => !n.read);
+    const unread = unreadEntries.length;
     const badge = document.getElementById("notif-count-badge");
-    if (badge) {
-        badge.textContent = unread > 9 ? "9+" : unread;
-        badge.classList.toggle("d-none", unread === 0);
-    }
+    if (!badge) return;
+
+    badge.textContent = unread > 9 ? "9+" : unread;
+    badge.classList.toggle("d-none", unread === 0);
+
+    // Highest-severity-present drives the badge color: a single
+    // critical notification should be impossible to miss even if
+    // it's outnumbered by informational ones.
+    const bySeverity = unreadBySeverity || unreadEntries.reduce((acc, n) => {
+        const s = n.severity || "information";
+        acc[s] = (acc[s] || 0) + 1;
+        return acc;
+    }, {});
+    badge.classList.remove("gcon-badge-critical", "gcon-badge-warning", "gcon-badge-security", "gcon-badge-info");
+    if (bySeverity.critical) badge.classList.add("gcon-badge-critical");
+    else if (bySeverity.warning) badge.classList.add("gcon-badge-warning");
+    else if (bySeverity.security) badge.classList.add("gcon-badge-security");
+    else badge.classList.add("gcon-badge-info");
 }
 
 async function refreshNotifications() {
     try {
-        notificationsData = await fetchJson("/management/notifications");
-        updateNotifBadge();
+        const [entries, unreadBySeverity] = await Promise.all([
+            fetchJson("/management/notifications"),
+            fetchJson("/management/notifications/unread-by-severity"),
+        ]);
+        notificationsData = entries;
+        updateNotifBadge(unreadBySeverity);
         renderNotifDropdown();
         if (currentTab === "notifications") renderNotificationsList();
     } catch (err) {
@@ -2913,18 +3063,17 @@ function setupNotifications() {
         btn.addEventListener("click", () => {
             notifFilter = btn.dataset.notifFilter;
             document.querySelectorAll("#notif-filter-group [data-notif-filter]").forEach(b => {
-                b.classList.toggle("btn-primary", b === btn);
-                b.classList.toggle("btn-outline-primary", b !== btn);
+                b.classList.toggle("active", b === btn);
             });
             renderNotificationsList();
         });
     });
 
     const markAll = async () => {
-        const unread = notificationsData.filter(n => !n.read);
-        await Promise.all(unread.map(n => fetchJson(`/management/notifications/${encodeURIComponent(n.notification_id)}/read`, { method: "POST" })));
+        const unreadCount = notificationsData.filter(n => !n.read).length;
+        await fetchJson("/management/notifications/mark-all-read", { method: "POST" });
         await refreshNotifications();
-        showToast(unread.length ? `${unread.length} notification(s) marked read.` : "Nothing to mark read.", false);
+        showToast(unreadCount ? `${unreadCount} notification(s) marked read.` : "Nothing to mark read.", false);
     };
 
     const markAllBtn1 = document.getElementById("notif-mark-all-read-btn");
