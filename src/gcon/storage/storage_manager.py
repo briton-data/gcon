@@ -97,13 +97,28 @@ class StorageManager:
             node_id,
             filename
     )
-
+         
+        # Already gone?
         if not os.path.isfile(artifact_path):
             return False
 
-        os.remove(artifact_path)
+        
+        # Windows may temporarily prevent deletion while another
+        # thread is reading the file.
+        for _ in range(20):          # ~200 ms total
+            try:              
+                os.remove(artifact_path)
+                return True
 
-        return True
+            
+            except PermissionError:
+                time.sleep(0.01)
+
+            except FileNotFoundError:
+                return False
+
+        # If it's still locked after retries, propagate the error.
+        raise
     
     def list_node_artifacts(self, node_id):
         """
