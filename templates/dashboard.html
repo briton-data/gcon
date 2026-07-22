@@ -32,6 +32,47 @@
             <!-- ================================================= -->
             <div class="gcon-tab" id="tab-control-center">
 
+                <div class="gcon-hero mb-4" id="gcon-hero">
+
+                    <div class="gcon-hero-brand">
+                        <div class="gcon-hero-mark"><i class="bi bi-shield-check"></i></div>
+                        <div>
+                            <div class="gcon-hero-title">{{ dashboard.hero.product_name }}</div>
+                            <div class="gcon-hero-tagline">{{ dashboard.hero.tagline }}</div>
+                        </div>
+                    </div>
+
+                    <div class="gcon-hero-stats">
+
+                        <div class="gcon-hero-stat">
+                            <div class="v"><span id="hero-connected-nodes">{{ dashboard.hero.connected_nodes }}</span><span class="of">/<span id="hero-total-nodes">{{ dashboard.hero.total_nodes }}</span></span></div>
+                            <div class="l">Connected Nodes</div>
+                        </div>
+
+                        <div class="gcon-hero-stat">
+                            <div class="v" id="hero-running-executions">{{ dashboard.hero.running_executions }}</div>
+                            <div class="l">Running Executions</div>
+                        </div>
+
+                        <div class="gcon-hero-stat">
+                            <div class="v"><span id="hero-verified-receipts">{{ dashboard.hero.verified_receipts }}</span><span class="of">/<span id="hero-total-receipts">{{ dashboard.hero.total_receipts }}</span></span></div>
+                            <div class="l">Verified Receipts</div>
+                        </div>
+
+                        <div class="gcon-hero-stat gcon-hero-trust">
+                            <div class="v"><span id="hero-trust-score">{{ dashboard.hero.trust_score }}</span>%</div>
+                            <div class="l">Trust Score</div>
+                        </div>
+
+                        <div class="gcon-hero-coordinator" id="hero-coordinator-status">
+                            <span class="dot" id="hero-coordinator-dot"></span>
+                            <span class="small" id="hero-coordinator-id">{{ dashboard.hero.coordinator_id }}</span>
+                        </div>
+
+                    </div>
+
+                </div>
+
                 <div class="gcon-panel mb-4" id="operations-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">Operations</h5>
@@ -327,6 +368,155 @@
                     <div class="gcon-panel-body">
                         <div class="gcon-receipt-grid" id="receipts-grid">
                             <div class="text-secondary text-center py-4">Loading receipts...</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ================================================= -->
+            <!-- TAB: Trust Center                                  -->
+            <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-trust-center">
+
+                <div class="row g-4 mb-4">
+
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Trust Score</span>
+                                <span class="gcon-metric-icon" style="color:var(--violet); background:var(--violet-dim);">
+                                    <i class="bi bi-shield-check"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="tc-trust-score">--%</div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Verification Rate</span>
+                                <span class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
+                                    <i class="bi bi-patch-check"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="tc-verification-rate">--%</div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Node Trust Rate</span>
+                                <span class="gcon-metric-icon" style="color:var(--info); background:var(--info-dim);">
+                                    <i class="bi bi-hdd-network"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="tc-node-trust-rate">--%</div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-3 col-6">
+                        <div class="gcon-metric-card" style="cursor:default;">
+                            <div class="gcon-metric-top">
+                                <span class="gcon-metric-title">Verification Failures</span>
+                                <span class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
+                                    <i class="bi bi-shield-x"></i>
+                                </span>
+                            </div>
+                            <div class="gcon-metric-value" id="tc-verification-failures">--</div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div class="row mb-4 align-items-stretch">
+
+                    <div class="col-lg-7">
+                        <div class="gcon-panel h-100">
+                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0"><i class="bi bi-graph-up me-2"></i>Trust Score History</h5>
+                                <span class="tag-live badge bg-success">Live</span>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div id="trust-history-chart" class="gcon-trust-history-chart">
+                                    <div class="text-secondary text-center py-4">Collecting samples…</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-5">
+                        <div class="gcon-panel h-100">
+                            <div class="gcon-panel-header">
+                                <h5 class="mb-0"><i class="bi bi-diagram-2 me-2"></i>Signature Validation</h5>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div id="tc-signature-summary">
+                                    <div class="text-secondary text-center py-4">Loading…</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div class="row mb-4 align-items-stretch">
+
+                    <div class="col-lg-6">
+                        <div class="gcon-panel h-100">
+                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Verification Failures</h5>
+                                <span class="badge bg-danger" id="tc-failures-count">0</span>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div id="tc-failures-list">
+                                    <div class="text-secondary text-center py-4">Loading…</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="gcon-panel h-100">
+                            <div class="gcon-panel-header">
+                                <h5 class="mb-0"><i class="bi bi-hdd-network me-2"></i>Node Trust Status</h5>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div class="table-responsive">
+                                    <table class="table gcon-table align-middle mb-0">
+                                        <thead>
+                                            <tr>
+                                                <th>Node</th>
+                                                <th>Status</th>
+                                                <th>Trusted</th>
+                                                <th>Last Seen</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="tc-node-trust-body">
+                                            <tr><td colspan="4" class="text-center text-secondary">Loading…</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div class="row">
+                    <div class="col-lg-12">
+                        <div class="gcon-panel">
+                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0"><i class="bi bi-clock-history me-2"></i>Verification Timeline</h5>
+                                <span class="gcon-panel-link" data-tab="receipts">Open Receipt Explorer →</span>
+                            </div>
+                            <div class="gcon-panel-body">
+                                <div id="tc-verification-timeline">
+                                    <div class="text-secondary text-center py-4">Loading…</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -782,13 +972,14 @@
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h5 class="mb-0"><i class="bi bi-bell me-2"></i>Notifications</h5>
                         <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <div class="btn-group" id="notif-filter-group">
+                            <div class="btn-group flex-wrap" id="notif-filter-group">
                                 <button class="btn btn-sm btn-primary" data-notif-filter="all">All</button>
                                 <button class="btn btn-sm btn-outline-primary" data-notif-filter="unread">Unread</button>
-                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="node">Node</button>
-                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="execution">Executions</button>
-                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="receipt">Receipts</button>
-                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="account">Account &amp; Security</button>
+                                <button class="btn btn-sm btn-outline-danger" data-notif-filter="critical">Critical</button>
+                                <button class="btn btn-sm btn-outline-warning" data-notif-filter="warning">Warning</button>
+                                <button class="btn btn-sm btn-outline-info" data-notif-filter="security">Security</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="receipt_verification">Receipt Verification</button>
+                                <button class="btn btn-sm btn-outline-primary" data-notif-filter="cluster_events">Cluster Events</button>
                             </div>
                             <button class="btn btn-sm btn-outline-light" id="notif-tab-mark-all-read-btn">
                                 <i class="bi bi-check2-all me-1"></i>Mark all read

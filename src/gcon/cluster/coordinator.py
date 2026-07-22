@@ -2,6 +2,7 @@ import time
 import threading
 import socket
 import uuid
+from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
 
@@ -51,6 +52,19 @@ class GCONCoordinator:
         self.health_service = HealthService(self)
         self.verifier = ExecutionVerifier()
         self.scheduler_paused = False
+
+        # Bounded, in-memory trust-score time series, sampled every
+        # health_check_loop tick (see check_cluster_health). Never
+        # pre-seeded — it only ever contains real, live-computed
+        # samples taken while this coordinator has been running.
+        self._trust_history = deque(maxlen=500)
+        # Last observed overall health state / set of unverified
+        # receipt ids, used only to detect *transitions* so we emit
+        # one HEALTH_DEGRADED/RECOVERED or RECEIPT_VERIFICATION_FAILED
+        # event when something actually changes, instead of publishing
+        # the same event on every health-check tick.
+        self._last_health_state = None
+        self._known_unverified_receipt_ids = set()
 
         # Signals scheduler_loop/health_check_loop to exit; set by
         # shutdown(). Without this there is no way to stop these
@@ -220,7 +234,11 @@ class GCONCoordinator:
     
     def check_cluster_health(self):
         """
-        Check node health and recover jobs from failed nodes.
+        Check node health and recover jobs from failed nodes, then
+        sample live health/trust state and publish events for any
+        real change (never a hardcoded/synthetic tick) so the
+        notification system and Trust Center's history chart stay
+        current without polling from the request path.
         """
         offline_nodes = self.registry.check_node_health()
 
@@ -233,6 +251,81 @@ class GCONCoordinator:
                 payload={"node_id": node_id},
             ))
             self.recover_jobs(node_id)
+
+        self._sample_health_and_trust()
+
+    def _sample_health_and_trust(self):
+        """
+        Compute live health + trust exactly once per tick, record the
+        trust sample, and publish an event only when the observed
+        state actually changes (state transition or a receipt that
+        newly failed/regained verification).
+        """
+        health = self.health_service.compute()
+        trust = self.health_service.compute_trust()
+
+        self._trust_history.append({
+            "timestamp": trust["computed_at"],
+            "score": trust["trust_score"],
+        })
+
+        state = health["state"]
+        if state != self._last_health_state:
+            if self._last_health_state is not None:
+                if state == "healthy":
+                    self.event_bus.publish(Event(
+                        event_type=EventType.HEALTH_RECOVERED,
+                        source="HealthService",
+                        payload={"state": state, "reason": health["reason"]},
+                    ))
+                else:
+                    event_type = (
+                        EventType.HEALTH_CRITICAL if state == "critical"
+                        else EventType.HEALTH_DEGRADED
+                    )
+                    self.event_bus.publish(Event(
+                        event_type=event_type,
+                        source="HealthService",
+                        payload={"state": state, "reason": health["reason"]},
+                    ))
+            self._last_health_state = state
+
+        for receipt in self.get_receipts():
+            receipt_id = receipt["receipt_id"]
+            if not receipt["verified"]:
+                if receipt_id not in self._known_unverified_receipt_ids:
+                    self._known_unverified_receipt_ids.add(receipt_id)
+                    self.event_bus.publish(Event(
+                        event_type=EventType.RECEIPT_VERIFICATION_FAILED,
+                        source="Verifier",
+                        payload={"receipt_id": receipt_id, "job_id": receipt["job_id"]},
+                    ))
+            elif receipt_id in self._known_unverified_receipt_ids:
+                self._known_unverified_receipt_ids.discard(receipt_id)
+                self.event_bus.publish(Event(
+                    event_type=EventType.RECEIPT_VERIFICATION_RECOVERED,
+                    source="Verifier",
+                    payload={"receipt_id": receipt_id, "job_id": receipt["job_id"]},
+                ))
+
+    def get_trust_score(self):
+        """
+        Return the current live trust score. Also used as the read
+        path for /trust-center and the dashboard hero, so the number
+        shown to a user is always freshly computed, not the
+        background sample.
+        """
+        return self.health_service.compute_trust()
+
+    def get_trust_history(self, limit=100):
+        """
+        Return the recorded trust-score time series, newest last,
+        for the Trust Center's history chart. Entirely built from
+        real samples taken by check_cluster_health(); empty until
+        the coordinator has been running long enough to take one.
+        """
+        return list(self._trust_history)[-limit:]
+
     
     def recover_jobs(self, node_id):
         """
@@ -454,19 +547,17 @@ class GCONCoordinator:
             job_id = self.job_queue.get()
             print(f"[QUEUE] Dispatching {job_id}")
             print(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
-            
-            dispatched = True
+
             try:
                 self.assign_job(job_id)
             except RuntimeError:
                 self.job_queue.put(job_id)
             except Exception as e:
                 print(f"[SCHEDULER] Unexpected error assigning '{job_id}', "
-                    f"requeuing: {e!r}")
+                      f"requeuing: {e!r}")
                 self.job_queue.put(job_id)
-                dispatched = False
-            if not dispatched:
-                self._shutdown_event.wait(0.05)    
+                
+            self._shutdown_event.wait(0.05)    
             
     def health_check_loop(self):
         """
@@ -1258,6 +1349,10 @@ class GCONCoordinator:
                 "event_system": "running",
                 "storage": "connected" if checks["storage"]["healthy"] else "degraded",
             },
+
+            # The single most significant unhealthy branch right now,
+            # for the Trust & Health panel's "Last detected issue" line.
+            "last_issue": self.health_service.last_detected_issue(health),
 
             # Useful summary metrics
             "metrics": {

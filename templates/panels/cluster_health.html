@@ -1,29 +1,48 @@
-<div class="gcon-panel">
+<div class="gcon-panel gcon-trust-health-panel">
 
     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
 
         <h5 class="mb-0">
-            Cluster Health
+            <i class="bi bi-shield-check me-2"></i>Trust &amp; Health
         </h5>
 
         <button class="btn btn-sm btn-outline-light" id="open-health-inspector-btn">
-            <i class="bi bi-search me-1"></i>Health Inspector
+            <i class="bi bi-search me-1"></i>Inspector
         </button>
 
     </div>
 
     <div class="gcon-panel-body">
 
-        <div class="d-flex align-items-center gap-3 mb-3">
-            <div class="gcon-health-score" id="health-score">--%</div>
-            <div>
+        <div class="gcon-trust-score-row">
+
+            <div class="gcon-trust-gauge" id="trust-score-gauge">
+                <span id="trust-score-value">--%</span>
+            </div>
+
+            <div class="gcon-trust-meta">
                 <span class="badge" id="health-state-badge">--</span>
                 <div class="text-secondary small mt-1" id="health-reason">Loading health…</div>
+                <div class="gcon-trust-submetrics small text-secondary">
+                    <span id="trust-verification-rate">Verification --%</span>
+                    <span class="mx-1">&middot;</span>
+                    <span id="trust-node-rate">Node trust --%</span>
+                </div>
             </div>
+
         </div>
 
-        <div id="health-reasons-list" class="d-grid gap-1">
-            <!-- populated live from /health -->
+        <div class="gcon-health-grid" id="health-branch-grid">
+            <!-- populated live: coordinator / scheduler / workers / receipt_service / storage -->
+        </div>
+
+        <div class="gcon-health-footer">
+            <div class="gcon-heartbeat-status" id="health-heartbeat-status">
+                <i class="bi bi-activity"></i> Heartbeat <span id="health-heartbeat-age">--</span>
+            </div>
+            <div class="gcon-last-issue" id="health-last-issue">
+                <i class="bi bi-check-circle"></i> No issues detected
+            </div>
         </div>
 
     </div>

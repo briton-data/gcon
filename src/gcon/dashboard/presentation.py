@@ -209,6 +209,7 @@ class PresentationLayer:
         health-service pass multiple times per request.
         """
         health = self.get_cluster_health()
+        trust = self.get_trust_score()
 
         return {
             "metrics": self.get_dashboard_metrics(),
@@ -219,6 +220,8 @@ class PresentationLayer:
             "workflows": self.get_workflows(),
             "receipts_count": len(self.coordinator.get_receipts()),
             "health": health,
+            "trust": trust,
+            "hero": self.get_hero_status(health, trust),
             "global_status": self.get_global_status(health),
             "node_summary": self.get_node_summary(),
             "receipts_summary": self.get_receipts_summary(),
@@ -347,6 +350,85 @@ class PresentationLayer:
             "heartbeat_age_seconds": (
                 round(heartbeat_age_seconds) if heartbeat_age_seconds is not None else None
             ),
+        }
+
+    def get_trust_score(self):
+        """
+        Return the live execution-trust score (receipt verification
+        integrity + node reliability + operational health). See
+        HealthService.compute_trust — always freshly computed.
+        """
+        return self.coordinator.get_trust_score()
+
+    def get_trust_history(self, limit=100):
+        """
+        Return the recorded trust-score time series for the Trust
+        Center's history chart, newest last.
+        """
+        return self.coordinator.get_trust_history(limit=limit)
+
+    def get_hero_status(self, health=None, trust=None):
+        """
+        Return the live figures shown in the dashboard's hero header:
+        connected nodes, running executions, verified receipts, trust
+        score, and coordinator status. Accepts already-computed
+        health/trust so get_dashboard() doesn't pay for the same
+        computation twice.
+        """
+        health = health or self.get_cluster_health()
+        trust = trust or self.get_trust_score()
+        global_status = self.get_global_status(health)
+        nodes = self.get_nodes()
+        jobs = self.get_jobs()
+        receipts = self.get_receipts()
+
+        return {
+            "product_name": "GCON",
+            "tagline": "Execution Verification Platform",
+            "connected_nodes": sum(1 for n in nodes if n.get("status") != "offline"),
+            "total_nodes": len(nodes),
+            "running_executions": sum(1 for j in jobs if j.get("status") == "running"),
+            "verified_receipts": sum(1 for r in receipts if r.get("verified")),
+            "total_receipts": len(receipts),
+            "trust_score": trust["trust_score"],
+            "coordinator_id": global_status["coordinator_id"],
+            "coordinator_online": global_status["coordinator_online"],
+            "cluster_state": global_status["cluster_state"],
+        }
+
+    def get_trust_center(self):
+        """
+        Return everything the Trust Center page needs: the live trust
+        score and its history, receipt verification statistics and
+        the receipts currently failing verification, per-node trust
+        status, and the underlying health breakdown — all sourced
+        from the same live coordinator state used elsewhere, so this
+        view can never disagree with the Home Dashboard.
+        """
+        health = self.get_cluster_health()
+        trust = self.get_trust_score()
+        receipts = self.get_receipts()
+        failures = [r for r in receipts if not r.get("verified")]
+        nodes = self.get_nodes()
+
+        node_trust = [
+            {
+                "node_id": n["node_id"],
+                "status": n["status"],
+                "trusted": n["status"] != "offline",
+                "last_seen": n["last_seen"],
+            }
+            for n in nodes
+        ]
+
+        return {
+            "trust": trust,
+            "history": self.get_trust_history(),
+            "receipts_summary": self.get_receipts_summary(),
+            "verification_failures": failures,
+            "node_trust": node_trust,
+            "health": health,
+            "verification_timeline": self.get_events(limit=30),
         }
 
     # ------------------------------------------------------------------
