@@ -137,6 +137,24 @@ class WebServer:
         def cluster_health(user=Depends(self.current_user)):
             return self.presentation.get_cluster_health()
 
+        # ---- Trust Center ----
+
+        @self.app.get("/trust-center")
+        def trust_center(user=Depends(self.current_user)):
+            return self.presentation.get_trust_center()
+
+        @self.app.get("/trust-score")
+        def trust_score(user=Depends(self.current_user)):
+            return self.presentation.get_trust_score()
+
+        @self.app.get("/trust-history")
+        def trust_history(user=Depends(self.current_user)):
+            return self.presentation.get_trust_history()
+
+        @self.app.get("/hero-status")
+        def hero_status(user=Depends(self.current_user)):
+            return self.presentation.get_hero_status()
+
         # ---- Operations Panel: scheduler control ----
 
         @self.app.post("/cluster/scheduler/pause")
@@ -278,12 +296,15 @@ class WebServer:
             try:
                 while True:
                     health = self.presentation.get_cluster_health()
+                    trust = self.presentation.get_trust_score()
                     payload = {
                         "cluster": self.presentation.get_cluster_state(),
                         "nodes": self.presentation.get_nodes(),
                         "jobs": self.presentation.get_jobs(),
                         "events": self.presentation.get_events(),
                         "health": health,
+                        "trust": trust,
+                        "hero": self.presentation.get_hero_status(health, trust),
                         "system_metrics": self.presentation.get_system_metrics(),
                         "global_status": self.presentation.get_global_status(health),
                         "node_summary": self.presentation.get_node_summary(),
@@ -291,6 +312,7 @@ class WebServer:
                         "storage_summary": self.presentation.get_storage_summary(health),
                         "critical_alerts": self.presentation.get_critical_alerts(health),
                         "execution_timeline": self.presentation.get_execution_timeline(),
+                        "notif_unread_by_severity": self.management.get_unread_notification_count_by_severity(),
                     }
                     await websocket.send_json(jsonable_encoder(payload))
                     await asyncio.sleep(2)
@@ -444,9 +466,17 @@ class WebServer:
         def mgmt_notifications(user=Depends(self.current_user)):
             return self.management.get_notifications()
 
+        @self.app.get("/management/notifications/unread-by-severity")
+        def mgmt_notifications_unread_by_severity(user=Depends(self.current_user)):
+            return self.management.get_unread_notification_count_by_severity()
+
         @self.app.post("/management/notifications/{notification_id}/read")
         def mgmt_mark_notification_read(notification_id: str, user=Depends(self.current_user)):
             return self.management.mark_notification_read(notification_id)
+
+        @self.app.post("/management/notifications/mark-all-read")
+        def mgmt_mark_all_notifications_read(user=Depends(self.current_user)):
+            return {"marked": len(self.management.mark_all_notifications_read())}
 
         # ---- Management: dashboard cards & search ----
 
