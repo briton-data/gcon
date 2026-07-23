@@ -25,7 +25,7 @@ class GCONCoordinator:
     """
     Coordinates GCON agents, job execution, and receipt management.
     """
-    def __init__(self, network=None):
+    def __init__(self, network=None, transport=None):
         # A real, stable identity for this coordinator process — not a
         # hardcoded display string. Hostname makes it recognizable in a
         # multi-host deployment; the short uuid disambiguates restarts.
@@ -37,7 +37,7 @@ class GCONCoordinator:
         self.nodes = {}
         
         self.scheduler = Scheduler(self.registry)
-        self.communication = CommunicationManager()
+        self.communication = CommunicationManager(transport==transport)
         self.agents = {}
         self.event_bus = EventBus()
         

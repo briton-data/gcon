@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package gcon.transport.v1;
+
+// AgentControl is served by the Coordinator over mTLS/HTTP2. Agent
+// daemons are the gRPC *clients* -- they dial out to the coordinator
+// and keep the Control stream open for the lifetime of the process.
+// This is deliberate: worker machines are frequently behind NAT/
+// firewalls with no inbound connectivity, while the coordinator is
+// the one stable, routable endpoint in the cluster. Job assignment
+// therefore flows coordinator -> agent as messages *down* a stream
+// the agent itself opened, rather than the coordinator dialing out
+// to agents.
+service AgentControl {
+  // One-time registration handshake. The client certificate presented
+  // during the TLS handshake is the agent's authenticated identity;
+  // Register additionally exchanges a human-readable node_id and
+  // capability facts and returns a short-lived session_token that
+  // must be presented on the Control stream, so a stolen/duplicated
+  // client cert alone is not sufficient to impersonate a node that
+  // is already connected.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Long-lived, agent-initiated, bidirectional control channel.
+  // Agent -> Coordinator: HEARTBEAT, JOB_RESULT, SHUTDOWN_NOTICE.
+  // Coordinator -> Agent: JOB_ASSIGN, JOB_CANCEL, PING.
+  rpc Control(stream AgentEnvelope) returns (stream CoordinatorEnvelope);
+
+  // Client-streaming log upload for a single job attempt.
+  rpc StreamLogs(stream LogChunk) returns (LogAck);
+
+  // Receipt upload. Unary because receipts are small, signed JSON
+  // documents, not bulk data.
+  rpc UploadReceipt(ReceiptUpload) returns (ReceiptAck);
+}
+
+message RegisterRequest {
+  string node_id = 1;
+  string hostname = 2;
+  string agent_version = 3;
+  map<string, string> capabilities = 4;
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  string session_token = 2;
+  int32 heartbeat_interval_seconds = 3;
+  string reason = 4; // populated when accepted == false
+}
+
+// ---- Control stream envelopes -------------------------------------------
+
+message AgentEnvelope {
+  string node_id = 1;
+  string session_token = 2;
+  oneof payload {
+    Heartbeat heartbeat = 3;
+    JobResult job_result = 4;
+    ShutdownNotice shutdown_notice = 5;
+  }
+}
+
+message CoordinatorEnvelope {
+  oneof payload {
+    JobAssign job_assign = 1;
+    JobCancel job_cancel = 2;
+    Ping ping = 3;
+  }
+}
+
+message Heartbeat {
+  int64 sequence = 1;      // monotonic, owned by the agent -- used for idempotent dedup
+  string status = 2;
+  double cpu_percent = 3;
+  double memory_percent = 4;
+  int32 running_jobs = 5;
+  string timestamp = 6;
+}
+
+message JobAssign {
+  string job_id = 1;
+  string command = 2;
+  int32 timeout_seconds = 3;   // 0 == no timeout
+  string request_message_id = 4; // idempotency key for this dispatch
+  string attempt_id = 5;         // durable job_attempts row for this dispatch
+}
+
+message JobCancel {
+  string job_id = 1;
+}
+
+message JobResult {
+  string job_id = 1;
+  string request_message_id = 2; // echoes JobAssign.request_message_id
+  string status = 3;             // success | failed | timeout | error | cancelled
+  int32 return_code = 4;
+  double runtime_seconds = 5;
+  string stdout = 6;
+  string stderr = 7;
+  string error = 8;
+  string metrics_json = 9;
+  string timestamp = 10;
+}
+
+message ShutdownNotice {
+  string reason = 1;
+}
+
+message Ping {
+  string timestamp = 1;
+}
+
+// ---- Log streaming --------------------------------------------------------
+
+message LogChunk {
+  string node_id = 1;
+  string session_token = 2;
+  string job_id = 3;
+  string attempt_id = 4;
+  string stream = 5;     // "stdout" | "stderr"
+  int64 sequence = 6;    // monotonic per (attempt_id, stream) -- idempotent dedup
+  string content = 7;
+}
+
+message LogAck {
+  int64 last_sequence_received = 1;
+}
+
+// ---- Receipt upload ---------------------------------------------------
+
+message ReceiptUpload {
+  string node_id = 1;
+  string session_token = 2;
+  string job_id = 3;
+  string attempt_id = 4;
+  string receipt_hash = 5;   // idempotency key -- re-upload of the same hash is a no-op
+  string signature = 6;
+  string payload_json = 7;
+}
+
+message ReceiptAck {
+  bool accepted = 1;
+  bool duplicate = 2;
+}
