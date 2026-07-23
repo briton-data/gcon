@@ -7,3 +7,7 @@ fastapi
 uvicorn[standard]
 jinja2
 websockets
+grpcio>=1.60.0
+# grpcio-tools is only needed to regenerate src/gcon/transport/proto/*_pb2*.py
+# after editing gcon_transport.proto -- not a runtime dependency.
+# grpcio-tools>=1.60.0
