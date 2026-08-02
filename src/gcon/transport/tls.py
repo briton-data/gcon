@@ -206,6 +206,34 @@ def issue_coordinator_cert(
     )
 
 
+def issue_dashboard_cert(
+    cert_dir: str, hostname: str = "localhost", extra_dns_names: Optional[List[str]] = None
+) -> CertPaths:
+    """
+    Server certificate for the dashboard/`/api/v1` uvicorn process --
+    same CA and `cert_dir` as `issue_coordinator_cert`, so the whole
+    system (gRPC transport and HTTP dashboard/API) shares one trust
+    root, but a distinct file (`dashboard.*`) so reissuing or rotating
+    one doesn't touch the other. This is plain server TLS (browsers
+    terminate it), not mTLS -- the dashboard/API's client auth is the
+    separate cookie-session/API-key layer in `management/auth.py` and
+    `management/api_keys.py`.
+
+    Self-signed by GCON's own CA, so browsers won't trust it out of
+    the box; for a real deployment, point `cert_dir` at a directory
+    containing certificates from a CA browsers already trust (e.g. via
+    a reverse proxy) instead of using this cert directly.
+    """
+    dns_names = ["localhost", hostname] + (extra_dns_names or [])
+    return _issue_leaf_cert(
+        cert_dir,
+        common_name=hostname,
+        file_prefix="dashboard",
+        san_dns_names=list(dict.fromkeys(dns_names)),
+        san_ip_addresses=["127.0.0.1"],
+    )
+
+
 def issue_agent_cert(cert_dir: str, node_id: str) -> CertPaths:
     """
     The issued certificate's Common Name is the node_id. The

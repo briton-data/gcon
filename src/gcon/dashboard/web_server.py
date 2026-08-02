@@ -1,4 +1,5 @@
 import json
+import os
 import asyncio
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -7,11 +8,14 @@ from fastapi.responses import HTMLResponse, Response, RedirectResponse
 from fastapi.encoders import jsonable_encoder
 from fastapi.templating import Jinja2Templates
 from fastapi import Request, Cookie, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from gcon.management.management_layer import ManagementLayer
 from gcon.management.auth import SESSION_COOKIE_NAME
+from gcon.management.rate_limit import LoginRateLimiter
 from gcon.api.api_v1 import create_api_v1_app
+from gcon.dashboard.security_headers import SecurityHeadersMiddleware, env_flag
 
 
 
@@ -38,8 +42,10 @@ class WebServer:
         """
         self.presentation = presentation
         self.management = ManagementLayer(coordinator=presentation.coordinator)
+        self.login_rate_limiter = LoginRateLimiter()
         self.app = FastAPI(title="GCON Dashboard")
-        
+        self.app.add_middleware(SecurityHeadersMiddleware)
+
         self.templates = Jinja2Templates(directory="templates")
         self.app.mount(
             "/static",
@@ -52,6 +58,18 @@ class WebServer:
         # Versioned, API-key-authenticated public API — independent of
         # the dashboard's cookie-session auth used everywhere else.
         self.api_v1_app = create_api_v1_app(self.management, self.presentation)
+        self.api_v1_app.add_middleware(SecurityHeadersMiddleware)
+        cors_origins = [
+            o.strip() for o in os.environ.get("GCON_API_CORS_ORIGINS", "").split(",") if o.strip()
+        ]
+        if cors_origins:
+            self.api_v1_app.add_middleware(
+                CORSMiddleware,
+                allow_origins=cors_origins,
+                allow_credentials=False,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
         self.app.mount("/api/v1", self.api_v1_app)
 
         
@@ -514,20 +532,32 @@ class WebServer:
 
 
         @self.app.post("/auth/login")
-        def auth_login(payload: dict, response: Response):
+        def auth_login(payload: dict, request: Request, response: Response):
+            email = payload.get("email")
+            client_ip = request.client.host if request.client else None
+
+            try:
+                self.login_rate_limiter.check(email, client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
             try:
                 token, user = self.management.login(
-                    payload["email"],
+                    email,
                     payload["password"],
         )
             except ValueError as e:
+                self.login_rate_limiter.record_failure(email, client_ip)
                 raise HTTPException(status_code=401, detail=str(e))
+
+            self.login_rate_limiter.record_success(email, client_ip)
 
             response.set_cookie(
                 key=SESSION_COOKIE_NAME,
                 value=token,
                 httponly=True,
                 samesite="lax",
+                secure=env_flag("GCON_FORCE_HTTPS"),
                 max_age=60 * 60 * 24,
     )
 
@@ -594,11 +624,35 @@ class WebServer:
     def start(self):
         """
         Start the web server.
+
+        Bind address comes from GCON_DASHBOARD_HOST/GCON_DASHBOARD_PORT
+        (default 127.0.0.1:8000) rather than being hardcoded, so a
+        coordinator process can be configured the same way as the
+        gRPC transport (see gcon.transport.config). If GCON_FORCE_HTTPS
+        is set, the dashboard/API is served over TLS using a leaf
+        certificate issued off the same CA as the coordinator<->agent
+        gRPC transport (GCON_TLS_CERT_DIR) -- see
+        gcon.transport.tls.issue_dashboard_cert.
         """
+        host = os.environ.get("GCON_DASHBOARD_HOST", "127.0.0.1")
+        port = int(os.environ.get("GCON_DASHBOARD_PORT", "8000"))
+
+        ssl_certfile = ssl_keyfile = None
+        if env_flag("GCON_FORCE_HTTPS"):
+            from gcon.transport.tls import issue_dashboard_cert
+
+            cert_dir = os.environ.get("GCON_TLS_CERT_DIR", "keys/grpc")
+            cert_hostname = host if host not in ("0.0.0.0", "") else "localhost"
+            cert_paths = issue_dashboard_cert(cert_dir, hostname=cert_hostname)
+            ssl_certfile = cert_paths.cert_path
+            ssl_keyfile = cert_paths.key_path
+
         uvicorn.run(
             self.app,
-            host="127.0.0.1",
-            port=8000
+            host=host,
+            port=port,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
         )
 
     def stop(self):

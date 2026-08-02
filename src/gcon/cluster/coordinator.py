@@ -37,7 +37,7 @@ class GCONCoordinator:
         self.nodes = {}
         
         self.scheduler = Scheduler(self.registry)
-        self.communication = CommunicationManager(transport==transport)
+        self.communication = CommunicationManager(transport=transport)
         self.agents = {}
         self.event_bus = EventBus()
         
