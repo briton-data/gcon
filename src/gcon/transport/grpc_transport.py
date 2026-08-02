@@ -365,6 +365,7 @@ class GrpcTransport(Transport):
         control_plane: Optional[ControlPlane] = None,
         config: Optional[TransportConfig] = None,
         on_heartbeat: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        on_node_registered: Optional[Callable[[str, Any], None]] = None,
         on_node_disconnected: Optional[Callable[[str], None]] = None,
     ):
         self.control_plane = control_plane or ControlPlane()
