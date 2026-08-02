@@ -391,5 +391,22 @@ def run_concurrently(fn: Callable[[int], Any], count: int,
     return results
 
 
+_unique_id_lock = threading.Lock()
+_unique_id_counter = 0
+
+
 def unique_id(prefix: str) -> str:
-    return f"{prefix}-{int(time.time() * 1_000_000)}-{threading.get_ident()}"
+    """
+    Generate a unique id for test job/node names.
+
+    A microsecond timestamp + thread id is not actually guaranteed
+    unique -- looping tightly (e.g. submitting hundreds of jobs from
+    one thread) can call this faster than the clock advances, causing
+    spurious collisions. A monotonic counter guarantees uniqueness
+    regardless of clock resolution or call speed.
+    """
+    global _unique_id_counter
+    with _unique_id_lock:
+        _unique_id_counter += 1
+        seq = _unique_id_counter
+    return f"{prefix}-{int(time.time() * 1_000_000)}-{threading.get_ident()}-{seq}"

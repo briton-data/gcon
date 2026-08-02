@@ -38,6 +38,13 @@ classifiers = [
 dependencies = [
     "psutil>=5.9.0",
     "GPUtil>=1.4.0",
+    "cryptography>=45.0.0",
+    "fastapi",
+    "uvicorn[standard]",
+    "jinja2",
+    "websockets",
+    "grpcio>=1.82.1",
+    "protobuf>=7.35.0",
 ]
 
 [project.optional-dependencies]
