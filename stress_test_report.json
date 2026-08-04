@@ -1,0 +1,680 @@
+{
+  "generated_at": "2026-08-02T22:04:31.730165+00:00",
+  "project_root": "c:\\Users\\user\\gcon-rebuild",
+  "total_duration_s": 163.46,
+  "health_score": 84.5,
+  "unexpected_breakage_count": 4,
+  "known_defect_count": 4,
+  "results": [
+    {
+      "name": "test_verifier_hash_and_sign_roundtrip",
+      "category": "unit.verifier",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.0298,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.094
+      }
+    },
+    {
+      "name": "test_verifier_receipt_lifecycle",
+      "category": "unit.verifier",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.0148,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.012
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_default_hmac_key_allows_receipt_forgery",
+      "category": "security.receipts",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.01,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.016
+      }
+    },
+    {
+      "name": "test_ed25519_receipt_pipeline_is_internally_correct",
+      "category": "unit.receipt_ed25519",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0568,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.887
+      }
+    },
+    {
+      "name": "test_password_hash_verify_and_salting",
+      "category": "unit.auth",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 7.9378,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 7.2031,
+        "rss_delta_mb": 0.055
+      }
+    },
+    {
+      "name": "test_session_expiry",
+      "category": "unit.auth",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0126,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_dag_cycle_detection",
+      "category": "unit.dag",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0019,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_dag_topological_sort_respects_dependencies",
+      "category": "unit.dag",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0026,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_dag_ready_jobs_after_partial_completion",
+      "category": "unit.dag",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0017,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.004
+      }
+    },
+    {
+      "name": "test_artifact_registration_and_integrity_check",
+      "category": "unit.artifact_registry",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0395,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0312,
+        "rss_delta_mb": 0.008
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_artifact_dedup_by_bare_filename_collides",
+      "category": "unit.artifact_registry",
+      "severity": "P2-MINOR",
+      "status": "KNOWN_DEFECT",
+      "duration_s": 0.0572,
+      "message": "DEFECT CONFIRMED: two different files that merely share a basename ('output.json') were collapsed into a single artifact registration; the second file's real content/hash was silently discarded.",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.195
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_policy_check_runtime_crashes_on_violation",
+      "category": "unit.policy",
+      "severity": "P2-MINOR",
+      "status": "KNOWN_DEFECT",
+      "duration_s": 0.0386,
+      "message": "AttributeError: 'PolicyEngine' object has no attribute 'max_runtime'\nTraceback (most recent call last):\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 212, in runner\n    result_box[\"metrics\"] = func() or {}\n                            ~~~~^^\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 601, in test_KNOWN_DEFECT_policy_check_runtime_crashes_on_violation\n    passed, message = engine.check_runtime(receipt)\n                      ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\support\\policy.py\", line 38, in check_runtime\n    f\"Runtime {runtime:.2f}s exceeds limit of {self.max_runtime:.2f}s\"\n                                               ^^^^^^^^^^^^^^^^\nAttributeError: 'PolicyEngine' object has no attribute 'max_runtime'\n",
+      "metrics": {
+        "cpu_time_s": 0.0312,
+        "rss_delta_mb": 0.027
+      }
+    },
+    {
+      "name": "test_node_registry_heartbeat_timeout_marks_offline",
+      "category": "unit.node_registry",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0636,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.004
+      }
+    },
+    {
+      "name": "test_scheduler_selects_least_loaded_idle_node",
+      "category": "unit.scheduler",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0056,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.016
+      }
+    },
+    {
+      "name": "test_workflow_state_transitions_are_mutually_exclusive",
+      "category": "unit.workflow_state",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0016,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.004
+      }
+    },
+    {
+      "name": "test_e2e_single_job_submit_execute_receipt",
+      "category": "integration.e2e",
+      "severity": "P0-CRITICAL",
+      "status": "ERROR",
+      "duration_s": 3.3198,
+      "message": "KeyError: 'result'\nTraceback (most recent call last):\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 212, in runner\n    result_box[\"metrics\"] = func() or {}\n                            ~~~~^^\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 664, in test_e2e_single_job_submit_execute_receipt\n    assert \"hello-gcon\" in job[\"result\"][\"stdout\"]\n                           ~~~^^^^^^^^^^\nKeyError: 'result'\n",
+      "metrics": {
+        "cpu_time_s": 1.0625,
+        "rss_delta_mb": 8.57
+      }
+    },
+    {
+      "name": "test_e2e_failing_job_marks_failed_and_frees_node",
+      "category": "integration.e2e",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 1.3418,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.1406,
+        "rss_delta_mb": -0.086
+      }
+    },
+    {
+      "name": "test_node_drain_stop_restart_lifecycle",
+      "category": "integration.node_lifecycle",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 1.6422,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.1094,
+        "rss_delta_mb": 0.121
+      }
+    },
+    {
+      "name": "test_cancel_job_kills_process_and_frees_node",
+      "category": "integration.job_control",
+      "severity": "P1-MAJOR",
+      "status": "FAIL",
+      "duration_s": 0.1637,
+      "message": "assertion failed",
+      "metrics": {
+        "cpu_time_s": 0.0312,
+        "rss_delta_mb": 0.09
+      }
+    },
+    {
+      "name": "test_clear_queue_and_retry_failed_jobs",
+      "category": "integration.queue_ops",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.1071,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.074
+      }
+    },
+    {
+      "name": "test_node_offline_recovers_running_job_to_another_node",
+      "category": "integration.recovery",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.426,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0469,
+        "rss_delta_mb": 0.176
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_workflow_engine_executes_full_diamond_dag",
+      "category": "integration.workflow",
+      "severity": "P0-CRITICAL",
+      "status": "KNOWN_DEFECT",
+      "duration_s": 1.7103,
+      "message": "UnboundLocalError: cannot access local variable 'job' where it is not associated with a value\nTraceback (most recent call last):\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 212, in runner\n    result_box[\"metrics\"] = func() or {}\n                            ~~~~^^\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 811, in test_KNOWN_DEFECT_workflow_engine_executes_full_diamond_dag\n    engine.schedule_ready_jobs(wf, state)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^\n  File \"C:\\Users\\user\\gcon-rebuild\\src\\gcon\\workflow\\workflow_engine.py\", line 87, in schedule_ready_jobs\n    job_id=job.job_id,\n           ^^^\nUnboundLocalError: cannot access local variable 'job' where it is not associated with a value\n",
+      "metrics": {
+        "cpu_time_s": 0.375,
+        "rss_delta_mb": 0.273
+      }
+    },
+    {
+      "name": "test_concurrent_assign_job_never_double_books_a_node",
+      "category": "concurrency.races",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.4136,
+      "message": "",
+      "metrics": {
+        "jobs_submitted": 40,
+        "double_booked_nodes_at_snapshot": 5,
+        "note": "A 0 here does not prove the race is absent (races are timing-dependent); see the audit's static-analysis finding (C-1) for the code-level proof. Re-run under load / with PYTHONFAULTHANDLER for higher reproduction odds.",
+        "cpu_time_s": 0.2656,
+        "rss_delta_mb": 1.25
+      }
+    },
+    {
+      "name": "test_many_concurrent_job_submissions_all_eventually_complete",
+      "category": "concurrency.threads",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 10.3333,
+      "message": "",
+      "metrics": {
+        "jobs": 60,
+        "nodes": 8,
+        "submit_duration_s": 0.284,
+        "total_duration_s": 6.982,
+        "throughput_jobs_per_s": 8.59,
+        "cpu_time_s": 3.2656,
+        "rss_delta_mb": -0.375
+      }
+    },
+    {
+      "name": "test_event_bus_thread_safety_under_concurrent_publish",
+      "category": "concurrency.event_bus",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0249,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0312,
+        "rss_delta_mb": 0.938
+      }
+    },
+    {
+      "name": "test_queue_drains_fairly_no_job_starves",
+      "category": "concurrency.starvation",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 12.791,
+      "message": "",
+      "metrics": {
+        "n_jobs": 20,
+        "max_wait_s": 12.77,
+        "avg_wait_s": 6.198,
+        "cpu_time_s": 1.7656,
+        "rss_delta_mb": -0.047
+      }
+    },
+    {
+      "name": "test_verifier_and_subprocess_execution_isolated_across_processes",
+      "category": "multiprocessing.isolation",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 5.4462,
+      "message": "",
+      "metrics": {
+        "processes": 16,
+        "duration_s": 5.442,
+        "cpu_time_s": 0.2812,
+        "rss_delta_mb": -0.199
+      }
+    },
+    {
+      "name": "test_cpu_saturation_across_worker_processes",
+      "category": "multiprocessing.cpu_saturation",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 4.8185,
+      "message": "",
+      "metrics": {
+        "workers": 4,
+        "duration_s": 4.313,
+        "cpu_percent_after": 62.6,
+        "cpu_time_s": 0.1562,
+        "rss_delta_mb": 0.043
+      }
+    },
+    {
+      "name": "test_async_style_concurrent_clients_submit_and_poll",
+      "category": "async.client_load",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 6.6841,
+      "message": "",
+      "metrics": {
+        "clients": 30,
+        "completed": 30,
+        "cpu_time_s": 2.625,
+        "rss_delta_mb": 1.887
+      }
+    },
+    {
+      "name": "test_network_partition_simulation_does_not_hang_coordinator",
+      "category": "chaos.network",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 5.7209,
+      "message": "",
+      "metrics": {
+        "jobs": 20,
+        "failed_due_to_chaos": 12,
+        "completed": 8,
+        "cpu_time_s": 0.7188,
+        "rss_delta_mb": 0.039
+      }
+    },
+    {
+      "name": "test_random_node_termination_during_load",
+      "category": "chaos.random_kill",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 2.1426,
+      "message": "",
+      "metrics": {
+        "jobs": 15,
+        "terminal": 15,
+        "cpu_time_s": 0.5469,
+        "rss_delta_mb": 0.121
+      }
+    },
+    {
+      "name": "test_agent_execute_job_respects_explicit_timeout",
+      "category": "timeout.subprocess",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 1.1782,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.1406,
+        "rss_delta_mb": -0.301
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_communication_manager_never_passes_a_timeout",
+      "category": "timeout.KNOWN_DEFECT",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 0.0991,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0469,
+        "rss_delta_mb": 0.051
+      }
+    },
+    {
+      "name": "test_watchdog_infrastructure_detects_a_genuine_hang",
+      "category": "deadlock.watchdog_selftest",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.5731,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.047
+      }
+    },
+    {
+      "name": "test_fuzz_submit_job_never_crashes_the_coordinator_process",
+      "category": "fuzz.submit_job",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 1.2149,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.2812,
+        "rss_delta_mb": 0.453
+      }
+    },
+    {
+      "name": "test_fuzz_artifact_registry_rejects_missing_and_hostile_paths",
+      "category": "fuzz.artifact_registry",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0044,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_fuzz_verifier_hash_data_handles_odd_types",
+      "category": "fuzz.verifier",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.0035,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0156,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_fuzz_policy_engine_handles_malformed_receipts",
+      "category": "fuzz.policy",
+      "severity": "P2-MINOR",
+      "status": "FAIL",
+      "duration_s": 0.0241,
+      "message": "PolicyEngine.evaluate crashed (AttributeError) on malformed receipt {'proof': None} instead of returning trusted=False -- see also Finding D-1",
+      "metrics": {
+        "cpu_time_s": 0.0,
+        "rss_delta_mb": 0.0
+      }
+    },
+    {
+      "name": "test_KNOWN_DEFECT_event_bus_grows_unbounded",
+      "category": "memory.event_bus_leak",
+      "severity": "P1-MAJOR",
+      "status": "KNOWN_DEFECT",
+      "duration_s": 9.7695,
+      "message": "DEFECT CONFIRMED: EventBus retained all 200000 events with no eviction policy (~90.1MB growth for this burst alone). Over cluster lifetime this is unbounded memory growth.",
+      "metrics": {
+        "cpu_time_s": 6.0781,
+        "rss_delta_mb": 90.141
+      }
+    },
+    {
+      "name": "test_job_table_memory_growth_is_roughly_linear_not_superlinear",
+      "category": "memory.job_table_growth",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 1.5791,
+      "message": "",
+      "metrics": {
+        "bytes_per_job_estimate": -4096.0,
+        "cpu_time_s": 0.5781,
+        "rss_delta_mb": -51.324
+      }
+    },
+    {
+      "name": "test_large_job_output_does_not_explode_memory",
+      "category": "memory.large_stdout",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.5518,
+      "message": "",
+      "metrics": {
+        "growth_mb": 10.47,
+        "cpu_time_s": 0.1406,
+        "rss_delta_mb": 10.527
+      }
+    },
+    {
+      "name": "test_storage_manager_store_retrieve_copy_delete_roundtrip",
+      "category": "disk.storage_manager",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0574,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0469,
+        "rss_delta_mb": -4.781
+      }
+    },
+    {
+      "name": "test_slow_disk_does_not_deadlock_job_completion",
+      "category": "disk.slow_disk_simulation",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 1.321,
+      "message": "",
+      "metrics": {
+        "duration_s": 1.294,
+        "cpu_time_s": 0.1562,
+        "rss_delta_mb": -0.367
+      }
+    },
+    {
+      "name": "test_many_small_artifacts_registration_throughput",
+      "category": "disk.many_artifacts",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 3.3031,
+      "message": "",
+      "metrics": {
+        "artifacts": 300,
+        "duration_s": 2.751,
+        "artifacts_per_s": 109.1,
+        "cpu_time_s": 1.2656,
+        "rss_delta_mb": -0.32
+      }
+    },
+    {
+      "name": "test_scheduler_dispatch_throughput_ceiling",
+      "category": "load.throughput_ceiling",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 13.3384,
+      "message": "",
+      "metrics": {
+        "nodes": 50,
+        "jobs": 150,
+        "duration_s": 13.299,
+        "throughput_jobs_per_s": 11.28,
+        "note": "audit predicts a ~15-20 jobs/s ceiling from scheduler_loop's fixed sleep(0.05) regardless of idle node count -- compare throughput_jobs_per_s against node count above.",
+        "cpu_time_s": 1.7344,
+        "rss_delta_mb": 0.094
+      }
+    },
+    {
+      "name": "test_soak_sustained_job_stream_no_degradation",
+      "category": "load.soak",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 52.2907,
+      "message": "",
+      "metrics": {
+        "jobs": 80,
+        "first_half_avg_s": 0.6551,
+        "second_half_avg_s": 0.6485,
+        "degradation_pct": -1.0,
+        "cpu_time_s": 11.2969,
+        "rss_delta_mb": 0.461
+      }
+    },
+    {
+      "name": "test_node_registry_scales_to_thousands_of_nodes_for_reads",
+      "category": "scalability.node_registry",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 2.0237,
+      "message": "",
+      "metrics": {
+        "nodes": 3000,
+        "register_duration_s": 0.05,
+        "select_node_avg_ms": 9.852,
+        "note": "select_node is O(n) per call; at thousands of nodes this cost is dwarfed by the scheduler_loop dispatch-rate ceiling measured in load.throughput_ceiling, which is the real bottleneck.",
+        "cpu_time_s": 1.8594,
+        "rss_delta_mb": -0.062
+      }
+    },
+    {
+      "name": "test_dag_algorithms_scale_to_large_workflows",
+      "category": "scalability.dag",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 1.5265,
+      "message": "",
+      "metrics": {
+        "jobs": 2000,
+        "has_cycle_check_s": 0.009,
+        "roots_computation_s": 1.499,
+        "note": "roots()/leaves() call parents()/children() per node -> O(V*E) worst case on a long chain; watch this number as a canary if workflow sizes grow.",
+        "cpu_time_s": 1.4219,
+        "rss_delta_mb": -0.195
+      }
+    },
+    {
+      "name": "test_job_lifecycle_emits_expected_events",
+      "category": "logging.job_lifecycle",
+      "severity": "P2-MINOR",
+      "status": "PASS",
+      "duration_s": 0.7389,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.1875,
+        "rss_delta_mb": 0.285
+      }
+    },
+    {
+      "name": "test_verify_all_receipts_detects_tampering",
+      "category": "receipts.e2e_verification",
+      "severity": "P0-CRITICAL",
+      "status": "PASS",
+      "duration_s": 1.0487,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.1094,
+        "rss_delta_mb": 0.051
+      }
+    },
+    {
+      "name": "test_autoscaler_scales_up_and_down_within_bounds",
+      "category": "integration.autoscaler",
+      "severity": "P1-MAJOR",
+      "status": "PASS",
+      "duration_s": 0.0734,
+      "message": "",
+      "metrics": {
+        "cpu_time_s": 0.0312,
+        "rss_delta_mb": 0.051
+      }
+    },
+    {
+      "name": "test_dashboard_endpoints_require_authentication",
+      "category": "web.auth_enforcement",
+      "severity": "P1-MAJOR",
+      "status": "ERROR",
+      "duration_s": 4.8244,
+      "message": "RuntimeError: Directory 'static' does not exist\nTraceback (most recent call last):\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 212, in runner\n    result_box[\"metrics\"] = func() or {}\n                            ~~~~^^\n  File \"c:\\Users\\user\\gcon-rebuild\\tests\\integration\\stress_test.py\", line 1660, in test_dashboard_endpoints_require_authentication\n    server = WebServer(presentation)\n  File \"C:\\Users\\user\\gcon-rebuild\\src\\gcon\\dashboard\\web_server.py\", line 52, in __init__\n    StaticFiles(directory=\"static\"),\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\user\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python313\\site-packages\\starlette\\staticfiles.py\", line 56, in __init__\n    raise RuntimeError(f\"Directory '{directory}' does not exist\")\nRuntimeError: Directory 'static' does not exist\n",
+      "metrics": {
+        "cpu_time_s": 2.8125,
+        "rss_delta_mb": 2.355
+      }
+    }
+  ]
+}

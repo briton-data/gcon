@@ -18,19 +18,37 @@ What is (and isn't) persisted here, deliberately:
     notifications: yes. This is exactly the state that was living in
     plain Python dicts/lists and vanishing on every restart (see
     auth.py's own comment: "persistence... the next piece to add").
-  - Login sessions (auth.py SessionManager): NOT persisted, on
-    purpose. Sessions already expire after 24h; losing them on a
-    restart just means an active user logs in again, which is normal
-    behavior for most web apps and not a data-loss concern.
+  - Login sessions (auth.py SessionManager) and login rate-limit /
+    lockout state (rate_limit.py LoginRateLimiter): also yes, as of
+    the `sessions` / `login_attempts` / `login_lockouts` tables added
+    in migration 2 (storage/migrations.py). This reverses an earlier
+    documented decision to leave sessions in-memory-only "because
+    losing them just means logging in again" -- in practice that also
+    means a restart transparently logs out every active user and
+    wipes every brute-force lockout, which is worse than the modest
+    cost of persisting two small tables. SessionManager and
+    LoginRateLimiter both still work purely in-memory (no behavior
+    change for existing callers) when constructed without a `db=`.
   - Node registry / running jobs / workflow state: NOT persisted
-    here either. That's live, ephemeral cluster state tied to
+    here. That's live, ephemeral cluster *scheduling* state tied to
     processes that are, themselves, not currently durable across a
-    restart (agents reconnect and re-register). Persisting half of a
-    distributed system's runtime state without the other half (real
-    node processes surviving a coordinator restart) would create the
-    illusion of durability without the substance. This is scoped to
-    the identity/security data that a restart should never be allowed
-    to destroy.
+    restart (agents reconnect and re-register). The durable side of
+    cluster state (which nodes/jobs/receipts have ever existed) is
+    persisted separately, in the control-plane database
+    (gcon.persistence.db / gcon.cluster.coordinator.
+    GCONCoordinator.restore_from_persistence) -- this module stays
+    scoped to identity/security data.
+
+Schema management:
+  Uses the same versioned-migration pattern as
+  gcon.persistence.db.ControlPlaneDatabase (see storage/migrations.py):
+  a `schema_migrations` table tracks which migrations have run, and
+  each Migration's SQL runs at most once, in order, inside its own
+  transaction. Migration 1 is exactly the schema this module always
+  had; it uses `CREATE TABLE IF NOT EXISTS` throughout specifically so
+  running it against a database that already has these tables (every
+  pre-existing deployment) is a safe no-op rather than a destructive
+  operation.
 
 Crash safety:
   - `PRAGMA journal_mode=WAL` — a crash or kill -9 mid-write leaves
@@ -61,79 +79,13 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, UTC
+
+from gcon.config import resolve_legacy_db_path
+from gcon.storage.migrations import MIGRATIONS
 
 
-DEFAULT_DB_PATH = os.environ.get("GCON_DB_PATH", "data/gcon.db")
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id         TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    email           TEXT NOT NULL,
-    role            TEXT NOT NULL,
-    organization_id TEXT,
-    status          TEXT NOT NULL,
-    avatar_initials TEXT,
-    created_at      TEXT NOT NULL,
-    last_active     TEXT NOT NULL,
-    password_hash   TEXT,
-    stats_json       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
-
-CREATE TABLE IF NOT EXISTS api_keys (
-    key_id        TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    owner_user_id TEXT NOT NULL,
-    scopes_json   TEXT NOT NULL,
-    secret        TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    expires_at    TEXT,
-    last_used_at  TEXT,
-    usage_count   INTEGER NOT NULL DEFAULT 0,
-    status        TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_api_keys_secret ON api_keys (secret);
-
-CREATE TABLE IF NOT EXISTS organizations (
-    org_id          TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    plan            TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    storage_used_gb REAL NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS teams (
-    team_id       TEXT PRIMARY KEY,
-    org_id        TEXT NOT NULL,
-    name          TEXT NOT NULL,
-    admin_user_id TEXT,
-    member_ids_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_teams_org ON teams (org_id);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    entry_id  TEXT PRIMARY KEY,
-    actor     TEXT NOT NULL,
-    action    TEXT NOT NULL,
-    target    TEXT,
-    timestamp TEXT NOT NULL,
-    seq       INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_log (seq);
-
-CREATE TABLE IF NOT EXISTS notifications (
-    notification_id TEXT PRIMARY KEY,
-    type            TEXT NOT NULL,
-    message         TEXT NOT NULL,
-    severity        TEXT NOT NULL,
-    category        TEXT NOT NULL,
-    timestamp       TEXT NOT NULL,
-    read            INTEGER NOT NULL DEFAULT 0,
-    seq             INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_notif_seq ON notifications (seq);
-"""
+DEFAULT_DB_PATH = resolve_legacy_db_path()
 
 
 class Database:
@@ -145,7 +97,7 @@ class Database:
     """
 
     def __init__(self, path=None):
-        self.path = path or DEFAULT_DB_PATH
+        self.path = resolve_legacy_db_path(path)
         if self.path != ":memory:":
             directory = os.path.dirname(self.path)
             if directory:
@@ -158,9 +110,59 @@ class Database:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        self._migrate()
         self._seq_counters = {"audit_log": self._max_seq("audit_log"), "notifications": self._max_seq("notifications")}
+
+    def _migrate(self):
+        """
+        Versioned migration runner, same pattern/guarantees as
+        gcon.persistence.db.ControlPlaneDatabase._migrate: each
+        Migration in storage.migrations.MIGRATIONS is applied at most
+        once (tracked in schema_migrations), in ascending version
+        order, each inside its own transaction that rolls back
+        cleanly on failure.
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version     INTEGER PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    applied_at  TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.commit()
+
+            applied = {
+                row["version"]
+                for row in self._conn.execute("SELECT version FROM schema_migrations")
+            }
+
+            for migration in MIGRATIONS:
+                if migration.version in applied:
+                    continue
+                try:
+                    for statement in migration.up_sql:
+                        self._conn.execute(statement)
+                    self._conn.execute(
+                        "INSERT INTO schema_migrations (version, name, applied_at) "
+                        "VALUES (?, ?, ?)",
+                        (migration.version, migration.name, datetime.now(UTC).isoformat()),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise RuntimeError(
+                        f"Migration {migration.version} ({migration.name}) failed"
+                    )
+
+    def applied_migrations(self):
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def _max_seq(self, table):
         row = self._conn.execute(f"SELECT MAX(seq) AS m FROM {table}").fetchone()

@@ -1,6 +1,4 @@
 from gcon.cluster.coordinator import GCONCoordinator
-from gcon.cluster.network import GCONNetwork
-from gcon.cluster.dispatcher import JobDispatcher
 from gcon.cluster.registry import NodeRegistry
 from gcon.cluster.node import GCONNode
 
@@ -12,12 +10,12 @@ registry.register(GCONNode("node-001"))
 registry.register(GCONNode("node-002"))
 registry.register(GCONNode("node-003"))
 
-# Build network stack
-dispatcher = JobDispatcher(registry)
-network = GCONNetwork(dispatcher)
-
-# Create coordinator
-coordinator = GCONCoordinator(network)
+# Create coordinator (cluster.dispatcher.JobDispatcher / cluster.network.GCONNetwork
+# used to be built here, but GCONCoordinator never actually called them --
+# its `network` param was stored and never used. Both were dead code and
+# have been removed; this script's coordinator was always driven entirely
+# by its own registry/communication stack.)
+coordinator = GCONCoordinator()
 
 # Submit a job
 coordinator.submit_job(
