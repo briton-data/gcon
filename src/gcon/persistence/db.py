@@ -19,33 +19,18 @@ engine later is a driver change, not a rewrite:
     hex), which is identical on both engines.
   * Timestamps are stored as TEXT in ISO-8601 (`datetime.now(UTC)
     .isoformat()`), matching the convention already used by
-    `gcon.storage.database`. This avoids relying on either engine's
-    native datetime functions inside SQL.
-  * Booleans are stored as INTEGER 0/1. SQLite has no native boolean
-    type; Postgres accepts integer literals for boolean columns via
-    parameterized inserts through psycopg's adapters, and the one
-    place this matters (`draining`, `read`, `success` style flags)
-    is written explicitly as 0/1 in the repositories rather than
-    Python True/False, so behavior is identical either way.
+    `gcon.storage.database`.
+  * Booleans are stored as INTEGER 0/1.
   * No SQLite-only functions (`json_extract`, `printf`, ...) appear
-    in any query. JSON columns are opaque TEXT, serialized/deserialized
-    in Python, exactly like `gcon.storage.database`.
-  * Placeholders use `?` (SQLite's paramstyle). A future Postgres
-    driver adapter only needs to translate `?` -> `%s` positionally,
-    which `Dialect.translate_placeholders()` already isolates as a
-    single seam.
+    in any query.
+  * Placeholders use `?` (SQLite's paramstyle).
 
 Crash safety
 ------------
-Same guarantees as `gcon.storage.database.Database`, deliberately
-kept consistent across both persistence stores in this codebase:
-WAL journal mode, synchronous=FULL, foreign_keys=ON, a single
-`threading.RLock` serializing write sequences at the Python level
-(SQLite serializes actual disk writes on its own, but several
-repository methods here do compound read-then-write sequences that
-need to be atomic at the application level too), and all multi-row
-mutations going through `transaction()` so a crash mid-operation
-rolls back the whole thing.
+Same guarantees as `gcon.storage.database.Database`: WAL journal
+mode, synchronous=FULL, foreign_keys=ON, a single `threading.RLock`
+serializing write sequences at the Python level, and all multi-row
+mutations going through `transaction()`.
 """
 
 from __future__ import annotations
@@ -56,12 +41,22 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from gcon.config import resolve_control_plane_db_path
 from gcon.persistence.migrations.registry import MIGRATIONS
 
 
-DEFAULT_CONTROL_PLANE_DB_PATH = os.environ.get(
-    "GCON_CONTROL_PLANE_DB_PATH", "data/gcon_control_plane.db"
-)
+def _default_control_plane_db_path() -> str:
+    """Resolved lazily (see gcon.config) so GCON_DATA_DIR /
+    GCON_CONTROL_PLANE_DB_PATH set after import (e.g. by tests) still
+    take effect. Kept as a module-level function rather than a frozen
+    constant for that reason; existing callers that imported
+    DEFAULT_CONTROL_PLANE_DB_PATH directly still get a valid string
+    below, just resolved once at import time as before."""
+    return resolve_control_plane_db_path()
+
+
+# Backwards-compatible constant for any existing external callers.
+DEFAULT_CONTROL_PLANE_DB_PATH = _default_control_plane_db_path()
 
 
 @dataclass(frozen=True)
@@ -126,7 +121,7 @@ class ControlPlaneDatabase:
     """
 
     def __init__(self, path: str | None = None, dialect: Dialect | None = None):
-        self.path = path or DEFAULT_CONTROL_PLANE_DB_PATH
+        self.path = resolve_control_plane_db_path(path)
         self.dialect = dialect or SQLiteDialect()
 
         if self.path != ":memory:":
@@ -144,7 +139,6 @@ class ControlPlaneDatabase:
 
         self._migrate()
 
-    # ---------------------------------------------------------- migrations
     def _migrate(self):
         with self._lock:
             self._conn.execute(
@@ -192,15 +186,12 @@ class ControlPlaneDatabase:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    # ------------------------------------------------------------- queries
     @contextmanager
     def transaction(self):
         """
         Serializes a sequence of writes both at the Python level (the
         RLock) and the SQLite level (commits atomically or rolls back
-        entirely on error/crash, so a `kill -9` mid multi-table write —
-        e.g. inserting a job_attempt row alongside a job status update —
-        never leaves the control plane in a half-written state).
+        entirely on error/crash).
         """
         with self._lock:
             try:

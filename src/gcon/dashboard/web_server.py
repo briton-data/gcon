@@ -18,6 +18,17 @@ from gcon.api.api_v1 import create_api_v1_app
 from gcon.dashboard.security_headers import SecurityHeadersMiddleware, env_flag
 
 
+# Opt-in only: `request.client.host` is the actual TCP peer, which is
+# correct and unspoofable when GCON is reached directly, but is
+# useless (always the load balancer/proxy's own IP) behind a reverse
+# proxy -- every real client would then share one rate-limit bucket.
+# Set this to the header your proxy is *configured* to set (and that
+# nothing else can reach the app to set), e.g. "X-Forwarded-For" or
+# "X-Real-IP". Left unset (the default), header spoofing is not
+# possible -- request.client.host is always used instead.
+TRUSTED_PROXY_IP_HEADER = os.environ.get("GCON_TRUSTED_PROXY_IP_HEADER")
+
+
 
 
 """
@@ -42,7 +53,7 @@ class WebServer:
         """
         self.presentation = presentation
         self.management = ManagementLayer(coordinator=presentation.coordinator)
-        self.login_rate_limiter = LoginRateLimiter()
+        self.login_rate_limiter = LoginRateLimiter(db=self.management.db)
         self.app = FastAPI(title="GCON Dashboard")
         self.app.add_middleware(SecurityHeadersMiddleware)
 
@@ -53,8 +64,7 @@ class WebServer:
             name="static"
         )
         self._register_routes()
-        
-        
+
         # Versioned, API-key-authenticated public API — independent of
         # the dashboard's cookie-session auth used everywhere else.
         self.api_v1_app = create_api_v1_app(self.management, self.presentation)
@@ -72,8 +82,23 @@ class WebServer:
             )
         self.app.mount("/api/v1", self.api_v1_app)
 
-        
-    
+    def _client_ip(self, request: Request):
+        """
+        Resolve the client IP for rate-limiting, honoring
+        TRUSTED_PROXY_IP_HEADER only if it was explicitly configured
+        (see module docstring above) -- otherwise always
+        `request.client.host`, which a client cannot spoof by sending
+        a header.
+        """
+        if TRUSTED_PROXY_IP_HEADER:
+            value = request.headers.get(TRUSTED_PROXY_IP_HEADER)
+            if value:
+                # X-Forwarded-For style headers are a comma-separated
+                # chain; the first entry is the original client as
+                # seen by the nearest trusted hop.
+                return value.split(",")[0].strip()
+        return request.client.host if request.client else None
+
     def _register_routes(self):
         """
         Register all HTTP routes.
@@ -456,7 +481,15 @@ class WebServer:
         @self.app.post("/management/api-keys")
         def mgmt_create_api_key(
             payload: dict,
+            request: Request,
             user=Depends(self.require_permission("Manage API keys")),):
+            client_ip = self._client_ip(request)
+            try:
+                self.login_rate_limiter.check(f"apikey:{user.user_id}", client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
+            self.login_rate_limiter.record_attempt(f"apikey:{user.user_id}", client_ip)
             return self.management.create_api_key(
                 name=payload["name"],
                 owner_user_id=payload["owner_user_id"],
@@ -534,7 +567,7 @@ class WebServer:
         @self.app.post("/auth/login")
         def auth_login(payload: dict, request: Request, response: Response):
             email = payload.get("email")
-            client_ip = request.client.host if request.client else None
+            client_ip = self._client_ip(request)
 
             try:
                 self.login_rate_limiter.check(email, client_ip)
@@ -582,8 +615,16 @@ class WebServer:
         @self.app.post("/auth/change-password")
         def auth_change_password(
             payload: dict,
+            request: Request,
             user=Depends(self.current_user),
 ):
+            client_ip = self._client_ip(request)
+            rl_key = f"changepw:{user.user_id}"
+            try:
+                self.login_rate_limiter.check(rl_key, client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
             try:
                 self.management.change_password(
                     user.user_id,
@@ -591,8 +632,10 @@ class WebServer:
                     payload["new_password"],
         )
             except ValueError as e:
+                self.login_rate_limiter.record_failure(rl_key, client_ip)
                 raise HTTPException(status_code=400, detail=str(e))
 
+            self.login_rate_limiter.record_success(rl_key, client_ip)
             return {"changed": True}    
             
             
@@ -661,6 +704,4 @@ class WebServer:
         """
         pass
     
-    
-
-    
+       

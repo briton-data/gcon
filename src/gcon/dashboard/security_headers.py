@@ -45,9 +45,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         self.csp = extra_csp or (
             "default-src 'self'; img-src 'self' data:; "
-            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-            "font-src 'self' https://cdn.jsdelivr.net; "
+            # style-src still needs 'unsafe-inline': several dashboard
+            # panels (node_summary.html, receipt_summary.html,
+            # storage_summary.html, ...) render server-computed inline
+            # `style="width: NN%; ..."` bars whose value is a live
+            # percentage from `dashboard.*_summary`, not static markup.
+            # Removing this would need converting those to CSS custom
+            # properties set via JS/data attributes instead of Jinja;
+            # left as a follow-up (script-src below is the one that
+            # actually mattered here -- no template needs inline
+            # <script> anymore, see templates/login.html -> static/js/login.js).
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+            "script-src 'self' https://cdn.jsdelivr.net; "
+            "font-src 'self' https://cdn.jsdelivr.net https://fonts.gstatic.com; "
             "connect-src 'self' ws: wss:; frame-ancestors 'none'"
         )
 

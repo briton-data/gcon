@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import signal
 import sys
 
@@ -25,8 +26,14 @@ from gcon.transport.grpc_transport import GrpcTransport
 def main():
     parser = argparse.ArgumentParser(description="Run the GCON coordinator gRPC transport server")
     parser.add_argument("--db", default=None, help="control-plane sqlite path (default from config)")
+    parser.add_argument("--data-dir", default=None,
+                         help="shared directory for the control-plane DB "
+                              "(default: $GCON_DATA_DIR or 'data'); --db overrides this")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+
+    if args.data_dir:
+        os.environ["GCON_DATA_DIR"] = args.data_dir
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),

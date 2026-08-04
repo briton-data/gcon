@@ -29,6 +29,7 @@ full transport list):
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, UTC
 
@@ -46,10 +47,17 @@ from gcon.dashboard.web_server import WebServer
 
 def main():
     parser = argparse.ArgumentParser(description="Run the GCON coordinator + dashboard/API")
-    parser.add_argument("--db", default="data/gcon_control_plane.db",
-                         help="control-plane sqlite path (default: %(default)s)")
+    parser.add_argument("--db", default=None,
+                         help="control-plane sqlite path (default: <data-dir>/gcon_control_plane.db)")
+    parser.add_argument("--data-dir", default=None,
+                         help="shared directory for both the control-plane DB and the "
+                              "identity/session DB (default: $GCON_DATA_DIR or 'data'); "
+                              "--db overrides just the control-plane path")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+
+    if args.data_dir:
+        os.environ["GCON_DATA_DIR"] = args.data_dir
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -60,13 +68,7 @@ def main():
     control_plane = ControlPlane(path=args.db)
     config = TransportConfig.load(control_plane)
 
-    # Coordinator is built once and mutated in place (communication is
-    # attached once the transport exists) -- unlike the previous version
-    # of this script, which constructed a first GCONCoordinator(transport=None),
-    # wired callbacks against it, then silently threw it away by
-    # reassigning `coordinator = GCONCoordinator(transport=transport)`,
-    # leaving the callbacks closed over an abandoned instance.
-    coordinator = GCONCoordinator(transport=None)
+    coordinator = GCONCoordinator(transport=None, control_plane=control_plane)
 
     def on_heartbeat(node_id, payload):
         coordinator.receive_heartbeat({
@@ -82,6 +84,7 @@ def main():
 
     def on_node_disconnected(node_id):
         logger.info("node disconnected: %s", node_id)
+        coordinator.on_node_disconnected(node_id)
 
     transport = GrpcTransport(
         control_plane=control_plane,
@@ -92,9 +95,6 @@ def main():
     )
     coordinator.communication = CommunicationManager(transport=transport)
 
-    # Starts the mTLS gRPC server in background threads (non-blocking --
-    # see GrpcTransport.start()/_server.start()); require_client_auth=True
-    # plus the per-RPC node_id/certificate-CN check happen inside it.
     transport.start()
     logger.info(
         "gRPC transport (mTLS) listening on %s:%s, cert dir=%s",
@@ -105,7 +105,6 @@ def main():
     web_server = WebServer(presentation)
 
     try:
-        # Blocks the main thread serving the dashboard + /api/v1.
         web_server.start()
     except KeyboardInterrupt:
         pass

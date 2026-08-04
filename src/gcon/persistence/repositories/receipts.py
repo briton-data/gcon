@@ -77,6 +77,13 @@ class ReceiptRepository:
         )
         return [self._row_to_dict(r) for r in rows]
 
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Every persisted receipt, oldest first. Used to rehydrate the
+        coordinator's receipt view on startup (see
+        GCONCoordinator.restore_from_persistence)."""
+        rows = self.db.query("SELECT * FROM receipts ORDER BY uploaded_at")
+        return [self._row_to_dict(r) for r in rows]
+
     @staticmethod
     def _row_to_dict(row) -> Optional[Dict[str, Any]]:
         if row is None:
