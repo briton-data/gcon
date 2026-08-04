@@ -8,14 +8,6 @@ class NodeRegistry:
     def __init__(self):
         self.nodes = {}
         self.timeout = timedelta(seconds=10)
-        # Guards every read/modify of self.nodes. The registry is read
-        # and written concurrently by the scheduler thread, the
-        # health-check thread, and per-job worker threads; without a
-        # lock, register()/remove() racing a health-check scan (or a
-        # scheduler scan) raises "dictionary changed size during
-        # iteration" (RuntimeError) and can also produce lost/racy
-        # updates. All public methods below take this lock for the
-        # duration of their dict access.
         self._lock = threading.RLock()
 
     def register(self, node):
@@ -101,11 +93,7 @@ class NodeRegistry:
     def snapshot(self):
         """
         Return a shallow copy of (node_id -> info) safe to iterate
-        over without holding the registry lock. Callers that need to
-        scan every node (e.g. the scheduler picking the best idle
-        node) should use this instead of iterating self.nodes
-        directly, since the live dict can be mutated by another
-        thread (register/remove) mid-scan.
+        over without holding the registry lock.
         """
         with self._lock:
             return dict(self.nodes)
@@ -119,19 +107,26 @@ class NodeRegistry:
                 raise ValueError(f"Node '{node_id}' does not exist.")
             
             info = self.nodes[node_id]
-            # Only move last_seen forward. An out-of-order/duplicate
-            # heartbeat (delayed retransmit, reordered packet, etc.)
-            # must never roll last_seen backward, or it could
-            # un-expire a node that should already be considered
-            # offline. Status from a stale heartbeat is stale too,
-            # so it's only applied alongside a forward-moving timestamp.
-
-
             current = info.get("last_seen")
             if current is None or timestamp >= current:
-           
                 info["last_seen"] = timestamp
                 info["status"] = status
+
+    def mark_offline(self, node_id):
+        """
+        Immediately mark a node offline outside the normal heartbeat-
+        timeout sweep (check_node_health), e.g. when the transport
+        layer reports the node's connection dropped. Thread-safe,
+        unlike poking self.nodes[node_id] directly. No-op if the node
+        is unknown or already offline; returns True if it changed the
+        status.
+        """
+        with self._lock:
+            info = self.nodes.get(node_id)
+            if info is None or info["status"] == "offline":
+                return False
+            info["status"] = "offline"
+            return True
 
     def check_node_health(self):
         """

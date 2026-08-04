@@ -25,17 +25,24 @@ class GCONCoordinator:
     """
     Coordinates GCON agents, job execution, and receipt management.
     """
-    def __init__(self, network=None, transport=None):
+    def __init__(self, transport=None, control_plane=None):
         # A real, stable identity for this coordinator process — not a
         # hardcoded display string. Hostname makes it recognizable in a
         # multi-host deployment; the short uuid disambiguates restarts.
         self.coordinator_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.started_at = datetime.now(UTC)
 
-        self.network = network
         self.registry = NodeRegistry()
+        # Historical/durable node records restored from the control
+        # plane (see restore_from_persistence). This is deliberately
+        # separate from self.registry, which holds *live* scheduling
+        # state (transport channel, heartbeat timer) for nodes that
+        # are actually connected right now -- a coordinator restart
+        # can restore what nodes existed, but not fabricate a live
+        # connection to them; agents repopulate self.registry
+        # themselves by reconnecting and calling register_agent().
         self.nodes = {}
-        
+
         self.scheduler = Scheduler(self.registry)
         self.communication = CommunicationManager(transport=transport)
         self.agents = {}
@@ -71,7 +78,15 @@ class GCONCoordinator:
         # daemon threads short of process exit, so every coordinator
         # ever constructed (e.g. one per test) keeps running forever.
         self._shutdown_event = threading.Event()
-        
+
+        # Durable control-plane handle (jobs/nodes/receipts survive a
+        # restart in its DB, see gcon.persistence). Optional: local-only
+        # coordinators (most existing tests, tests/stages/*, the default
+        # LocalTransport path) pass none and simply run with no
+        # persisted history, exactly as before.
+        self.control_plane = control_plane
+        self.restore_from_persistence()
+
         self.scheduler_thread = threading.Thread(
                 target=self.scheduler_loop,                       
                 daemon=True
@@ -85,7 +100,78 @@ class GCONCoordinator:
         self.health_check_thread.start()
         
         print("GCON Coordinator initialized.")
-        
+
+    def restore_from_persistence(self):
+        """
+        Load jobs, receipts, and node records already durably written
+        to the control-plane DB (by a previous run of this coordinator
+        / its GrpcTransport, via JobRepository / ReceiptRepository /
+        NodeRepository) back into the in-memory views the dashboard
+        and API read from, so a coordinator restart doesn't wipe the
+        dashboard's history even though the underlying rows survived.
+
+        No-op if this coordinator wasn't given a control_plane (e.g.
+        LocalTransport-based tests), and cleanly handles a fresh/empty
+        database (list_all() -> [] on first boot, nothing to restore).
+        Never raises -- a corrupt or unreachable DB should degrade to
+        "empty history", not prevent the coordinator from starting.
+        """
+        if self.control_plane is None:
+            return
+
+        try:
+            for job in self.control_plane.jobs.list_all():
+                self.jobs[job["job_id"]] = {
+                    "command": job["command"],
+                    "node_id": None,
+                    "status": job["status"],
+                    "artifacts": [],
+                    "created_at": job["submitted_at"],
+                    "completed_at": job.get("completed_at"),
+                    "result": job.get("result"),
+                }
+        except Exception as e:
+            print(f"[RESTORE] Failed to restore jobs from control plane: {e!r}")
+
+        try:
+            for receipt in self.control_plane.receipts.list_all():
+                # `payload` is exactly the receipt dict the issuing side
+                # (ExecutionVerifier.create_receipt locally, or
+                # ReceiptGenerator.generate on a remote agent) built --
+                # same shape self.receipts already stores at runtime
+                # (receive_receipt), so no translation is needed here.
+                payload = receipt.get("payload") or {}
+                job_id = receipt.get("job_id") or payload.get("job_id")
+                if job_id is None:
+                    continue
+                self.receipts[job_id] = payload
+        except Exception as e:
+            print(f"[RESTORE] Failed to restore receipts from control plane: {e!r}")
+
+        try:
+            for node in self.control_plane.nodes.list_all():
+                self.nodes[node["node_id"]] = node
+        except Exception as e:
+            print(f"[RESTORE] Failed to restore nodes from control plane: {e!r}")
+
+        if self.jobs or self.receipts or self.nodes:
+            print(
+                f"[RESTORE] Restored {len(self.jobs)} job(s), "
+                f"{len(self.receipts)} receipt(s), {len(self.nodes)} node "
+                "record(s) from the control plane."
+            )
+
+    def get_persisted_nodes(self):
+        """
+        Historical node records restored from the control plane on
+        boot (see restore_from_persistence), keyed by node_id. Unlike
+        self.registry, these are not live/connected nodes -- an agent
+        that hasn't reconnected since the restart will still appear
+        here (with whatever status it last reported) but will not be
+        schedulable until it registers again.
+        """
+        return dict(self.nodes)
+
     def register_agent(self, node):
         """
         Register a GCON agent with the coordinator.
@@ -327,6 +413,37 @@ class GCONCoordinator:
         return list(self._trust_history)[-limit:]
 
     
+    def on_node_disconnected(self, node_id):
+        """
+        Handle an immediate, known disconnect (e.g. the gRPC stream
+        for this node closed) rather than waiting for the heartbeat
+        timeout to notice.
+
+        Mirrors what check_cluster_health()/registry.check_node_health()
+        do for a *silently* lost node -- mark it offline in the
+        registry (which also removes it from
+        registry.available_nodes(), so the scheduler's pool can never
+        dispatch new work to it) and recover any job it was running --
+        but does so immediately instead of waiting out the full
+        heartbeat window, during which a node we already know is gone
+        could otherwise still be selected by the scheduler.
+        """
+        changed = self.registry.mark_offline(node_id)
+        if not changed:
+            # Either never registered with this coordinator's scheduler
+            # (e.g. only ever known at the transport layer) or already
+            # offline -- nothing further to do.
+            return
+
+        print(f"Node '{node_id}' marked OFFLINE (disconnected)")
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC),
+            event_type="NODE_OFFLINE",
+            source="Coordinator",
+            payload={"node_id": node_id, "reason": "disconnected"},
+        ))
+        self.recover_jobs(node_id)
+
     def recover_jobs(self, node_id):
         """
         Recover unfinished jobs assigned to a failed node.
@@ -516,18 +633,20 @@ class GCONCoordinator:
         Continuously assign waiting jobs to idle nodes.
 
         This loop runs on a single daemon thread with no supervisor to
-        restart it, so it must never let an exception escape and kill
-        the thread -- doing so would silently stop ALL future job
-        dispatch for the life of the process, even though submit_job()
-        keeps happily accepting new work into the queue.
+        restart it. RuntimeError is assign_job()'s expected "no
+        available node right now" signal and is handled by simply
+        requeuing the job and retrying later -- that is a normal,
+        recoverable condition and must never kill this thread.
 
-        RuntimeError is assign_job()'s expected "no available node
-        right now" signal and is handled by simply retrying later.
-        Anything else (a bug in select_node/assign_job, a transient
-        fault, etc.) is unexpected -- it must NOT propagate out of
-        this loop. It is logged and the job is put back on the queue
-        so it isn't lost/stuck pending forever because of a one-off
-        failure.
+        Anything else (a bug in select_node/assign_job, corrupted
+        internal state, etc.) is genuinely unexpected. It is
+        deliberately NOT swallowed: health_service.check_coordinator()
+        determines cluster health by checking
+        `scheduler_thread.is_alive()`, so an unexpected exception here
+        is allowed to propagate and kill the thread, making the
+        failure observable to health monitoring instead of silently
+        degrading job dispatch forever. The job is put back on the
+        queue first so it isn't lost.
         """
 
         while not self._shutdown_event.is_set():
@@ -551,12 +670,21 @@ class GCONCoordinator:
             try:
                 self.assign_job(job_id)
             except RuntimeError:
+                # Expected, recoverable: "no available node right now".
+                # Put the job back and try again on the next tick.
                 self.job_queue.put(job_id)
-            except Exception as e:
-                print(f"[SCHEDULER] Unexpected error assigning '{job_id}', "
-                      f"requeuing: {e!r}")
+            except Exception:
+                # Genuinely unexpected (a bug in select_node/assign_job,
+                # corrupted internal state, etc.). Do NOT swallow this:
+                # health_service.check_coordinator() detects cluster
+                # trouble via scheduler_thread.is_alive(), and a loop
+                # that absorbs every exception can never be observed as
+                # unhealthy even when something is seriously wrong. Put
+                # the job back so it isn't lost, then let the exception
+                # propagate and kill this thread so monitoring catches it.
                 self.job_queue.put(job_id)
-                
+                raise
+
             self._shutdown_event.wait(0.05)    
             
     def health_check_loop(self):
@@ -1370,4 +1498,3 @@ class GCONCoordinator:
         metrics and explanation).
         """
         return self.health_service.compute()
-    

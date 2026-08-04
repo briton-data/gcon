@@ -16,7 +16,9 @@ rather than pre-seeded demo text.
 import csv
 import io
 import json
+import logging
 import os
+import secrets
 from datetime import datetime, UTC
 
 from . import rbac
@@ -29,12 +31,23 @@ from .audit_log import AuditLogger
 from gcon.monitoring.notifications import NotificationCenter
 from gcon.storage.database import Database
 
+logger = logging.getLogger(__name__)
+
 # Bootstrap owner account, created once on first boot. Overridable
 # via environment variables for deployments that don't want this
 # exact identity hard-coded in source control.
 BOOTSTRAP_OWNER_NAME = os.environ.get("GCON_OWNER_NAME", "Briton Nyongesa")
 BOOTSTRAP_OWNER_EMAIL = os.environ.get("GCON_OWNER_EMAIL", "nyongesabriton620@gmail.com")
-BOOTSTRAP_OWNER_PASSWORD = os.environ.get("GCON_OWNER_PASSWORD", "GCON2024")
+
+# Deliberately NOT a hardcoded fallback like the old "GCON2024" --
+# a fixed default password shipped in source control is guessable by
+# anyone who has ever read this file, in any deployment that forgot
+# to override it. `None` here means "not set"; `_bootstrap_owner_account`
+# below generates and logs a strong random password instead, but only
+# on a genuine first boot (no existing owner account), so this is
+# resolved at most once per deployment's lifetime, not on every
+# restart. See docs/deployment.md for the operational impact.
+BOOTSTRAP_OWNER_PASSWORD = os.environ.get("GCON_OWNER_PASSWORD") or None
 
 class ManagementLayer:
     def __init__(self, coordinator=None, db_path=None):
@@ -52,7 +65,7 @@ class ManagementLayer:
         self.api_key_manager = APIKeyManager(db=self.db)
         self.audit_logger = AuditLogger(db=self.db)
         self.notification_center = NotificationCenter(db=self.db)
-        self.session_manager = SessionManager()
+        self.session_manager = SessionManager(db=self.db)
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -68,13 +81,50 @@ class ManagementLayer:
         back from the database (see UserRegistry.__init__), so this
         only actually creates anything — and only logs an audit
         entry — on a genuine first boot.
+
+        If GCON_OWNER_PASSWORD isn't set, a strong random password is
+        generated here and logged once (at WARNING level, so it isn't
+        lost in routine INFO-level startup noise) -- never a fixed,
+        guessable default. This only happens on a genuine first boot;
+        on every later restart the (already-hashed, unrecoverable)
+        existing password is left untouched and nothing is generated
+        or logged.
         """
         is_first_boot = self.user_registry.get_user_by_email(BOOTSTRAP_OWNER_EMAIL) is None
+
+        # Read live rather than the module-level BOOTSTRAP_OWNER_PASSWORD
+        # constant: that constant is resolved once, at first import of
+        # this module, which is too early in some processes (e.g. a
+        # test suite, or any entry point that doesn't set the env var
+        # before its first `import gcon...`). BOOTSTRAP_OWNER_PASSWORD
+        # is kept around for backward-compatible introspection (and is
+        # what existing tests that reload this module check), but the
+        # actual bootstrap decision below always uses the current
+        # environment.
+        password = os.environ.get("GCON_OWNER_PASSWORD") or None
+        if is_first_boot and not password:
+            password = secrets.token_urlsafe(18)
+            logger.warning(
+                "No GCON_OWNER_PASSWORD set -- generated a random bootstrap "
+                "owner password for '%s' on first boot: %s\n"
+                "This is shown ONLY this once and is not recoverable (only "
+                "its hash is stored). Log in and change it, or set "
+                "GCON_OWNER_PASSWORD before the next first boot of a fresh "
+                "deployment to control it directly.",
+                BOOTSTRAP_OWNER_EMAIL, password,
+            )
+        elif not password:
+            # Not first boot, and no env var set: bootstrap_owner_account()
+            # is a no-op for an existing account (see users.py), so this
+            # value is unused. Pass a random placeholder rather than None
+            # to keep bootstrap_owner_account's signature simple.
+            password = secrets.token_urlsafe(18)
+
         bootstrap_owner_account(
             self.user_registry,
             BOOTSTRAP_OWNER_NAME,
             BOOTSTRAP_OWNER_EMAIL,
-            BOOTSTRAP_OWNER_PASSWORD,
+            password,
     )
         if is_first_boot:
             self.audit_logger.log("System", "created user", BOOTSTRAP_OWNER_NAME)
