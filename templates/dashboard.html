@@ -861,10 +861,11 @@
                                         <th>Members</th>
                                         <th>Teams</th>
                                         <th>Storage Used</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="organizations-body">
-                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -890,10 +891,11 @@
                                         <th>Organization</th>
                                         <th>Members</th>
                                         <th>Team Admin</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="teams-body">
-                                    <tr><td colspan="4" class="text-center text-secondary">Loading...</td></tr>
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1079,6 +1081,38 @@
     </div>
 </div>
 
+<!-- Edit Organization Modal -->
+<div class="modal fade" id="editOrgModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Organization</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-org-id">
+                <div class="mb-3">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-control" id="edit-org-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Plan</label>
+                    <select class="form-select" id="edit-org-plan">
+                        <option value="Free">Free</option>
+                        <option value="Standard">Standard</option>
+                        <option value="Pro">Pro</option>
+                        <option value="Enterprise">Enterprise</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="edit-org-submit">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Create Team Modal -->
 <div class="modal fade" id="createTeamModal" tabindex="-1">
     <div class="modal-dialog">
@@ -1107,6 +1141,36 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="create-team-submit">Create Team</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Team Modal -->
+<div class="modal fade" id="editTeamModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Team</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-team-id">
+                <div id="edit-team-error" class="alert alert-danger d-none"></div>
+                <div class="mb-3">
+                    <label class="form-label">Team name</label>
+                    <input type="text" class="form-control" id="edit-team-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Team admin</label>
+                    <select class="form-select" id="edit-team-admin">
+                        <option value="">Unassigned</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="edit-team-submit">Save Changes</button>
             </div>
         </div>
     </div>
