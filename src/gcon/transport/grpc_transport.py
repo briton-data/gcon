@@ -380,7 +380,7 @@ class GrpcTransport(Transport):
     # ---------------------------------------------------------- lifecycle
     def start(self) -> None:
         self._server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=32),
+            futures.ThreadPoolExecutor(max_workers=self.config.grpc_max_workers),
             options=[
                 ("grpc.max_send_message_length", self.config.grpc_max_message_bytes),
                 ("grpc.max_receive_message_length", self.config.grpc_max_message_bytes),

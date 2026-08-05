@@ -40,6 +40,16 @@ _DEFAULTS = {
     "reconnect_backoff_multiplier": "2",
     "grpc_max_message_bytes": str(64 * 1024 * 1024),
     "graceful_shutdown_grace_seconds": "30",
+    # Python's sync grpc.Server hands each RPC to a worker thread from
+    # this pool, and a bidi-streaming RPC (AgentControl.Control) holds
+    # its worker for the entire life of the connection -- so this
+    # number is effectively "how many agents can be connected at
+    # once", not a request-rate knob. It must scale with expected
+    # fleet size: with the old fixed value of 32, registering ~200
+    # agents left ~168 of them unable to get a worker thread at all,
+    # so their heartbeats were never processed and they were declared
+    # offline by NodeRegistry's timeout sweep despite being alive.
+    "grpc_max_workers": "256",
 }
 
 # Environment variable name for each setting key.
@@ -55,6 +65,7 @@ _ENV_NAMES = {
     "reconnect_backoff_multiplier": "GCON_RECONNECT_BACKOFF_MULTIPLIER",
     "grpc_max_message_bytes": "GCON_GRPC_MAX_MESSAGE_BYTES",
     "graceful_shutdown_grace_seconds": "GCON_GRACEFUL_SHUTDOWN_GRACE_SECONDS",
+    "grpc_max_workers": "GCON_GRPC_MAX_WORKERS",
 }
 
 
@@ -109,6 +120,7 @@ class TransportConfig:
     reconnect_backoff_multiplier: float
     grpc_max_message_bytes: int
     graceful_shutdown_grace_seconds: float
+    grpc_max_workers: int
 
     @classmethod
     def load(cls, control_plane: Optional[ControlPlane] = None) -> "TransportConfig":
@@ -125,4 +137,5 @@ class TransportConfig:
             reconnect_backoff_multiplier=r.get_float("reconnect_backoff_multiplier"),
             grpc_max_message_bytes=r.get_int("grpc_max_message_bytes"),
             graceful_shutdown_grace_seconds=r.get_float("graceful_shutdown_grace_seconds"),
+            grpc_max_workers=r.get_int("grpc_max_workers"),
         )

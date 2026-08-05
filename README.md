@@ -101,6 +101,11 @@ static/         Dashboard front-end assets (CSS/JS)
 
 ## Documentation
 
+> **Known limitation:** GCON runs a single Coordinator process per
+> cluster today (no leader election, no distributed consensus, no
+> automatic failover). See [Known Limitations](docs/ARCHITECTURE.md#known-limitations)
+> for what that means if the Coordinator crashes and what's planned.
+
 Detailed documentation lives in [`docs/`](docs/):
 
 - [Architecture](docs/ARCHITECTURE.md) — system design and component responsibilities
