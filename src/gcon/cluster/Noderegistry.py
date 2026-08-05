@@ -5,9 +5,24 @@ class NodeRegistry:
     Stores and manages GCON nodes.
     """
 
-    def __init__(self):
+    def __init__(self, timeout_seconds=10):
+        """
+        Args:
+            timeout_seconds: How long a node can go without a
+                heartbeat before check_node_health() marks it
+                offline. Callers should derive this from the
+                transport's configured heartbeat_interval_seconds *
+                heartbeat_miss_threshold (see GCONCoordinator.__init__)
+                rather than relying on the 10s default here -- a
+                fixed 10s window is fine for a handful of nodes on a
+                fast local heartbeat, but under load (many nodes
+                registering at once, a busier gRPC thread pool, or an
+                operator-configured slower heartbeat interval) it
+                flips healthy-but-slow-to-report nodes to "offline"
+                even though they're still alive.
+        """
         self.nodes = {}
-        self.timeout = timedelta(seconds=10)
+        self.timeout = timedelta(seconds=timeout_seconds)
         self._lock = threading.RLock()
 
     def register(self, node):

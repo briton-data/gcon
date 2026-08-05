@@ -20,6 +20,7 @@ from gcon.workflow.workflow_engine import WorkflowEngine
 from gcon.monitoring.health_service import HealthService
 from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
+from gcon.transport.config import TransportConfig
 
 class GCONCoordinator:
     """
@@ -32,7 +33,21 @@ class GCONCoordinator:
         self.coordinator_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.started_at = datetime.now(UTC)
 
-        self.registry = NodeRegistry()
+        # Node offline-detection window is derived from the same
+        # heartbeat_interval_seconds / heartbeat_miss_threshold config
+        # the transport layer uses (env -> control-plane DB ->
+        # default), not a value hardcoded independently in
+        # NodeRegistry. Previously NodeRegistry always used a fixed
+        # 10s timeout regardless of this config, so operators raising
+        # the heartbeat interval (e.g. to reduce load when scaling to
+        # hundreds of nodes) got mass false "offline" flips as soon as
+        # any heartbeat took longer than 10s to arrive.
+        transport_config = TransportConfig.load(control_plane)
+        node_timeout_seconds = (
+            transport_config.heartbeat_interval_seconds
+            * transport_config.heartbeat_miss_threshold
+        )
+        self.registry = NodeRegistry(timeout_seconds=node_timeout_seconds)
         # Historical/durable node records restored from the control
         # plane (see restore_from_persistence). This is deliberately
         # separate from self.registry, which holds *live* scheduling
