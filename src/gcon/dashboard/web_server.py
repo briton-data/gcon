@@ -418,7 +418,7 @@ class WebServer:
                 raise HTTPException(status_code=400, detail=str(e))
 
         @self.app.get("/management/user-counts")
-        def mgmt_user_counts():
+        def mgmt_user_counts(user=Depends(self.current_user)):
             return self.management.get_user_counts()
 
         # ---- Management: Organizations & Teams ----

@@ -295,6 +295,66 @@ receipt_manager.save_receipt(receipt)
 }
 ```
 
+## Known Limitations
+
+### Single Point of Failure: One Coordinator Process
+
+GCON currently runs exactly one `GCONCoordinator` process per cluster.
+This is a deliberate scope boundary, not an oversight -- multi-
+coordinator support is tracked as future work (see below), and
+nothing in this section should be read as a plan to add it
+incidentally as part of other changes.
+
+**Assumptions baked into the current design that only hold with one
+Coordinator:**
+- `NodeRegistry`, `Scheduler`, and the in-memory job queue all live
+  in one process's memory. There is no shared/replicated state store
+  between Coordinators, because there is only ever one.
+- Agents dial (or are dialed by) a single, fixed Coordinator address
+  (`grpc_host`/`grpc_port` in `TransportConfig`). There is no
+  discovery mechanism for a second Coordinator or for failing over
+  to one.
+- The control-plane database (`gcon.persistence`) is written to by
+  one Coordinator process at a time; nothing enforces mutual
+  exclusion because nothing else is expected to write to it
+  concurrently.
+
+**If the Coordinator process crashes:**
+- All *live* scheduling state is lost: `NodeRegistry`'s connected-node
+  map, in-flight job assignments, and any node the scheduler
+  considered "busy". Agents' gRPC streams drop.
+- Jobs that were mid-execution on an agent are not automatically
+  recovered or resubmitted. They finish on the agent (if the agent
+  is still running) but the Coordinator has no record of that until
+  it restarts.
+- **What continues functioning:** agents keep any job they're
+  actively executing until it exits, since job execution runs on the
+  agent, not the Coordinator. The control-plane database is
+  untouched (data is not lost, just not being written to).
+- **What stops functioning:** new job submission, scheduling, node
+  registration/heartbeat processing, the dashboard and `/api/v1`
+  (both depend on a running Coordinator process), and any
+  in-progress WebSocket push to the dashboard.
+- **On restart:** the Coordinator reloads durable node/job/receipt
+  records from the control-plane database
+  (`restore_from_persistence`), but *live* connections are not
+  restored automatically -- agents must reconnect and re-register
+  (`register_agent`) before they show up as live nodes again.
+
+**Explicitly out of scope today:**
+- No leader election (e.g. Raft, etcd-style lease) between
+  Coordinator instances.
+- No distributed consensus on cluster state -- state is whatever one
+  process's memory + database says it is.
+- No automatic failover: recovering from a crashed Coordinator is a
+  manual operational step (restart the process; agents reconnect).
+
+**Planned future direction:** HA Coordinator support (multiple
+Coordinator processes with leader election and either a shared
+state store or consensus-replicated `NodeRegistry`/scheduler state)
+is a known gap, not a rejected idea -- it is simply not implemented
+yet.
+
 ## Scalability Considerations
 
 ### Current (MVP)
