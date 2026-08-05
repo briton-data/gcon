@@ -266,6 +266,7 @@ class ManagementLayer:
         user = self.user_registry.get_user(user_id)
         name = user.name
         self.user_registry.delete_user(user_id)
+        self.org_registry.remove_user_everywhere(user_id)
         self.audit_logger.log("Admin", "deleted user", name)
 
     def set_user_status(self, user_id, status):
@@ -368,6 +369,26 @@ class ManagementLayer:
             orgs.append(data)
         return orgs
 
+    def get_organization(self, org_id):
+        org = self.org_registry.get_organization(org_id)
+        data = org.to_dict()
+        members = [u for u in self.user_registry.list_users()
+                   if u.organization_id == org.org_id]
+        data["member_count"] = len(members)
+        data["team_count"] = len(self.org_registry.list_teams(org.org_id))
+        return data
+
+    def update_organization(self, org_id, **fields):
+        org = self.org_registry.update_organization(org_id, **fields)
+        self.audit_logger.log("Admin", "updated organization", org.name)
+        return self.get_organization(org.org_id)
+
+    def delete_organization(self, org_id):
+        org = self.org_registry.get_organization(org_id)
+        name = org.name
+        self.org_registry.delete_organization(org_id, user_registry=self.user_registry)
+        self.audit_logger.log("Admin", "deleted organization", name)
+
     def get_teams(self):
         teams = []
         for team in self.org_registry.list_teams():
@@ -375,6 +396,36 @@ class ManagementLayer:
             data["member_count"] = len(team.member_ids)
             teams.append(data)
         return teams
+
+    def get_team(self, team_id):
+        team = self.org_registry.get_team(team_id)
+        data = team.to_dict()
+        data["member_count"] = len(team.member_ids)
+        return data
+
+    def update_team(self, team_id, **fields):
+        team = self.org_registry.update_team(team_id, **fields)
+        self.audit_logger.log("Admin", "updated team", team.name)
+        return self.get_team(team.team_id)
+
+    def delete_team(self, team_id):
+        team = self.org_registry.get_team(team_id)
+        name = team.name
+        self.org_registry.delete_team(team_id)
+        self.audit_logger.log("Admin", "deleted team", name)
+
+    def add_team_member(self, team_id, user_id):
+        # Validate the user actually exists rather than letting a
+        # bad user_id silently sit in member_ids_json forever.
+        self.user_registry.get_user(user_id)
+        team = self.org_registry.add_member(team_id, user_id)
+        self.audit_logger.log("Admin", "added team member", team.name)
+        return self.get_team(team.team_id)
+
+    def remove_team_member(self, team_id, user_id):
+        team = self.org_registry.remove_member(team_id, user_id)
+        self.audit_logger.log("Admin", "removed team member", team.name)
+        return self.get_team(team.team_id)
 
     # ------------------------------------------------------------
     # RBAC

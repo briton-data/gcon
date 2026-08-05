@@ -125,6 +125,86 @@ class OrganizationRegistry:
             self._persist_team(team)
         return team
 
+    def remove_member(self, team_id, user_id):
+        if team_id not in self.teams:
+            raise ValueError(f"Team '{team_id}' does not exist.")
+        team = self.teams[team_id]
+        if user_id in team.member_ids:
+            team.member_ids.remove(user_id)
+            self._persist_team(team)
+        return team
+
+    def get_organization(self, org_id):
+        if org_id not in self.organizations:
+            raise ValueError(f"Organization '{org_id}' does not exist.")
+        return self.organizations[org_id]
+
+    def get_team(self, team_id):
+        if team_id not in self.teams:
+            raise ValueError(f"Team '{team_id}' does not exist.")
+        return self.teams[team_id]
+
+    def update_organization(self, org_id, **fields):
+        org = self.get_organization(org_id)
+        for key, value in fields.items():
+            if value is None:
+                continue
+            setattr(org, key, value)
+        self._persist_org(org)
+        return org
+
+    def update_team(self, team_id, **fields):
+        team = self.get_team(team_id)
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if key == "admin_user_id" and value == "":
+                value = None
+            setattr(team, key, value)
+        self._persist_team(team)
+        return team
+
+    def delete_organization(self, org_id, user_registry=None):
+        self.get_organization(org_id)
+
+        # Cascade: an org with no members/teams left dangling is a
+        # worse failure mode than an org that can't be deleted while
+        # it still has dependents, so we clean up the dependents
+        # rather than either blocking the delete or orphaning rows.
+        for team in self.list_teams(org_id):
+            del self.teams[team.team_id]
+            self.db.execute("DELETE FROM teams WHERE team_id = ?", (team.team_id,))
+
+        if user_registry is not None:
+            user_registry.detach_organization(org_id)
+
+        del self.organizations[org_id]
+        self.db.execute("DELETE FROM organizations WHERE org_id = ?", (org_id,))
+
+    def delete_team(self, team_id):
+        self.get_team(team_id)
+        del self.teams[team_id]
+        self.db.execute("DELETE FROM teams WHERE team_id = ?", (team_id,))
+
+    def remove_user_everywhere(self, user_id):
+        """
+        Strip a deleted user out of every team's member list and
+        clear them as team admin wherever they were assigned, so a
+        deleted user_id doesn't linger as a dangling reference in
+        `teams` (these tables don't have real foreign keys, so
+        nothing else does this for us).
+        """
+        for team in self.teams.values():
+            changed = False
+            if user_id in team.member_ids:
+                team.member_ids.remove(user_id)
+                changed = True
+            if team.admin_user_id == user_id:
+                team.admin_user_id = None
+                changed = True
+            if changed:
+                self._persist_team(team)
+
     def list_organizations(self):
         return list(self.organizations.values())
 

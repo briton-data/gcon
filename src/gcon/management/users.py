@@ -163,6 +163,20 @@ class UserRegistry:
         del self.users[user_id]
         self.db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
 
+    def detach_organization(self, organization_id):
+        """
+        Clear `organization_id` on every user who belongs to the
+        given organization. Used when an organization is deleted, so
+        deleted users are never left pointing at a now-nonexistent
+        org_id (a foreign-key-shaped bug SQLite won't catch for us
+        since these tables don't declare real FKs).
+        """
+        affected = [u for u in self.users.values() if u.organization_id == organization_id]
+        for user in affected:
+            user.organization_id = None
+            self._persist(user)
+        return affected
+
     def set_status(self, user_id, status):
         return self.update_user(user_id, status=status)
 

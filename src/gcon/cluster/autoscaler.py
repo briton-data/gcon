@@ -19,7 +19,12 @@ class AutoScaler:
         """
         self.coordinator = coordinator
         self.node_counter = 1000
-        self.scaled_nodes= [] 
+        self.scaled_nodes = []
+        # node_id -> GCONAgent, for agents this AutoScaler created and
+        # started a heartbeat thread for. Needed so scale_down() can
+        # stop that thread instead of leaking it once the node is
+        # deregistered.
+        self._agents = {}
 
     def check_scale(self):
         """
@@ -50,6 +55,15 @@ class AutoScaler:
         new_agent = GCONAgent(node_id)
 
         self.coordinator.register_agent(new_agent)
+        # register_agent only adds the node to the registry as a
+        # one-time snapshot -- nothing keeps it "alive" after that.
+        # Without a running heartbeat, NodeRegistry.check_node_health()
+        # correctly (and inevitably) marks it offline once its timeout
+        # elapses, since zero heartbeats were ever received. GCONAgent
+        # already has a heartbeat thread built for exactly this; it
+        # was just never started for scaled-up nodes.
+        new_agent.start_heartbeat(self.coordinator)
+        self._agents[node_id] = new_agent
         self.scaled_nodes.append(node_id)
         print(f"[AUTOSCALER] Added {node_id}")
         
@@ -72,6 +86,9 @@ class AutoScaler:
 
             if node_id in idle_nodes:
                 self.coordinator.deregister_agent(node_id)
+                agent = self._agents.pop(node_id, None)
+                if agent is not None:
+                    agent.stop_heartbeat()
                 self.scaled_nodes.pop()
 
                 print(f"[AUTOSCALER] Removed {node_id}")

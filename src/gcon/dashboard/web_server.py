@@ -427,9 +427,23 @@ class WebServer:
         def mgmt_organizations(user=Depends(self.current_user)):
             return self.management.get_organizations()
 
+        @self.app.get("/management/organizations/{org_id}")
+        def mgmt_get_organization(org_id: str, user=Depends(self.current_user)):
+            try:
+                return self.management.get_organization(org_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
         @self.app.get("/management/teams")
         def mgmt_teams(user=Depends(self.current_user)):
             return self.management.get_teams()
+
+        @self.app.get("/management/teams/{team_id}")
+        def mgmt_get_team(team_id: str, user=Depends(self.current_user)):
+            try:
+                return self.management.get_team(team_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
         
         @self.app.post("/management/organizations")
         def mgmt_create_organization(
@@ -442,7 +456,30 @@ class WebServer:
         )
             except (KeyError, ValueError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
-            
+
+        @self.app.put("/management/organizations/{org_id}")
+        def mgmt_update_organization(
+            org_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.update_organization(
+                    org_id,
+                    name=payload.get("name"),
+                    plan=payload.get("plan"),
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.delete("/management/organizations/{org_id}")
+        def mgmt_delete_organization(
+            org_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                self.management.delete_organization(org_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            return {"deleted": org_id}
+
         @self.app.post("/management/teams")
         def mgmt_create_team(
             payload: dict, user=Depends(self.require_permission("Manage users")),
@@ -454,7 +491,48 @@ class WebServer:
                     admin_user_id=payload.get("admin_user_id"),
         )
             except (KeyError, ValueError) as e:
-                raise HTTPException(status_code=400, detail=str(e))    
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.put("/management/teams/{team_id}")
+        def mgmt_update_team(
+            team_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.update_team(
+                    team_id,
+                    name=payload.get("name"),
+                    admin_user_id=payload.get("admin_user_id"),
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.delete("/management/teams/{team_id}")
+        def mgmt_delete_team(
+            team_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                self.management.delete_team(team_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            return {"deleted": team_id}
+
+        @self.app.post("/management/teams/{team_id}/members")
+        def mgmt_add_team_member(
+            team_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.add_team_member(team_id, payload["user_id"])
+            except (KeyError, ValueError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.delete("/management/teams/{team_id}/members/{user_id}")
+        def mgmt_remove_team_member(
+            team_id: str, user_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.remove_team_member(team_id, user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
 
         # ---- Management: RBAC ----
 

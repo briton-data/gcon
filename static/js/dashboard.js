@@ -2594,13 +2594,16 @@ async function openUserDrawer(userId) {
 // Management: Organizations & Teams
 // ---------------------------------------------------------------
 
+let orgsData = [];
+
 async function loadOrganizationsTab() {
     const body = document.getElementById("organizations-body");
     if (!body) return;
     try {
         const orgs = await fetchJson("/management/organizations");
+        orgsData = orgs;
         if (orgs.length === 0) {
-            body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">No organizations.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No organizations.</td></tr>`;
             return;
         }
         body.innerHTML = orgs.map(o => `
@@ -2610,13 +2613,45 @@ async function loadOrganizationsTab() {
                 <td>${escapeHtml(o.member_count)}</td>
                 <td>${escapeHtml(o.team_count)}</td>
                 <td>${escapeHtml(o.storage_used_gb)} GB</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-light org-edit-btn" data-org-id="${escapeHtml(o.org_id)}">Edit</button>
+                    <button class="btn btn-sm btn-outline-danger org-delete-btn" data-org-id="${escapeHtml(o.org_id)}">Delete</button>
+                </td>
             </tr>
         `).join("");
+
+        document.querySelectorAll(".org-edit-btn").forEach(btn => {
+            btn.addEventListener("click", () => openEditOrgModal(btn.dataset.orgId));
+        });
+        document.querySelectorAll(".org-delete-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                if (!confirm("Delete this organization? Its teams will be removed and its members will be unassigned.")) return;
+                try {
+                    await fetchJson(`/management/organizations/${btn.dataset.orgId}`, { method: "DELETE" });
+                    await loadOrganizationsTab();
+                } catch (err) {
+                    console.error("Failed to delete organization:", err);
+                    showToast(err.message || "Failed to delete organization.", true);
+                }
+            });
+        });
     } catch (err) {
         console.error("Failed to load organizations:", err);
         setConnectionStatus(false);
     }
 }
+
+function openEditOrgModal(orgId) {
+    const org = orgsData.find(o => o.org_id === orgId);
+    if (!org) return;
+    document.getElementById("edit-org-id").value = org.org_id;
+    document.getElementById("edit-org-name").value = org.name;
+    document.getElementById("edit-org-plan").value = org.plan;
+    new bootstrap.Modal(document.getElementById("editOrgModal")).show();
+}
+
+let teamsData = [];
+let teamsUsersData = [];
 
 async function loadTeamsTab() {
     const body = document.getElementById("teams-body");
@@ -2627,13 +2662,15 @@ async function loadTeamsTab() {
             fetchJson("/management/organizations"),
             fetchJson("/management/users"),
         ]);
+        teamsData = teams;
+        teamsUsersData = users;
         const orgName = {};
         orgs.forEach(o => orgName[o.org_id] = o.name);
         const userName = {};
         users.forEach(u => userName[u.user_id] = u.name);
 
         if (teams.length === 0) {
-            body.innerHTML = `<tr><td colspan="4" class="text-center text-secondary">No teams.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">No teams.</td></tr>`;
             return;
         }
         body.innerHTML = teams.map(t => `
@@ -2642,12 +2679,44 @@ async function loadTeamsTab() {
                 <td>${escapeHtml(orgName[t.org_id] || "-")}</td>
                 <td>${escapeHtml(t.member_count)}</td>
                 <td>${escapeHtml(t.admin_user_id ? (userName[t.admin_user_id] || t.admin_user_id) : "Unassigned")}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-light team-edit-btn" data-team-id="${escapeHtml(t.team_id)}">Edit</button>
+                    <button class="btn btn-sm btn-outline-danger team-delete-btn" data-team-id="${escapeHtml(t.team_id)}">Delete</button>
+                </td>
             </tr>
         `).join("");
+
+        document.querySelectorAll(".team-edit-btn").forEach(btn => {
+            btn.addEventListener("click", () => openEditTeamModal(btn.dataset.teamId));
+        });
+        document.querySelectorAll(".team-delete-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                if (!confirm("Delete this team?")) return;
+                try {
+                    await fetchJson(`/management/teams/${btn.dataset.teamId}`, { method: "DELETE" });
+                    await loadTeamsTab();
+                } catch (err) {
+                    console.error("Failed to delete team:", err);
+                    showToast(err.message || "Failed to delete team.", true);
+                }
+            });
+        });
     } catch (err) {
         console.error("Failed to load teams:", err);
         setConnectionStatus(false);
     }
+}
+
+function openEditTeamModal(teamId) {
+    const team = teamsData.find(t => t.team_id === teamId);
+    if (!team) return;
+    document.getElementById("edit-team-id").value = team.team_id;
+    document.getElementById("edit-team-name").value = team.name;
+    const adminSelect = document.getElementById("edit-team-admin");
+    adminSelect.innerHTML = `<option value="">Unassigned</option>` +
+        teamsUsersData.map(u => `<option value="${escapeHtml(u.user_id)}" ${u.user_id === team.admin_user_id ? "selected" : ""}>${escapeHtml(u.name)}</option>`).join("");
+    document.getElementById("edit-team-error").classList.add("d-none");
+    new bootstrap.Modal(document.getElementById("editTeamModal")).show();
 }
 
 function setupOrganizationsTab() {
@@ -2675,6 +2744,28 @@ function setupOrganizationsTab() {
             } catch (err) {
                 console.error("Failed to create organization:", err);
                 showToast(err.message || "Failed to create organization.", true);
+            }
+        });
+    }
+
+    const editSubmitBtn = document.getElementById("edit-org-submit");
+    if (editSubmitBtn) {
+        editSubmitBtn.addEventListener("click", async () => {
+            const orgId = document.getElementById("edit-org-id").value;
+            const name = document.getElementById("edit-org-name").value.trim();
+            const plan = document.getElementById("edit-org-plan").value;
+            if (!orgId || !name) return;
+            try {
+                await fetchJson(`/management/organizations/${orgId}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, plan }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("editOrgModal")).hide();
+                await loadOrganizationsTab();
+            } catch (err) {
+                console.error("Failed to update organization:", err);
+                showToast(err.message || "Failed to update organization.", true);
             }
         });
     }
@@ -2721,6 +2812,32 @@ function setupTeamsTab() {
                 await loadTeamsTab();
             } catch (err) {
                 errorBox.textContent = err.message || "Failed to create team.";
+                errorBox.classList.remove("d-none");
+            }
+        });
+    }
+
+    const editSubmitBtn = document.getElementById("edit-team-submit");
+    if (editSubmitBtn) {
+        editSubmitBtn.addEventListener("click", async () => {
+            const errorBox = document.getElementById("edit-team-error");
+            errorBox.classList.add("d-none");
+
+            const teamId = document.getElementById("edit-team-id").value;
+            const name = document.getElementById("edit-team-name").value.trim();
+            const admin_user_id = document.getElementById("edit-team-admin").value;
+            if (!teamId || !name) return;
+
+            try {
+                await fetchJson(`/management/teams/${teamId}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, admin_user_id }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("editTeamModal")).hide();
+                await loadTeamsTab();
+            } catch (err) {
+                errorBox.textContent = err.message || "Failed to update team.";
                 errorBox.classList.remove("d-none");
             }
         });
