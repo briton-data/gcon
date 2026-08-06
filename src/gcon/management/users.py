@@ -16,6 +16,7 @@ from datetime import datetime, UTC
 from uuid import uuid4
 
 from .auth import hash_password, verify_password
+from .rbac import get_permissions_for_role
 from ..storage.database import Database, dumps, loads
 
 VALID_STATUSES = ["Active", "Pending", "Suspended", "Disabled"]
@@ -78,6 +79,10 @@ class User:
             "last_active": self.last_active.isoformat(),
             "has_password": self.password_hash is not None,
             "stats": self.stats,
+            # Single source of truth for what this role can do, so
+            # the dashboard can show/hide UI per-user instead of
+            # duplicating the ROLE_PERMISSIONS table in JS.
+            "permissions": get_permissions_for_role(self.role),
         }
 
     # --- persistence helpers -------------------------------------------------
@@ -209,7 +214,8 @@ class UserRegistry:
         return {
             "total": len(users),
             "active": sum(1 for u in users if u.status == "Active"),
-            "inactive": sum(1 for u in users if u.status != "Active"),
+            "pending": sum(1 for u in users if u.status == "Pending"),
+            "inactive": sum(1 for u in users if u.status in ("Suspended", "Disabled")),
         }
 
 
