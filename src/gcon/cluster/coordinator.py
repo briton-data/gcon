@@ -68,6 +68,15 @@ class GCONCoordinator:
         self.job_queue = Queue()
         
         self.receipts = {}
+        # Guards self.receipts. receive_receipt() (called from every
+        # per-job _run_job worker thread as soon as a job completes)
+        # inserts into this dict concurrently with reads from
+        # get_receipts()/verify_all_receipts()/etc. -- notably from
+        # health_check_loop's periodic compute_trust() call. Iterating
+        # self.receipts.items()/.values() without holding this lock
+        # (or a snapshot taken under it) races with those inserts and
+        # raises "dictionary changed size during iteration".
+        self.receipts_lock = threading.RLock()
         self.artifact_registry = ArtifactRegistry() 
         self.storage_manager = StorageManager()
         self.workflow_engine = WorkflowEngine(self)
@@ -319,7 +328,8 @@ class GCONCoordinator:
         if job_id not in self.jobs:
             raise ValueError(f"Job '{job_id}' does not exist.")
 
-        self.receipts[job_id] = receipt
+        with self.receipts_lock:
+            self.receipts[job_id] = receipt
 
         print(f"Receipt received for job '{job_id}'.")
         
@@ -467,23 +477,28 @@ class GCONCoordinator:
         print(f"Recovering jobs from '{node_id}'...")
         with self.jobs_lock:
 
-            for job_id, job in self.jobs.items():
+            for job_id, job in list(self.jobs.items()):
 
                 if job["node_id"] == node_id and job["status"] == "running":
 
                     print(f"Recovering job '{job_id}'")
 
-            # Reset the job
+                    # Reset the job
                     job["status"] = "pending"
                     job["node_id"] = None
 
-                
-            # Reassign the job
-                try:
-                    self.assign_job(job_id)
-                    print(f"Job '{job_id}' reassigned successfully.")
-                except RuntimeError as e:
-                     print(f"Recovery failed for '{job_id}': {e}")
+                    # Reassign the job -- only for the job(s) we just
+                    # reset above, not every job in self.jobs. This
+                    # used to run unconditionally for the whole
+                    # collection (a stray indent had it outside the
+                    # `if`), which meant every recovery pass silently
+                    # tried to re-assign every already-pending/running/
+                    # completed job in the cluster too.
+                    try:
+                        self.assign_job(job_id)
+                        print(f"Job '{job_id}' reassigned successfully.")
+                    except RuntimeError as e:
+                        print(f"Recovery failed for '{job_id}': {e}")
     
     
     def receive_heartbeat(self, heartbeat):
@@ -700,7 +715,17 @@ class GCONCoordinator:
                 self.job_queue.put(job_id)
                 raise
 
-            self._shutdown_event.wait(0.05)    
+            # Deliberately no sleep here: as long as there's queued
+            # work and an idle node to take it, loop straight back to
+            # the top and dispatch again immediately. A fixed sleep
+            # after every single dispatch previously capped throughput
+            # at 1 job / tick (~20/s) regardless of how many nodes
+            # were idle or how fast jobs actually ran, which meant a
+            # burst of hundreds/thousands of queued jobs took far
+            # longer to drain than the work itself required. The
+            # 0.1s/0.2s waits above already throttle the loop whenever
+            # there's genuinely nothing to do (empty queue, no idle
+            # node, paused), so this can't spin hot on an empty queue.
             
     def health_check_loop(self):
         """
@@ -966,7 +991,9 @@ class GCONCoordinator:
         signature check (not a stub).
         """
         results = []
-        for receipt_id, receipt in self.receipts.items():
+        with self.receipts_lock:
+            receipts_snapshot = list(self.receipts.items())
+        for receipt_id, receipt in receipts_snapshot:
             proof = receipt.get("proof", {})
             is_valid, message = self.verifier.validate_proof(proof)
             results.append({
@@ -1263,7 +1290,10 @@ class GCONCoordinator:
         """
         receipts = []
 
-        for job_id, receipt in self.receipts.items():
+        with self.receipts_lock:
+            receipts_snapshot = list(self.receipts.items())
+
+        for job_id, receipt in receipts_snapshot:
 
             is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
 
@@ -1310,8 +1340,11 @@ class GCONCoordinator:
         Reuses the job and artifact registries rather than storing a
         second copy of this data on the receipt itself.
         """
+        with self.receipts_lock:
+            receipts_snapshot = list(self.receipts.values())
+
         receipt = None
-        for candidate in self.receipts.values():
+        for candidate in receipts_snapshot:
             if candidate.get("receipt_id") == receipt_id:
                 receipt = candidate
                 break
@@ -1372,8 +1405,11 @@ class GCONCoordinator:
         if job is None:
             return None
 
+        with self.receipts_lock:
+            receipts_snapshot = list(self.receipts.values())
+
         receipt = None
-        for candidate in self.receipts.values():
+        for candidate in receipts_snapshot:
             if candidate.get("job_id") == job_id:
                 receipt = candidate
                 break
