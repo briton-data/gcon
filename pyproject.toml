@@ -78,6 +78,6 @@ target-version = ['py38']
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py", "stress_test1.py"]
+python_files = ["test_*.py", "stress_test1.py", "stress_test2.py", "smoke_management_gaps.py"]
 norecursedirs = ["stages", "support", ".git", "*.egg-info"]
 addopts = "-v --cov=gcon --cov-report=html"
