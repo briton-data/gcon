@@ -1167,10 +1167,55 @@
                         <option value="">Unassigned</option>
                     </select>
                 </div>
+                <hr>
+                <div class="mb-2">
+                    <label class="form-label">Members</label>
+                    <div id="edit-team-members-list" class="mb-2" style="max-height: 180px; overflow-y: auto;">
+                        <div class="text-secondary small">Loading…</div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Add member</label>
+                    <input type="text" class="form-control mb-2" id="edit-team-member-search" placeholder="Search org users by name or email…">
+                    <div class="input-group">
+                        <select class="form-select" id="edit-team-add-member-select">
+                            <option value="">Select a user to add…</option>
+                        </select>
+                        <button type="button" class="btn btn-outline-light" id="edit-team-add-member-btn">Add</button>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="edit-team-submit">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Reset Password Modal -->
+<div class="modal fade" id="resetPasswordModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Reset Password</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="reset-pw-user-id">
+                <div id="reset-pw-error" class="alert alert-danger d-none"></div>
+                <p class="text-secondary small">
+                    Setting a new password for <strong id="reset-pw-user-name"></strong> will log them out of all
+                    existing sessions.
+                </p>
+                <div class="mb-3">
+                    <label class="form-label">New password</label>
+                    <input type="password" class="form-control" id="reset-pw-input" required>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="reset-pw-submit">Reset Password</button>
             </div>
         </div>
     </div>

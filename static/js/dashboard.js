@@ -169,7 +169,48 @@ const TAB_TITLES = {
     "notifications": "Notifications",
 };
 
+// Permission required to see/use each tab, mirroring exactly what
+// the backend already enforces on that tab's routes (web_server.py):
+// Administration is 100% gated behind "Manage cluster" server-side,
+// the Management-group tabs behind "Manage users" / "Manage API
+// keys", and Analytics behind "Access analytics". A tab with no
+// entry here (or `null`) has no server-side gate and is visible to
+// every authenticated role.
+const TAB_PERMISSIONS = {
+    "analytics": "Access analytics",
+    "admin": "Manage cluster",
+    "users": "Manage users",
+    "organizations": "Manage users",
+    "teams": "Manage users",
+    "permissions": "Manage users",
+    "audit-logs": "Manage users",
+    "api-keys": "Manage API keys",
+};
+
+let currentUserPermissions = new Set();
+
+function canAccessTab(tab) {
+    const required = TAB_PERMISSIONS[tab];
+    return !required || currentUserPermissions.has(required);
+}
+
+// Hides sidebar entries the current user's role can't use, so a role
+// like Operator or Developer never even sees "Administration" or the
+// Management-group tabs they'd get a 403 from anyway. If the tab
+// that's currently open just got hidden (e.g. after a role change),
+// fall back to Control Center, which has no permission gate.
+function applyPermissionGating() {
+    document.querySelectorAll("#tab-nav a[data-tab], #tab-nav-mgmt a[data-tab]").forEach(el => {
+        el.classList.toggle("d-none", !canAccessTab(el.dataset.tab));
+    });
+    if (!canAccessTab(currentTab)) {
+        switchTab("control-center");
+    }
+}
+
 function switchTab(tab) {
+    if (!canAccessTab(tab)) return;
+
     currentTab = tab;
 
     document.querySelectorAll(".gcon-tab").forEach(el => el.classList.add("d-none"));
@@ -2310,21 +2351,23 @@ function refreshHealthInspector() {
 let usersData = [];
 let usersStatusFilter = "all";
 
+let lockedUserIds = new Set();
+
 async function loadUsersTab() {
     try {
-        const [cards, users] = await Promise.all([
-            fetchJson("/management/dashboard-cards"),
+        const [counts, users, lockedIds] = await Promise.all([
+            fetchJson("/management/user-counts"),
             fetchJson("/management/users"),
+            fetchJson("/management/locked-users").catch(() => []),
         ]);
 
-        setText("uc-total-users", cards.total_users);
-        setText("uc-active-users", cards.active_users);
-        setText("uc-organizations", cards.organizations);
-        setText("uc-api-keys", cards.api_keys);
-        setText("uc-active-sessions", cards.active_sessions);
-        setText("uc-total-workflows", cards.total_workflows);
+        setText("users-metric-total", counts.total);
+        setText("users-metric-active", counts.active);
+        setText("users-metric-pending", counts.pending);
+        setText("users-metric-inactive", counts.inactive);
 
         usersData = users;
+        lockedUserIds = new Set(lockedIds);
         renderUsersTable();
     } catch (err) {
         console.error("Failed to load users tab:", err);
@@ -2358,16 +2401,19 @@ function renderUsersTable() {
 
     let html = "";
     for (const u of rows) {
+        const isLocked = lockedUserIds.has(u.user_id);
         html += `
             <tr data-user-id="${escapeHtml(u.user_id)}">
                 <td><span class="gcon-avatar">${escapeHtml(u.avatar_initials)}</span></td>
                 <td class="gcon-row-link" data-open-user="${escapeHtml(u.user_id)}">${escapeHtml(u.name)}</td>
                 <td>${escapeHtml(u.email)}</td>
                 <td>${escapeHtml(u.role)}</td>
-                <td>${statusBadge(u.status)}</td>
+                <td>${statusBadge(u.status)}${isLocked ? ' <span class="badge bg-danger">Locked</span>' : ""}${!u.has_password ? ' <span class="badge bg-warning text-dark">No Password</span>' : ""}</td>
                 <td>${escapeHtml(new Date(u.last_active).toLocaleString())}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-light user-view-btn" data-user-id="${escapeHtml(u.user_id)}">View</button>
+                    <button class="btn btn-sm btn-outline-light user-reset-pw-btn" data-user-id="${escapeHtml(u.user_id)}" data-user-name="${escapeHtml(u.name)}">Reset Password</button>
+                    ${isLocked ? `<button class="btn btn-sm btn-outline-warning user-unlock-btn" data-user-id="${escapeHtml(u.user_id)}">Unlock</button>` : ""}
                     <button class="btn btn-sm btn-outline-danger user-delete-btn" data-user-id="${escapeHtml(u.user_id)}">Delete</button>
                 </td>
             </tr>
@@ -2390,6 +2436,29 @@ function renderUsersTable() {
             }
         });
     });
+    document.querySelectorAll(".user-reset-pw-btn").forEach(btn => {
+        btn.addEventListener("click", () => openResetPasswordModal(btn.dataset.userId, btn.dataset.userName));
+    });
+    document.querySelectorAll(".user-unlock-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            try {
+                await fetchJson(`/management/users/${btn.dataset.userId}/unlock`, { method: "POST" });
+                showToast("Account unlocked.", false);
+                await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to unlock user:", err);
+                showToast(err.message || "Failed to unlock user.", true);
+            }
+        });
+    });
+}
+
+function openResetPasswordModal(userId, userName) {
+    document.getElementById("reset-pw-user-id").value = userId;
+    document.getElementById("reset-pw-user-name").textContent = userName;
+    document.getElementById("reset-pw-input").value = "";
+    document.getElementById("reset-pw-error").classList.add("d-none");
+    new bootstrap.Modal(document.getElementById("resetPasswordModal")).show();
 }
 
 function setupUsersTab() {
@@ -2451,6 +2520,32 @@ function setupUsersTab() {
 
     const exportJson = document.getElementById("users-export-json");
     if (exportJson) exportJson.addEventListener("click", () => window.open("/management/export/users?format=json"));
+
+    const resetPwSubmit = document.getElementById("reset-pw-submit");
+    if (resetPwSubmit) {
+        resetPwSubmit.addEventListener("click", async () => {
+            const errorBox = document.getElementById("reset-pw-error");
+            errorBox.classList.add("d-none");
+
+            const userId = document.getElementById("reset-pw-user-id").value;
+            const password = document.getElementById("reset-pw-input").value;
+            if (!userId || !password) return;
+
+            try {
+                await fetchJson(`/management/users/${userId}/reset-password`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ password }),
+                });
+                bootstrap.Modal.getInstance(document.getElementById("resetPasswordModal")).hide();
+                showToast("Password reset. The user's existing sessions were logged out.", false);
+                await loadUsersTab();
+            } catch (err) {
+                errorBox.textContent = err.message || "Failed to reset password.";
+                errorBox.classList.remove("d-none");
+            }
+        });
+    }
 }
 
 async function openUserDrawer(userId) {
@@ -2466,6 +2561,11 @@ async function openUserDrawer(userId) {
     try {
         const allKeys = await fetchJson("/management/api-keys");
         apiKeys = allKeys.filter(k => k.owner_user_id === user.user_id);
+    } catch (err) { /* non-fatal */ }
+
+    let orgs = [];
+    try {
+        orgs = await fetchJson("/management/organizations");
     } catch (err) { /* non-fatal */ }
 
     const permissions = ROLE_PERMISSIONS_CACHE[user.role] || [];
@@ -2553,7 +2653,20 @@ async function openUserDrawer(userId) {
                     ${["Owner", "Administrator", "Operator", "Developer", "Viewer"].map(r => `<option value="${r}" ${r === user.role ? "selected" : ""}>${r}</option>`).join("")}
                 </select>
             </div>
+            <div class="mb-3">
+                <label class="form-label">Organization</label>
+                <select class="form-select" id="ud-org-select">
+                    <option value="" ${!user.organization_id ? "selected" : ""}>No organization</option>
+                    ${orgs.map(o => `<option value="${escapeHtml(o.org_id)}" ${o.org_id === user.organization_id ? "selected" : ""}>${escapeHtml(o.name)}</option>`).join("")}
+                </select>
+            </div>
             <button class="btn btn-primary btn-sm" id="ud-save-btn">Save Changes</button>
+            <hr class="my-3">
+            <div class="mb-2">
+                <label class="form-label d-block">Sessions</label>
+                <div id="ud-session-count" class="text-secondary small mb-2">Checking active sessions…</div>
+                <button class="btn btn-outline-warning btn-sm" id="ud-force-logout-btn">Force Logout</button>
+            </div>
         </div>
     `;
 
@@ -2572,17 +2685,48 @@ async function openUserDrawer(userId) {
         saveBtn.addEventListener("click", async () => {
             const status = document.getElementById("ud-status-select").value;
             const role = document.getElementById("ud-role-select").value;
+            // "" (not null) for "No organization" -- update_user() treats a
+            // None field value as "leave unchanged", so clearing the
+            // assignment has to travel as an empty string, not null.
+            const organization_id = document.getElementById("ud-org-select").value;
             try {
                 await fetchJson(`/management/users/${user.user_id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ status, role }),
+                    body: JSON.stringify({ status, role, organization_id }),
                 });
                 closeDrawer();
                 if (currentTab === "users") await loadUsersTab();
             } catch (err) {
                 console.error("Failed to update user:", err);
                 showToast(err.message || "Failed to update user.", true);
+            }
+        });
+    }
+
+    fetchJson(`/management/users/${user.user_id}/sessions`).then(sessions => {
+        const el = document.getElementById("ud-session-count");
+        if (!el) return;
+        el.textContent = sessions.length === 0
+            ? "No active sessions."
+            : `${sessions.length} active session${sessions.length === 1 ? "" : "s"}.`;
+    }).catch(() => {
+        const el = document.getElementById("ud-session-count");
+        if (el) el.textContent = "Could not load session info.";
+    });
+
+    const forceLogoutBtn = document.getElementById("ud-force-logout-btn");
+    if (forceLogoutBtn) {
+        forceLogoutBtn.addEventListener("click", async () => {
+            if (!confirm(`Force logout ${user.name} from all sessions?`)) return;
+            try {
+                await fetchJson(`/management/users/${user.user_id}/force-logout`, { method: "POST" });
+                showToast(`${user.name} was logged out of all sessions.`, false);
+                document.getElementById("ud-session-count").textContent = "No active sessions.";
+                if (currentTab === "users") await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to force logout user:", err);
+                showToast(err.message || "Failed to force logout user.", true);
             }
         });
     }
@@ -2707,7 +2851,7 @@ async function loadTeamsTab() {
     }
 }
 
-function openEditTeamModal(teamId) {
+async function openEditTeamModal(teamId) {
     const team = teamsData.find(t => t.team_id === teamId);
     if (!team) return;
     document.getElementById("edit-team-id").value = team.team_id;
@@ -2716,7 +2860,89 @@ function openEditTeamModal(teamId) {
     adminSelect.innerHTML = `<option value="">Unassigned</option>` +
         teamsUsersData.map(u => `<option value="${escapeHtml(u.user_id)}" ${u.user_id === team.admin_user_id ? "selected" : ""}>${escapeHtml(u.name)}</option>`).join("");
     document.getElementById("edit-team-error").classList.add("d-none");
+    document.getElementById("edit-team-member-search").value = "";
+    await refreshEditTeamMembers(teamId);
     new bootstrap.Modal(document.getElementById("editTeamModal")).show();
+}
+
+// Cross-references the team's current member_ids against
+// /management/users for names/avatars, renders the current-members
+// list with Remove controls, and populates the "add member" select
+// with org users who aren't members yet.
+async function refreshEditTeamMembers(teamId) {
+    const list = document.getElementById("edit-team-members-list");
+    const addSelect = document.getElementById("edit-team-add-member-select");
+    if (!list || !addSelect) return;
+
+    let team, users;
+    try {
+        [team, users] = await Promise.all([
+            fetchJson(`/management/teams/${teamId}`),
+            fetchJson("/management/users"),
+        ]);
+    } catch (err) {
+        console.error("Failed to load team members:", err);
+        return;
+    }
+
+    const memberIds = new Set(team.member_ids || []);
+    const userById = {};
+    users.forEach(u => userById[u.user_id] = u);
+
+    if (memberIds.size === 0) {
+        list.innerHTML = `<div class="text-secondary small">No members yet.</div>`;
+    } else {
+        list.innerHTML = [...memberIds].map(uid => {
+            const u = userById[uid];
+            return `
+                <div class="d-flex justify-content-between align-items-center mb-2" data-member-row="${escapeHtml(uid)}">
+                    <span class="d-flex align-items-center gap-2">
+                        <span class="gcon-avatar">${u ? escapeHtml(u.avatar_initials) : "?"}</span>
+                        <span>${u ? escapeHtml(u.name) : escapeHtml(uid)} <span class="text-secondary small">${u ? escapeHtml(u.email) : ""}</span></span>
+                    </span>
+                    <button type="button" class="btn btn-sm btn-outline-danger team-member-remove-btn" data-team-id="${escapeHtml(teamId)}" data-user-id="${escapeHtml(uid)}">Remove</button>
+                </div>
+            `;
+        }).join("");
+    }
+
+    // Candidates: org users (same org as the team) who aren't members yet.
+    const candidates = users.filter(u =>
+        !memberIds.has(u.user_id) && (!team.org_id || u.organization_id === team.org_id)
+    );
+    edtTeamCandidates = candidates;
+    renderEditTeamAddOptions();
+
+    document.querySelectorAll(".team-member-remove-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            try {
+                await fetchJson(`/management/teams/${btn.dataset.teamId}/members/${btn.dataset.userId}`, {
+                    method: "DELETE",
+                });
+                await refreshEditTeamMembers(btn.dataset.teamId);
+                await loadTeamsTab();
+            } catch (err) {
+                console.error("Failed to remove team member:", err);
+                showToast(err.message || "Failed to remove team member.", true);
+            }
+        });
+    });
+}
+
+let edtTeamCandidates = [];
+
+function renderEditTeamAddOptions() {
+    const addSelect = document.getElementById("edit-team-add-member-select");
+    const search = document.getElementById("edit-team-member-search");
+    if (!addSelect) return;
+    const query = search ? search.value.toLowerCase() : "";
+
+    const filtered = query
+        ? edtTeamCandidates.filter(u => u.name.toLowerCase().includes(query) || u.email.toLowerCase().includes(query))
+        : edtTeamCandidates;
+
+    addSelect.innerHTML = `<option value="">Select a user to add…</option>` +
+        filtered.map(u => `<option value="${escapeHtml(u.user_id)}">${escapeHtml(u.name)} (${escapeHtml(u.email)})</option>`).join("");
 }
 
 function setupOrganizationsTab() {
@@ -2839,6 +3065,31 @@ function setupTeamsTab() {
             } catch (err) {
                 errorBox.textContent = err.message || "Failed to update team.";
                 errorBox.classList.remove("d-none");
+            }
+        });
+    }
+
+    const memberSearch = document.getElementById("edit-team-member-search");
+    if (memberSearch) memberSearch.addEventListener("input", renderEditTeamAddOptions);
+
+    const addMemberBtn = document.getElementById("edit-team-add-member-btn");
+    if (addMemberBtn) {
+        addMemberBtn.addEventListener("click", async () => {
+            const teamId = document.getElementById("edit-team-id").value;
+            const userId = document.getElementById("edit-team-add-member-select").value;
+            if (!teamId || !userId) return;
+            try {
+                await fetchJson(`/management/teams/${teamId}/members`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_id: userId }),
+                });
+                document.getElementById("edit-team-member-search").value = "";
+                await refreshEditTeamMembers(teamId);
+                await loadTeamsTab();
+            } catch (err) {
+                console.error("Failed to add team member:", err);
+                showToast(err.message || "Failed to add team member.", true);
             }
         });
     }
@@ -3310,6 +3561,8 @@ async function loadCurrentUser() {
         setText("navbar-user-avatar", user.avatar_initials);
         setText("navbar-user-name", user.name);
         setText("navbar-user-role", `${user.role} · ${user.email}`);
+        currentUserPermissions = new Set(user.permissions || []);
+        applyPermissionGating();
     } catch (err) {
         // fetchJson already redirects to /login on 401
         console.error("Failed to load current user:", err);
