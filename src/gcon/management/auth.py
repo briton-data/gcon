@@ -128,3 +128,55 @@ class SessionManager:
         to_remove = [t for t, s in self.sessions.items() if s["user_id"] == user_id]
         for token in to_remove:
             del self.sessions[token]
+
+    def count_active(self):
+        """
+        Count non-expired sessions across all users, for the
+        dashboard's `active_sessions` card.
+        """
+        now = datetime.now(UTC)
+
+        if self.db is not None:
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS c FROM sessions WHERE expires_at > ?",
+                (now.isoformat(),),
+            )
+            return row["c"] if row else 0
+
+        return sum(1 for s in self.sessions.values() if s["expires_at"] > now)
+
+    def list_active_for_user(self, user_id):
+        """
+        Return metadata for a user's active sessions -- created_at
+        and expires_at, plus a short, non-reversible session_id
+        derived from the token for display/selection. The raw token
+        itself is never returned to a client.
+        """
+        now = datetime.now(UTC)
+
+        if self.db is not None:
+            rows = self.db.query(
+                "SELECT token, created_at, expires_at FROM sessions "
+                "WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC",
+                (user_id, now.isoformat()),
+            )
+            return [
+                {
+                    "session_id": hashlib.sha256(row["token"].encode("utf-8")).hexdigest()[:12],
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                }
+                for row in rows
+            ]
+
+        sessions = [
+            {
+                "session_id": hashlib.sha256(token.encode("utf-8")).hexdigest()[:12],
+                "created_at": s["created_at"].isoformat(),
+                "expires_at": s["expires_at"].isoformat(),
+            }
+            for token, s in self.sessions.items()
+            if s["user_id"] == user_id and s["expires_at"] > now
+        ]
+        sessions.sort(key=lambda s: s["created_at"], reverse=True)
+        return sessions
