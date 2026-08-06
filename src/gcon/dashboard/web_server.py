@@ -291,7 +291,7 @@ class WebServer:
         # ---- Analytics & History ----
 
         @self.app.get("/analytics")
-        def analytics(user=Depends(self.current_user)):
+        def analytics(user=Depends(self.require_permission("Access analytics"))):
             return self.presentation.get_analytics()
 
         # ---- Administration ----
@@ -420,6 +420,58 @@ class WebServer:
         @self.app.get("/management/user-counts")
         def mgmt_user_counts(user=Depends(self.current_user)):
             return self.management.get_user_counts()
+
+        @self.app.post("/management/users/{user_id}/reset-password")
+        def mgmt_reset_password(
+            user_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                self.management.set_password(user_id, payload["password"])
+            except KeyError:
+                raise HTTPException(status_code=400, detail="Missing 'password'.")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {"reset": user_id}
+
+        @self.app.get("/management/users/{user_id}/sessions")
+        def mgmt_user_sessions(
+            user_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                return self.management.get_user_sessions(user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.post("/management/users/{user_id}/force-logout")
+        def mgmt_force_logout(
+            user_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                self.management.force_logout_user(user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            return {"logged_out": user_id}
+
+        @self.app.get("/management/locked-users")
+        def mgmt_locked_users(user=Depends(self.require_permission("Manage users"))):
+            # user_ids currently under an active login lockout, so the
+            # Users tab can show an "Unlock" action only where needed.
+            return [
+                u["user_id"] for u in self.management.get_users()
+                if self.login_rate_limiter.is_locked_for_email(u["email"])
+            ]
+
+        @self.app.post("/management/users/{user_id}/unlock")
+        def mgmt_unlock_user(
+            user_id: str, user=Depends(self.require_permission("Manage users")),
+):
+            try:
+                target = self.management.get_user(user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            self.login_rate_limiter.clear_lockouts_for_email(target["email"])
+            self.management.audit_logger.log("Admin", "unlocked account for", target["name"])
+            return {"unlocked": user_id}
 
         # ---- Management: Organizations & Teams ----
 
