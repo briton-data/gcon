@@ -137,6 +137,27 @@ def _issue_leaf_cert(
     san_dns_names: Optional[List[str]] = None,
     san_ip_addresses: Optional[List[str]] = None,
 ) -> CertPaths:
+    # Idempotent, same pattern as ensure_ca: if this node's cert/key
+    # were already issued (e.g. pre-provisioned onto a host or, for
+    # a remotely-hosted agent, written from secrets at container
+    # startup), reuse them instead of re-minting. Checked *before*
+    # touching the CA, and without calling ensure_ca(), because the
+    # reuse case only requires the CA's public cert to be on disk
+    # (to fill in CertPaths.ca_cert_path below) -- not its private
+    # key. Re-minting requires the CA private key, which is fine for
+    # a coordinator-local dev setup but not something to hand to a
+    # remote/third-party-hosted environment (e.g. a Tinfoil enclave)
+    # just to start an agent. Calling ensure_ca() unconditionally
+    # here would also be actively wrong in that case: if only the CA
+    # cert (no CA key) is present, ensure_ca()'s own exists-check
+    # would fail and it would silently mint a brand-new, mismatched
+    # CA over the existing cert file.
+    key_path = os.path.join(cert_dir, f"{file_prefix}.key.pem")
+    cert_path = os.path.join(cert_dir, f"{file_prefix}.cert.pem")
+    ca_cert_path = os.path.join(cert_dir, CA_CERT_FILE)
+    if os.path.exists(key_path) and os.path.exists(cert_path) and os.path.exists(ca_cert_path):
+        return CertPaths(key_path, cert_path, ca_cert_path)
+
     ca = ensure_ca(cert_dir)
 
     with open(ca.key_path, "rb") as f:

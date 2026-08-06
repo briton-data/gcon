@@ -128,6 +128,13 @@ class PresentationLayer:
 
         return messages.get(event.event_type, f"{event.event_type} ({event.source})")
 
+    def submit_workflow(self, workflow):
+        """
+        Submit a multi-job workflow (DAG) for execution.
+        Delegates to the coordinator's workflow engine.
+        """
+        return self.coordinator.submit_workflow(workflow)
+
     def submit_job(self, job_id, command, artifacts=None):
         """
         Submit a new job to the cluster.
