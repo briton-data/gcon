@@ -284,6 +284,45 @@ def create_api_v1_app(management, presentation):
     # Workflows
     # ------------------------------------------------------------
 
+    class WorkflowJobIn(BaseModel):
+        job_id: str
+        command: str
+        depends_on: List[str] = Field(default_factory=list)
+
+    class WorkflowSubmitRequest(BaseModel):
+        workflow_id: str
+        name: str = ""
+        jobs: List[WorkflowJobIn]
+
+    class WorkflowSubmitResponse(BaseModel):
+        workflow_id: str
+        status: str
+        submitted: bool
+
+    @app.post(
+        "/workflows",
+        response_model=WorkflowSubmitResponse,
+        tags=["Workflows"],
+        summary="Submit a new workflow (DAG of jobs)",
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
+    )
+    def submit_workflow(payload: WorkflowSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
+        from gcon.workflow.workflow import Workflow, WorkflowJob
+
+        workflow = Workflow(workflow_id=payload.workflow_id, name=payload.name)
+        try:
+            for job_in in payload.jobs:
+                workflow.add_job(WorkflowJob(job_id=job_in.job_id, command=job_in.command))
+            for job_in in payload.jobs:
+                for parent_id in job_in.depends_on:
+                    workflow.add_dependency(parent_id, job_in.job_id)
+
+            state = presentation.submit_workflow(workflow)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        return {"workflow_id": payload.workflow_id, "status": state.status, "submitted": True}
+
     @app.get(
         "/workflows",
         tags=["Workflows"],
