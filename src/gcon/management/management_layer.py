@@ -343,6 +343,24 @@ class ManagementLayer:
         self.session_manager.destroy_all_for_user(user_id)
         self.audit_logger.log("Admin", "set password for", user.name)
 
+    def get_user_sessions(self, user_id):
+        """
+        List active-session metadata (no raw tokens) for a user, for
+        the admin session-controls UI.
+        """
+        self.user_registry.get_user(user_id)  # raises ValueError if unknown
+        return self.session_manager.list_active_for_user(user_id)
+
+    def force_logout_user(self, user_id):
+        """
+        Admin-initiated: invalidate every active session for a user
+        without touching their password (unlike set_password, which
+        also does this as a side effect of a reset).
+        """
+        user = self.user_registry.get_user(user_id)
+        self.session_manager.destroy_all_for_user(user_id)
+        self.audit_logger.log("Admin", "force logged out", user.name)
+
     def user_has_permission(self, user, permission):
         if user is None:
             return False
@@ -505,7 +523,7 @@ class ManagementLayer:
             "active_users": user_counts["active"],
             "organizations": len(self.org_registry.list_organizations()),
             "api_keys": len(self.api_key_manager.list_keys()),
-            "active_sessions": user_counts["active"],  # no real session tracking yet
+            "active_sessions": self.session_manager.count_active(),
             "total_workflows": total_workflows,
             "active_api_keys": active_keys,
         }
