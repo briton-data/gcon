@@ -116,6 +116,65 @@ class LoginRateLimiter:
                 self._locked_until.pop(key, None)
 
     # ------------------------------------------------------------
+    # Admin override
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _email_prefix(email):
+        return f"{(email or '').strip().lower()}|"
+
+    def is_locked_for_email(self, email):
+        """
+        Whether `email` currently has an active lockout under any
+        client IP. Lockouts are keyed on (email, ip), so a user can
+        be locked out from more than one IP at once -- this is true
+        if any of them is still active. Used to show an "Unlock"
+        action in the admin UI only for accounts that need it.
+        """
+        prefix = self._email_prefix(email)
+        now = datetime.now(UTC)
+
+        if self.db is not None:
+            rows = self.db.query(
+                "SELECT locked_until FROM login_lockouts WHERE key LIKE ?",
+                (prefix + "%",),
+            )
+            return any(datetime.fromisoformat(r["locked_until"]) > now for r in rows)
+
+        with self._lock:
+            return any(
+                k.startswith(prefix) and until > now
+                for k, until in self._locked_until.items()
+            )
+
+    def clear_lockouts_for_email(self, email):
+        """
+        Admin-initiated unlock: clear every lockout (and its pending
+        attempt count) for `email`, across every client IP it was
+        locked out from. An admin has no way to know which specific
+        IP(s) triggered the lockout, so this clears all of them for
+        the email rather than requiring an exact (email, ip) match.
+        Returns the number of (email, ip) lockouts cleared.
+        """
+        prefix = self._email_prefix(email)
+
+        if self.db is not None:
+            rows = self.db.query(
+                "SELECT key FROM login_lockouts WHERE key LIKE ?", (prefix + "%",)
+            )
+            for row in rows:
+                self.db.execute("DELETE FROM login_lockouts WHERE key = ?", (row["key"],))
+                self.db.execute("DELETE FROM login_attempts WHERE key = ?", (row["key"],))
+            return len(rows)
+
+        with self._lock:
+            matched = [k for k in self._locked_until if k.startswith(prefix)]
+            for k in matched:
+                del self._locked_until[k]
+                self._attempts.pop(k, None)
+            return len(matched)
+
+    # ------------------------------------------------------------
     # In-memory implementation
     # ------------------------------------------------------------
 
