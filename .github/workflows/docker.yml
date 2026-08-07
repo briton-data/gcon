@@ -1,0 +1,54 @@
+name: Build and Push GCON Agent Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag (e.g. v0.1)"
+        required: true
+        default: "v0.1"
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "src/**"
+      - "scripts/run_worker.py"
+      - "requirements.txt"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set image tag
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/gcon-agent:${{ steps.vars.outputs.tag }}
+
+      - name: Print the digest-pinned image reference
+        run: |
+          echo "=================================================="
+          echo "Paste this into tinfoil-config.yml as the image:"
+          echo "${{ secrets.DOCKERHUB_USERNAME }}/gcon-agent@${{ steps.build.outputs.digest }}"
+          echo "=================================================="
