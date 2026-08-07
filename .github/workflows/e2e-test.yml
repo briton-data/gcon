@@ -27,6 +27,16 @@ jobs:
           python scripts/generate_dev_certs.py --cert-dir ./certs \
             --coordinator-hostname localhost --node worker-01
 
+      - name: Fingerprint certs (before coordinator starts)
+        run: |
+          echo "GCON_TLS_CERT_DIR=$GCON_TLS_CERT_DIR"
+          echo "Resolved ./certs path: $(readlink -f ./certs)"
+          sha256sum certs/*.pem
+          for f in certs/ca.cert.pem certs/coordinator.cert.pem certs/agent-worker-01.cert.pem; do
+            echo "--- $f ---"
+            openssl x509 -in "$f" -noout -subject -issuer -dates
+          done
+
       - name: Bootstrap owner account + mint API key
         id: bootstrap
         run: |
@@ -50,6 +60,16 @@ jobs:
           done
           echo "Coordinator never came up:"
           cat coordinator.log
+
+      - name: Fingerprint certs (after coordinator started -- compare against the earlier step)
+        run: |
+          sha256sum certs/*.pem
+          for f in certs/ca.cert.pem certs/coordinator.cert.pem certs/agent-worker-01.cert.pem; do
+            echo "--- $f ---"
+            openssl x509 -in "$f" -noout -subject -issuer -dates
+          done
+          echo "--- what the coordinator actually served over the wire ---"
+          echo | timeout 5 openssl s_client -connect 127.0.0.1:50051 -CAfile certs/ca.cert.pem 2>&1 | head -40 || true
           exit 1
 
       - name: Start agent
