@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GCON_DB_PATH: ${{ github.workspace }}/data/gcon.db
+      GCON_TLS_CERT_DIR: ${{ github.workspace }}/certs
       GCON_OWNER_PASSWORD: ${{ secrets.GCON_TEST_OWNER_PASSWORD || 'ci-test-password-123' }}
     steps:
       - name: Checkout
