@@ -1,0 +1,113 @@
+name: GCON End-to-End Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      GCON_DB_PATH: ${{ github.workspace }}/data/gcon.db
+      GCON_OWNER_PASSWORD: ${{ secrets.GCON_TEST_OWNER_PASSWORD || 'ci-test-password-123' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate cluster certs
+        run: |
+          python scripts/generate_dev_certs.py --cert-dir ./certs \
+            --coordinator-hostname localhost --node worker-01
+
+      - name: Bootstrap owner account + mint API key
+        id: bootstrap
+        run: |
+          SECRET=$(python scripts/ci_bootstrap_key.py)
+          echo "::add-mask::$SECRET"
+          echo "api_key=$SECRET" >> "$GITHUB_OUTPUT"
+
+      - name: Start coordinator
+        run: |
+          nohup python scripts/run_coordinator.py \
+            --db ./data/gcon_control_plane.db \
+            > coordinator.log 2>&1 &
+          echo $! > coordinator.pid
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/api/v1/openapi.json > /dev/null; then
+              echo "Coordinator API is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Coordinator never came up:"
+          cat coordinator.log
+          exit 1
+
+      - name: Start agent
+        run: |
+          nohup python scripts/run_worker.py \
+            --node-id worker-01 \
+            --coordinator localhost:50051 \
+            --cert-dir ./certs \
+            > agent.log 2>&1 &
+          echo $! > agent.pid
+
+          for i in $(seq 1 30); do
+            if grep -q "Registered as node" agent.log; then
+              echo "Agent registered with coordinator."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Agent never registered:"
+          cat agent.log
+          exit 1
+
+      - name: Submit a real job through the public API
+        env:
+          API_KEY: ${{ steps.bootstrap.outputs.api_key }}
+        run: |
+          RESPONSE=$(curl -sf -X POST http://127.0.0.1:8000/api/v1/jobs \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"job_id": "ci-e2e-job-001", "command": "python -c \"print(1+1)\""}')
+          echo "Submit response: $RESPONSE"
+
+      - name: Wait for the job to complete and show its receipt
+        env:
+          API_KEY: ${{ steps.bootstrap.outputs.api_key }}
+        run: |
+          for i in $(seq 1 30); do
+            JOB=$(curl -sf http://127.0.0.1:8000/api/v1/jobs/ci-e2e-job-001 \
+              -H "Authorization: Bearer $API_KEY")
+            STATUS=$(echo "$JOB" | python -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
+            echo "Job status: $STATUS"
+            if [ "$STATUS" = "COMPLETED" ] || [ "$STATUS" = "FAILED" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "Final job state:"
+          echo "$JOB" | python -m json.tool
+
+          echo ""
+          echo "Receipts on file:"
+          curl -sf http://127.0.0.1:8000/api/v1/receipts \
+            -H "Authorization: Bearer $API_KEY" | python -m json.tool
+
+      - name: Show logs (always, for debugging)
+        if: always()
+        run: |
+          echo "===== coordinator.log ====="
+          cat coordinator.log || true
+          echo "===== agent.log ====="
+          cat agent.log || true
