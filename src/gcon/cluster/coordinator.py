@@ -216,9 +216,17 @@ class GCONCoordinator:
     )
 )
     
-    def submit_job(self, job_id, command, artifacts=None):
+    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None):
         """
         Submit a new job to the coordinator.
+
+        `created_by` is the user_id of the authenticated principal that
+        submitted this job (from an API key owner or, in the future, a
+        dashboard session) -- it is real ownership metadata, never a
+        placeholder, and is left as None when the submission path has
+        no authenticated identity attached (e.g. internal/system jobs).
+        `workflow_id` links a job back to the workflow that generated
+        it, when applicable.
         """
         if artifacts is None:
              artifacts = []
@@ -243,6 +251,8 @@ class GCONCoordinator:
                 "artifacts": artifact_ids,
                 "created_at": datetime.now(UTC).isoformat(),
                 "completed_at": None,
+                "created_by": created_by,
+                "workflow_id": workflow_id,
     }
         self.queue_job(job_id)
         
@@ -255,6 +265,8 @@ class GCONCoordinator:
                     "job_id": job_id,
                     "command": command,
                     "artifacts": artifact_ids,
+                    "created_by": created_by,
+                    "workflow_id": workflow_id,
         },
     )
 )
@@ -287,14 +299,28 @@ class GCONCoordinator:
         if node is None:
             raise RuntimeError("No available nodes to execute the job.")
 
-    # Mark node and job as busy/running
+    # Mark node and job as busy/running. select_node() worked from a
+    # snapshot, so the node can have been deregistered (e.g. a
+    # concurrent "Scale Down") in the window between that snapshot
+    # and this heartbeat call. That race is the same recoverable
+    # "nothing to assign to right now" condition as node is None
+    # above, not a bug -- re-raise as RuntimeError so scheduler_loop
+    # requeues the job and retries, instead of the underlying
+    # ValueError killing the scheduler thread with nothing to
+    # restart it.
         node.status = "busy"
-        
-        self.registry.heartbeat(
-            node.node_id,
-            "busy",
-            node.heartbeat()["timestamp"]
-)       
+
+        try:
+            self.registry.heartbeat(
+                node.node_id,
+                "busy",
+                node.heartbeat()["timestamp"]
+            )
+        except ValueError:
+            raise RuntimeError(
+                f"Node '{node.node_id}' was deregistered before it could be assigned."
+            )
+
         job["status"] = "running"
         job["node_id"] = node.node_id
         
@@ -1239,15 +1265,22 @@ class GCONCoordinator:
 
         return nodes
 
-    def get_jobs(self):
+    def get_jobs(self, created_by=None):
         """
         Return a dashboard summary about all jobs.
+
+        `created_by` optionally filters the result down to jobs
+        submitted by a single user_id -- used by
+        ManagementLayer.get_user_stats() to compute real, live
+        per-user usage metrics instead of a permanently-zero counter.
         """
         jobs = []
         
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
         for job_id, job in jobs_snapshot:
+            if created_by is not None and job.get("created_by") != created_by:
+                continue
             receipt = self.receipts.get(job_id)
             jobs.append({
                 "job_id": job_id,
@@ -1257,6 +1290,8 @@ class GCONCoordinator:
                 "completed_at": job.get("completed_at"),
                 "receipt_id": receipt.get("receipt_id", job_id) if receipt else None,
                 "artifacts": len(job.get("artifacts", [])),
+                "created_by": job.get("created_by"),
+                "workflow_id": job.get("workflow_id"),
             })
         return jobs
 
