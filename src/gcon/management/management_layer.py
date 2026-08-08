@@ -22,7 +22,7 @@ import secrets
 from datetime import datetime, UTC
 
 from . import rbac
-from .auth import SessionManager
+from .auth import SessionManager, ResetTokenManager
 from .users import UserRegistry, bootstrap_owner_account
 from .organizations import OrganizationRegistry
 from .api_keys import APIKeyManager
@@ -33,11 +33,12 @@ from gcon.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Bootstrap owner account, created once on first boot. Overridable
-# via environment variables for deployments that don't want this
-# exact identity hard-coded in source control.
-BOOTSTRAP_OWNER_NAME = os.environ.get("GCON_OWNER_NAME", "Briton Nyongesa")
-BOOTSTRAP_OWNER_EMAIL = os.environ.get("GCON_OWNER_EMAIL", "nyongesabriton620@gmail.com")
+# Bootstrap owner account, created once on first boot. Always set
+# GCON_OWNER_NAME / GCON_OWNER_EMAIL per deployment -- the fallbacks
+# below are deliberately generic placeholders, not a real identity,
+# so nobody's actual name/email ships hard-coded in source control.
+BOOTSTRAP_OWNER_NAME = os.environ.get("GCON_OWNER_NAME", "GCON Owner")
+BOOTSTRAP_OWNER_EMAIL = os.environ.get("GCON_OWNER_EMAIL", "owner@example.com")
 
 # Deliberately NOT a hardcoded fallback like the old "GCON2024" --
 # a fixed default password shipped in source control is guessable by
@@ -66,6 +67,7 @@ class ManagementLayer:
         self.audit_logger = AuditLogger(db=self.db)
         self.notification_center = NotificationCenter(db=self.db)
         self.session_manager = SessionManager(db=self.db)
+        self.reset_token_manager = ResetTokenManager(db=self.db)
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -241,10 +243,24 @@ class ManagementLayer:
     # ------------------------------------------------------------
 
     def get_users(self):
-        return [u.to_dict() for u in self.user_registry.list_users()]
+        return [self._user_dict_with_live_stats(u) for u in self.user_registry.list_users()]
 
     def get_user(self, user_id):
-        return self.user_registry.get_user(user_id).to_dict()
+        user = self.user_registry.get_user(user_id)
+        return self._user_dict_with_live_stats(user)
+
+    def _user_dict_with_live_stats(self, user):
+        """
+        A user's `to_dict()` carries whatever was last persisted to
+        `stats`, which only covers counters that are incremented as a
+        side effect elsewhere (login_count, api_requests). Job/workflow
+        counters are computed fresh here from live coordinator state
+        (see get_user_stats) so callers never see a stale or
+        permanently-zero value for them.
+        """
+        data = user.to_dict()
+        data["stats"] = self.get_user_stats(user.user_id)
+        return data
 
     def create_user(self, name, email, role, organization_id=None, status="Active", password=None):
         if self.user_registry.get_user_by_email(email):
@@ -276,6 +292,59 @@ class ManagementLayer:
 
     def get_user_counts(self):
         return self.user_registry.counts()
+
+    def get_user_stats(self, user_id):
+        """
+        Compute real, live per-user usage metrics from actual
+        execution data -- never a hardcoded/illustrative value.
+
+        Jobs, workflows and receipts are aggregated fresh from the
+        coordinator's real in-memory state (filtered by
+        `created_by`/`workflow_id`/`job_id` == this user's jobs) each
+        time this is called, rather than maintained as a separately
+        incremented counter, so there is no way for it to drift out
+        of sync with what the cluster actually did. `login_count` and
+        `api_requests` remain incremental counters on the User record
+        itself (see UserRegistry.increment_stat) since they are not
+        derivable from coordinator state.
+        """
+        user = self.user_registry.get_user(user_id)  # raises ValueError if unknown
+
+        jobs = self.coordinator.get_jobs(created_by=user_id) if self.coordinator else []
+        jobs_submitted = len(jobs)
+        jobs_completed = sum(1 for j in jobs if j["status"] == "completed")
+        jobs_failed = sum(1 for j in jobs if j["status"] in ("failed", "cancelled"))
+        jobs_running = sum(1 for j in jobs if j["status"] in ("running", "pending"))
+
+        workflows_created = 0
+        if self.coordinator:
+            workflows_created = sum(
+                1 for state in self.coordinator.workflow_engine.states.values()
+                if state.created_by == user_id
+            )
+
+        receipts = self.coordinator.get_receipts() if self.coordinator else []
+        job_ids = {j["job_id"] for j in jobs}
+        receipt_count = sum(1 for r in receipts if r.get("job_id") in job_ids)
+
+        # Per-job CPU consumption isn't sampled/recorded anywhere in
+        # the execution pipeline today (MetricsCollector reports
+        # cluster-wide node CPU, not per-job attribution), so this
+        # honestly reports 0 rather than fabricating a number, until
+        # per-job resource accounting exists.
+        cpu_usage = 0
+
+        stats = dict(user.stats)
+        stats.update({
+            "jobs_submitted": jobs_submitted,
+            "jobs_completed": jobs_completed,
+            "jobs_failed": jobs_failed,
+            "jobs_running": jobs_running,
+            "workflows_created": workflows_created,
+            "receipt_count": receipt_count,
+            "cpu_usage": cpu_usage,
+        })
+        return stats
 
     # ------------------------------------------------------------
     # Authentication
@@ -343,6 +412,75 @@ class ManagementLayer:
         self.session_manager.destroy_all_for_user(user_id)
         self.audit_logger.log("Admin", "set password for", user.name)
 
+    def signup(self, name, email, role, password, organization_id=None):
+        """
+        Self-service account creation (no auth required to call
+        this). Unlike create_user() -- which is an admin action gated
+        by the "Manage users" permission -- a signup always lands
+        with status="Pending", regardless of the role requested, so
+        a new account can never log in and act until an existing
+        admin/owner reviews and activates it via set_user_status().
+        """
+        if not email or not password:
+            raise ValueError("Email and password are required.")
+        if role not in rbac.ROLES:
+            raise ValueError(f"Invalid role '{role}'.")
+        if self.user_registry.get_user_by_email(email):
+            raise ValueError(f"A user with email '{email}' already exists.")
+
+        user = self.user_registry.add_user(
+            name, email, role, organization_id, status="Pending",
+        )
+        user.set_password(password)
+        self.user_registry._persist(user)
+        self.audit_logger.log(user.name, "signed up (pending approval)")
+        self.notification_center.notify(
+            "user_registered", f"{user.name} signed up and is awaiting approval",
+        )
+        return user.to_dict()
+
+    def request_password_reset(self, email):
+        """
+        Start a self-service password reset. Always returns None
+        with no error, whether or not the email matches an account,
+        so this endpoint can't be used to enumerate registered
+        emails. If it does match, logs the reset token at WARNING
+        level (there is no outbound email integration yet -- see
+        docs/deployment.md) so an operator can hand it to the user
+        out of band; a real deployment should replace this log line
+        with an actual email send.
+        """
+        user = self.user_registry.get_user_by_email(email)
+        if not user:
+            return
+        token = self.reset_token_manager.create_token(user.user_id)
+        logger.warning(
+            "Password reset requested for '%s'. Reset token (valid %d minutes): %s\n"
+            "No email integration is configured -- deliver this token to the "
+            "user out of band, e.g. a link to /reset-password?token=%s",
+            email, self.reset_token_manager.ttl_minutes, token, token,
+        )
+        self.audit_logger.log(user.name, "requested password reset")
+
+    def reset_password(self, token, new_password):
+        """
+        Complete a self-service password reset. Raises ValueError on
+        an invalid/expired/already-used token.
+        """
+        user_id = self.reset_token_manager.get_user_id(token)
+        if not user_id:
+            raise ValueError("This reset link is invalid or has expired.")
+
+        user = self.user_registry.get_user(user_id)
+        user.set_password(new_password)
+        self.user_registry._persist(user)
+        self.reset_token_manager.consume_token(token)
+        self.session_manager.destroy_all_for_user(user_id)
+        self.audit_logger.log(user.name, "reset their password")
+        self.notification_center.notify(
+            "password_changed", f"{user.name} reset their password",
+        )
+
     def get_user_sessions(self, user_id):
         """
         List active-session metadata (no raw tokens) for a user, for
@@ -406,6 +544,26 @@ class ManagementLayer:
         name = org.name
         self.org_registry.delete_organization(org_id, user_registry=self.user_registry)
         self.audit_logger.log("Admin", "deleted organization", name)
+
+    def remove_organization_membership(self, org_id, user_id):
+        """
+        Detach a user from an organization.
+
+        `update_user(organization_id=None)` can't be used for this:
+        UserRegistry.update_user() treats None as "field not supplied"
+        (partial-update semantics), so it silently no-ops instead of
+        clearing organization_id. This bypasses that convention and
+        writes the clear directly, then persists it.
+        """
+        user = self.user_registry.get_user(user_id)
+        if user.organization_id != org_id:
+            raise ValueError(
+                f"User '{user_id}' does not belong to organization '{org_id}'."
+            )
+        user.organization_id = None
+        self.user_registry._persist(user)
+        self.audit_logger.log("Admin", "removed organization membership", user.name)
+        return self.get_user(user_id)
 
     def get_teams(self):
         teams = []
