@@ -42,6 +42,8 @@ class JobOut(BaseModel):
     completed_at: object = None
     receipt_id: Optional[str] = None
     artifacts: int = 0
+    created_by: Optional[str] = None
+    workflow_id: Optional[str] = None
 
 
 class JobSubmitRequest(BaseModel):
@@ -260,8 +262,14 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
     )
     def submit_job(payload: JobSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
+        owner = auth["owner"]
         try:
-            presentation.submit_job(payload.job_id, payload.command, payload.artifacts)
+            presentation.submit_job(
+                payload.job_id,
+                payload.command,
+                payload.artifacts,
+                created_by=owner.user_id if owner else None,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {"job_id": payload.job_id, "submitted": True}
@@ -309,7 +317,12 @@ def create_api_v1_app(management, presentation):
     def submit_workflow(payload: WorkflowSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
         from gcon.workflow.workflow import Workflow, WorkflowJob
 
-        workflow = Workflow(workflow_id=payload.workflow_id, name=payload.name)
+        owner = auth["owner"]
+        workflow = Workflow(
+            workflow_id=payload.workflow_id,
+            name=payload.name,
+            created_by=owner.user_id if owner else None,
+        )
         try:
             for job_in in payload.jobs:
                 workflow.add_job(WorkflowJob(job_id=job_in.job_id, command=job_in.command))
