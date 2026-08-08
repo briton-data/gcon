@@ -89,6 +89,7 @@ class Workflow:
         workflow_id: str,
         name: str = "",
         metadata: Optional[Dict] = None,
+        created_by: Optional[str] = None,
 ):       
         
         self.workflow_id = workflow_id
@@ -98,6 +99,12 @@ class Workflow:
         self.jobs: Dict[str, WorkflowJob] = {}
         self.dependencies: Dict[str, List[str]] = {}
         self.state = "PENDING"
+
+        # Real ownership metadata: the user_id of whoever submitted this
+        # workflow (e.g. the owner of the API key that called
+        # POST /api/v1/workflows). None for internal/system workflows
+        # that have no authenticated submitter.
+        self.created_by = created_by
 
         self.created_at = datetime.now(UTC)
         self.completed_at = None
