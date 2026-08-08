@@ -135,14 +135,22 @@ class PresentationLayer:
         """
         return self.coordinator.submit_workflow(workflow)
 
-    def submit_job(self, job_id, command, artifacts=None):
+    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None):
         """
         Submit a new job to the cluster.
+
+        `created_by` carries real ownership metadata (the submitting
+        user's user_id) through to the coordinator so job/usage
+        analytics are computed from live execution data rather than
+        remaining permanently zero. Callers with no authenticated
+        identity (internal/system submissions) leave it as None.
         """
         return self.coordinator.submit_job(
             job_id,
             command,
-            artifacts
+            artifacts,
+            created_by=created_by,
+            workflow_id=workflow_id,
     ) 
     def register_node(self, node):
         """
