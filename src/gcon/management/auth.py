@@ -22,6 +22,7 @@ from datetime import datetime, UTC, timedelta
 PBKDF2_ITERATIONS = 260_000
 SESSION_TTL_HOURS = 24
 SESSION_COOKIE_NAME = "gcon_session"
+RESET_TOKEN_TTL_MINUTES = 30
 
 
 def hash_password(password):
@@ -180,3 +181,66 @@ class SessionManager:
         ]
         sessions.sort(key=lambda s: s["created_at"], reverse=True)
         return sessions
+
+
+class ResetTokenManager:
+    """
+    Issues and consumes single-use, expiring password-reset tokens
+    for the self-service "forgot password" flow. Always DB-backed
+    (a reset link has to survive across separate requests, possibly
+    from a different device than the one that requested it, so an
+    in-memory-only store would silently break on any multi-process
+    or restarted deployment).
+    """
+
+    def __init__(self, db, ttl_minutes=RESET_TOKEN_TTL_MINUTES):
+        self.db = db
+        self.ttl_minutes = ttl_minutes
+
+    def create_token(self, user_id):
+        token = secrets.token_urlsafe(32)
+        created_at = datetime.now(UTC)
+        expires_at = created_at + timedelta(minutes=self.ttl_minutes)
+        self.db.execute(
+            "INSERT INTO password_reset_tokens (token, user_id, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (token, user_id, created_at.isoformat(), expires_at.isoformat()),
+        )
+        return token
+
+    def get_user_id(self, token):
+        """
+        Return the user id for a valid, unexpired, unused token, or
+        None otherwise. Does not consume the token -- call
+        consume_token() once the new password has actually been set.
+        """
+        if not token:
+            return None
+        row = self.db.query_one(
+            "SELECT user_id, expires_at, used_at FROM password_reset_tokens WHERE token = ?",
+            (token,),
+        )
+        if row is None or row["used_at"] is not None:
+            return None
+        if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]):
+            return None
+        return row["user_id"]
+
+    def consume_token(self, token):
+        self.db.execute(
+            "UPDATE password_reset_tokens SET used_at = ? WHERE token = ?",
+            (datetime.now(UTC).isoformat(), token),
+        )
+
+    def invalidate_all_for_user(self, user_id):
+        """
+        Mark every outstanding reset token for a user as used, e.g.
+        once their password has actually changed via any path, so an
+        older unconsumed reset link can't still be redeemed.
+        """
+        now = datetime.now(UTC).isoformat()
+        self.db.execute(
+            "UPDATE password_reset_tokens SET used_at = ? "
+            "WHERE user_id = ? AND used_at IS NULL",
+            (now, user_id),
+        )
