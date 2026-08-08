@@ -13,6 +13,7 @@ import uvicorn
 
 from gcon.management.management_layer import ManagementLayer
 from gcon.management.auth import SESSION_COOKIE_NAME
+from gcon.management import rbac
 from gcon.management.rate_limit import LoginRateLimiter
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.dashboard.security_headers import SecurityHeadersMiddleware, env_flag
@@ -303,7 +304,13 @@ class WebServer:
         @self.app.post("/admin/scale-up")
         def admin_scale_up(
             user=Depends(self.require_permission("Manage cluster"))):
-            return self.presentation.scale_up()
+            try:
+                return self.presentation.scale_up()
+            except RuntimeError as e:
+                # Real, actionable failure (e.g. no provisioner wired up
+                # for the active transport) -- not a bug to swallow, and
+                # not something the caller should see as a generic 500.
+                raise HTTPException(status_code=501, detail=str(e))
 
         @self.app.post("/admin/scale-down")
         def admin_scale_down( 
@@ -692,6 +699,98 @@ class WebServer:
                 name="login.html",
                 context={}
     )
+
+
+        @self.app.get("/signup", response_class=HTMLResponse)
+        def signup_page(request: Request):
+            return self.templates.TemplateResponse(
+                request=request,
+                name="signup.html",
+                context={"roles": rbac.ROLES},
+    )
+
+
+        @self.app.post("/auth/signup")
+        def auth_signup(payload: dict, request: Request):
+            client_ip = self._client_ip(request)
+            email = payload.get("email")
+
+            # Reuse the login rate limiter under a distinct key prefix
+            # so signup can't be hammered to enumerate emails or spam
+            # pending accounts, without sharing a bucket with /auth/login.
+            try:
+                self.login_rate_limiter.check(f"signup:{email}", client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
+            try:
+                user = self.management.signup(
+                    name=payload.get("name"),
+                    email=email,
+                    role=payload.get("role"),
+                    password=payload.get("password"),
+                )
+            except ValueError as e:
+                self.login_rate_limiter.record_failure(f"signup:{email}", client_ip)
+                raise HTTPException(status_code=400, detail=str(e))
+
+            self.login_rate_limiter.record_success(f"signup:{email}", client_ip)
+            return user
+
+
+        @self.app.get("/forgot-password", response_class=HTMLResponse)
+        def forgot_password_page(request: Request):
+            return self.templates.TemplateResponse(
+                request=request,
+                name="forgot_password.html",
+                context={},
+    )
+
+
+        @self.app.post("/auth/forgot-password")
+        def auth_forgot_password(payload: dict, request: Request):
+            email = payload.get("email")
+            client_ip = self._client_ip(request)
+            try:
+                self.login_rate_limiter.check(f"forgotpw:{email}", client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
+            self.management.request_password_reset(email)
+            self.login_rate_limiter.record_success(f"forgotpw:{email}", client_ip)
+
+            # Deliberately generic regardless of whether the email
+            # matched an account -- see request_password_reset()'s
+            # docstring, this is what stops email enumeration.
+            return {"message": "If that email has an account, a reset link has been sent."}
+
+
+        @self.app.get("/reset-password", response_class=HTMLResponse)
+        def reset_password_page(request: Request, token: str = ""):
+            return self.templates.TemplateResponse(
+                request=request,
+                name="reset_password.html",
+                context={"token": token},
+    )
+
+
+        @self.app.post("/auth/reset-password")
+        def auth_reset_password(payload: dict, request: Request):
+            client_ip = self._client_ip(request)
+            token = payload.get("token")
+            try:
+                self.login_rate_limiter.check(f"resetpw:{token}", client_ip)
+            except ValueError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+
+            try:
+                self.management.reset_password(token, payload.get("new_password"))
+            except ValueError as e:
+                self.login_rate_limiter.record_failure(f"resetpw:{token}", client_ip)
+                raise HTTPException(status_code=400, detail=str(e))
+
+            self.login_rate_limiter.record_success(f"resetpw:{token}", client_ip)
+            return {"reset": True}
 
 
         @self.app.post("/auth/login")
