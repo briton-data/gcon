@@ -38,8 +38,10 @@ class WorkflowEngine:
                 "Workflow contains a dependency cycle."
         )
 
-    # Create runtime state
-        state = WorkflowState(workflow.workflow_id)
+    # Create runtime state (carrying real ownership metadata from the
+    # submitted Workflow through to the state summary exposed by
+    # get_workflows())
+        state = WorkflowState(workflow.workflow_id, created_by=workflow.created_by)
         self.workflows[workflow.workflow_id] = workflow
         self.dags[workflow.workflow_id] = dag
         self.states[workflow.workflow_id] = state
@@ -85,7 +87,9 @@ class WorkflowEngine:
 
         self.coordinator.submit_job(
     job_id=job.job_id,
-    command=job.command
+    command=job.command,
+    created_by=workflow.created_by,
+    workflow_id=workflow.workflow_id,
 )
 
         state.mark_running(job.job_id)
