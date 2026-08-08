@@ -147,4 +147,25 @@ MIGRATIONS: List[Migration] = [
             """,
         ],
     ),
+    Migration(
+        version=3,
+        name="password_reset_tokens",
+        up_sql=[
+            # Backs auth.ResetTokenManager -- self-service "forgot
+            # password" flow. token is the opaque, single-use value
+            # emailed/logged to the user; used_at is set (not the row
+            # deleted) so a reused/expired token still resolves to a
+            # clear error instead of "token not found".
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                token      TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at    TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_reset_tokens_user ON password_reset_tokens (user_id)",
+        ],
+    ),
 ]
