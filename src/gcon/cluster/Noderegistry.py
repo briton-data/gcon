@@ -27,11 +27,25 @@ class NodeRegistry:
 
     def register(self, node):
         """
-        Register a new node.
+        Register a new node, or re-register one whose previous
+        session has already timed out (status "offline").
+
+        A node reconnecting after its own process crashed/restarted
+        is the normal case (e.g. an agent process dying and coming
+        back up) and must succeed -- the coordinator has no way to
+        tell "the old process is gone" apart from the heartbeat
+        timeout already having flipped it offline, so that's exactly
+        the signal used here. Only a node_id that is still actively
+        alive (heartbeating within the timeout) is rejected, since
+        that's the genuine conflict case: two live processes
+        claiming the same node_id at once.
         """
         with self._lock:
-            if node.node_id in self.nodes:
-                raise ValueError(f"Node '{node.node_id}' already exists.")
+            existing = self.nodes.get(node.node_id)
+            if existing is not None and existing["status"] != "offline":
+                raise ValueError(
+                    f"Node '{node.node_id}' already exists and is still active."
+                )
 
             self.nodes[node.node_id] = {
                 "node": node,
