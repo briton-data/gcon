@@ -6,11 +6,15 @@ class WorkflowState:
     Tracks the runtime execution state of a workflow.
     """
     
-    def __init__(self, workflow_id: str):
+    def __init__(self, workflow_id: str, created_by=None):
         
         self.workflow_id = workflow_id
         self.status = "PENDING"
         self.job_states: Dict[str, str] = {}
+        # Ownership metadata copied from the source Workflow at
+        # initialization time, so it survives even though WorkflowState
+        # (not Workflow) is what get_workflows()/summary() expose.
+        self.created_by = created_by
 
         self.pending_jobs: Set[str] = set()
         self.ready_jobs: Set[str] = set()
@@ -124,6 +128,7 @@ class WorkflowState:
         return {
             "workflow_id": self.workflow_id,
             "status": self.status,
+            "created_by": self.created_by,
             "pending_jobs": len(self.pending_jobs),
             "ready_jobs": len(self.ready_jobs),
             "running_jobs": len(self.running_jobs),
