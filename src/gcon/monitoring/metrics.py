@@ -47,18 +47,24 @@ class MetricsCollector:
 
         # Iterate through coordinator.jobs
         for job_id, job in self.coordinator.jobs.items():
-        
-        # Build a dictionary for each job
+
+            # Build a dictionary for each job
             metrics = {
                 "job_id": job_id,
                 "status": job["status"],
                 "command": job["command"],
                 "node_id": job["node_id"],
-        "result": job.get("result")
-}
-        
-        # Append to job_metrics
-        job_metrics.append(metrics)
+                "created_by": job.get("created_by"),
+                "workflow_id": job.get("workflow_id"),
+                "result": job.get("result"),
+            }
+
+            # Append to job_metrics -- this must stay inside the loop:
+            # previously it was dedented to run once, unconditionally,
+            # after the loop, which raised UnboundLocalError on an
+            # empty job dict (e.g. right after boot, before any job is
+            # submitted) because `metrics` was never assigned.
+            job_metrics.append(metrics)
 
         return job_metrics
     
