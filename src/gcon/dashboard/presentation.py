@@ -687,6 +687,12 @@ class PresentationLayer:
         """
         return {"retried_job_ids": self.coordinator.retry_failed_jobs()}
 
+    def retry_job(self, job_id):
+        """
+        Re-queue a single failed or stuck-pending job for another attempt.
+        """
+        return {"retried_job_id": self.coordinator.retry_job(job_id)}
+
     def clear_failed_jobs(self):
         """
         Permanently drop every currently failed job.

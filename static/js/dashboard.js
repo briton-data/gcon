@@ -1817,6 +1817,8 @@ async function openExecutionDetail(jobId) {
             </div>
         `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
 
+        const isRetryable = j.status === "failed" || j.status === "pending";
+
         body.innerHTML = `
             <div class="gcon-panel mb-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1824,6 +1826,11 @@ async function openExecutionDetail(jobId) {
                     ${statusBadge(j.status)}
                 </div>
                 ${buildLifecycleStepper(j)}
+                ${isRetryable ? `
+                    <button class="btn btn-sm btn-outline-light w-100 mt-3" id="exec-retry-btn">
+                        <i class="bi bi-arrow-counterclockwise me-1"></i>Retry This Job
+                    </button>
+                ` : ""}
             </div>
 
             <div class="gcon-panel mb-3">
@@ -1861,6 +1868,24 @@ async function openExecutionDetail(jobId) {
         const viewReceiptBtn = document.getElementById("exec-view-receipt-btn");
         if (viewReceiptBtn) {
             viewReceiptBtn.addEventListener("click", () => openReceiptDetail(j.receipt_id));
+        }
+
+        const retryBtn = document.getElementById("exec-retry-btn");
+        if (retryBtn) {
+            retryBtn.addEventListener("click", async () => {
+                retryBtn.disabled = true;
+                retryBtn.textContent = "Retrying…";
+                try {
+                    await fetchJson(`/jobs/${encodeURIComponent(j.job_id)}/retry`, { method: "POST" });
+                    showToast(`'${j.job_id}' re-queued for another attempt.`, false);
+                    await loadExecutionsTab();
+                    await openExecutionDetail(j.job_id);
+                } catch (err) {
+                    showToast(err.message || "Retry failed.", true);
+                    retryBtn.disabled = false;
+                    retryBtn.innerHTML = `<i class="bi bi-arrow-counterclockwise me-1"></i>Retry This Job`;
+                }
+            });
         }
 
         openDrawer();
@@ -2934,6 +2959,8 @@ let edtTeamCandidates = [];
 function renderEditTeamAddOptions() {
     const addSelect = document.getElementById("edit-team-add-member-select");
     const search = document.getElementById("edit-team-member-search");
+    const hint = document.getElementById("edit-team-add-member-hint");
+    const addBtn = document.getElementById("edit-team-add-member-btn");
     if (!addSelect) return;
     const query = search ? search.value.toLowerCase() : "";
 
@@ -2943,6 +2970,15 @@ function renderEditTeamAddOptions() {
 
     addSelect.innerHTML = `<option value="">Select a user to add…</option>` +
         filtered.map(u => `<option value="${escapeHtml(u.user_id)}">${escapeHtml(u.name)} (${escapeHtml(u.email)})</option>`).join("");
+
+    // edtTeamCandidates (pre-search) being empty means there is genuinely
+    // no eligible user (none share this team's organization) -- that's
+    // the case worth explaining, as opposed to a search query just not
+    // matching anything, which is self-evident from the select itself.
+    const noEligibleUsers = edtTeamCandidates.length === 0;
+    if (hint) hint.classList.toggle("d-none", !noEligibleUsers);
+    addSelect.disabled = noEligibleUsers;
+    if (addBtn) addBtn.disabled = noEligibleUsers;
 }
 
 function setupOrganizationsTab() {
@@ -3077,7 +3113,11 @@ function setupTeamsTab() {
         addMemberBtn.addEventListener("click", async () => {
             const teamId = document.getElementById("edit-team-id").value;
             const userId = document.getElementById("edit-team-add-member-select").value;
-            if (!teamId || !userId) return;
+            if (!teamId) return;
+            if (!userId) {
+                showToast("Select a user to add first.", true);
+                return;
+            }
             try {
                 await fetchJson(`/management/teams/${teamId}/members`, {
                     method: "POST",
