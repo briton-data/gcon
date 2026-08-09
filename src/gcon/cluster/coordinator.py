@@ -571,6 +571,21 @@ class GCONCoordinator:
     def _run_job(self, node, job_id):
         """
         Execute a job in a background thread.
+
+        Every mutation of the shared `job` dict below holds
+        self.jobs_lock. Without it, this method races with
+        recover_jobs() -- a concurrent heartbeat-timeout/disconnect
+        for `node` (a real, observed scenario over a flaky remote
+        connection, not just a theoretical one) can see this job
+        still "running" at the same moment this method is mid-flight
+        waiting on a slow remote execution, reset its status back to
+        "pending" and node_id to None, and reassign it elsewhere --
+        while this method, unaware that happened, goes on to write
+        the *real* completion result a moment later. The net effect
+        used to be a job correctly marked "completed" with a real
+        result, but node_id stuck at whatever the race left it at
+        (typically None) -- right, but with the audit trail silently
+        wrong about which node actually did the work.
         """
 
         job = self.jobs[job_id]
@@ -591,10 +606,11 @@ class GCONCoordinator:
             print(f"[ERROR] _run_job failed for '{job_id}' on "
                   f"'{node.node_id}': {e}")
 
-            cancelled = job.get("cancel_requested", False)
-            job["status"] = "cancelled" if cancelled else "failed"
-            job["completed_at"] = datetime.now(UTC).isoformat()
-            job["result"] = {"status": "error", "message": str(e)}
+            with self.jobs_lock:
+                cancelled = job.get("cancel_requested", False)
+                job["status"] = "cancelled" if cancelled else "failed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                job["result"] = {"status": "error", "message": str(e)}
 
             node.status = "idle"
             self.registry.heartbeat(
@@ -622,8 +638,8 @@ class GCONCoordinator:
         self.registry.heartbeat(
             node.node_id,
             "idle",
-        node.heartbeat()["timestamp"]
-)
+            node.heartbeat()["timestamp"]
+        )
 
         heartbeat = node.heartbeat()
         self.receive_heartbeat(heartbeat)
@@ -631,10 +647,24 @@ class GCONCoordinator:
         resources = node.report_resources()
         self.receive_resource_report(resources)
 
-        if result["status"] == "success":
-            job["status"] = "completed"
-            job["completed_at"] = datetime.now(UTC).isoformat()
+        with self.jobs_lock:
+            # Re-affirm node_id here too (not just at original
+            # dispatch) -- this is the actual node that produced
+            # `result`, and this write happens under the same lock
+            # recover_jobs() uses, so the two can no longer interleave.
+            job["node_id"] = node.node_id
 
+            if result["status"] == "success":
+                job["status"] = "completed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+            else:
+                cancelled = job.get("cancel_requested", False)
+                job["status"] = "cancelled" if cancelled else "failed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+
+            job["result"] = result
+
+        if result["status"] == "success":
             # Generate a real, cryptographically signed receipt for
             # this execution using the coordinator's shared verifier
             # instance (so later verification uses the same key).
@@ -663,13 +693,11 @@ class GCONCoordinator:
                     payload={
                         "job_id": job_id,
                         "node_id": node.node_id,
-        },
-    )
-)
+                    },
+                )
+            )
         else:
             cancelled = job.get("cancel_requested", False)
-            job["status"] = "cancelled" if cancelled else "failed"
-            job["completed_at"] = datetime.now(UTC).isoformat()
             self.event_bus.publish(
                 Event(
                     timestamp=datetime.now(UTC),
@@ -678,10 +706,9 @@ class GCONCoordinator:
                     payload={
                         "job_id": job_id,
                         "node_id": node.node_id,
-        },
-    )
-)           
-        job["result"] = result
+                    },
+                )
+            )
           
     
     def scheduler_loop(self):
