@@ -6,7 +6,7 @@ from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
 
-from .Noderegistry import NodeRegistry
+from .registry import NodeRegistry
 from .scheduler import Scheduler
 from .communication import CommunicationManager
 
@@ -37,7 +37,7 @@ class GCONCoordinator:
         # heartbeat_interval_seconds / heartbeat_miss_threshold config
         # the transport layer uses (env -> control-plane DB ->
         # default), not a value hardcoded independently in
-        # NodeRegistry. Previously NodeRegistry always used a fixed
+        
         # 10s timeout regardless of this config, so operators raising
         # the heartbeat interval (e.g. to reduce load when scaling to
         # hundreds of nodes) got mass false "offline" flips as soon as
