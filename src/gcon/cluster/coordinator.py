@@ -37,7 +37,7 @@ class GCONCoordinator:
         # heartbeat_interval_seconds / heartbeat_miss_threshold config
         # the transport layer uses (env -> control-plane DB ->
         # default), not a value hardcoded independently in
-        
+        # NodeRegistry. Previously NodeRegistry always used a fixed
         # 10s timeout regardless of this config, so operators raising
         # the heartbeat interval (e.g. to reduce load when scaling to
         # hundreds of nodes) got mass false "offline" flips as soon as
@@ -973,6 +973,39 @@ class GCONCoordinator:
         ))
         print(f"[QUEUE] Retrying {len(retried)} failed job(s).")
         return retried
+
+    def retry_job(self, job_id):
+        """
+        Re-queue a single job for another attempt. Unlike
+        retry_failed_jobs (which only ever targets "failed" jobs),
+        this also accepts a "pending" job that never got picked up by
+        a worker -- the same node-unassigned symptom, just without an
+        error attached -- since a stuck-pending job needs the exact
+        same reset (clear any stale node/attempt state, push it back
+        onto the queue) to get another real dispatch attempt rather
+        than sitting wherever it already was in the queue ordering.
+        """
+        with self.jobs_lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise ValueError(f"Job '{job_id}' does not exist.")
+            if job["status"] not in ("failed", "pending"):
+                raise ValueError(
+                    f"Job '{job_id}' has status '{job['status']}'; only "
+                    "'failed' or 'pending' jobs can be retried."
+                )
+            job["status"] = "pending"
+            job["node_id"] = None
+            job["completed_at"] = None
+            job.pop("cancel_requested", None)
+            self.queue_job(job_id)
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="JOB_RETRIED",
+            source="Coordinator", payload={"job_id": job_id},
+        ))
+        print(f"[QUEUE] Retrying job '{job_id}'.")
+        return job_id
 
     def clear_completed_jobs(self):
         """
