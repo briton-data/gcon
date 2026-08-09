@@ -249,6 +249,13 @@ class WebServer:
         def jobs_retry_failed(user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.retry_failed_jobs()
 
+        @self.app.post("/jobs/{job_id}/retry")
+        def job_retry(job_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.retry_job(job_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         @self.app.post("/jobs/clear-failed")
         def jobs_clear_failed(user=Depends(self.require_permission("Manage cluster"))):
             return self.presentation.clear_failed_jobs()
