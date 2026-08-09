@@ -9,3 +9,16 @@ htmlcov/
 logs/
 storage/node-*/
 *.log
+
+# Generated build metadata
+*.egg-info/
+
+# TLS/mTLS certs and keys (regenerate with scripts/generate_dev_certs.py)
+certs/*.pem
+certs/*.key
+certs/*.crt
+
+# Local SQLite databases
+data/*.db
+data/*.db-shm
+data/*.db-wal
