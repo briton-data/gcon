@@ -163,16 +163,28 @@ class GCONAgent:
             # Determine if it's a file or command
             if os.path.isfile(job_script) and job_script.endswith('.py'):
                 command = [sys.executable, job_script]
+                use_shell = False
             else:
-                command = shlex.split(job_script)
-            logger.info(f"Executing command: {' '.join(command)}")
+                # JobSubmitRequest.command is documented as "Shell
+                # command the job will run" -- shlex.split() here
+                # would silently strip that meaning: subprocess would
+                # exec the first token as a literal program name with
+                # the rest as its argv, so shell operators like ||,
+                # &&, |, or ; are never interpreted, just passed
+                # through as inert extra arguments. Run the raw
+                # string through a real shell instead, so a job can
+                # actually use the shell syntax the API promises.
+                command = job_script
+                use_shell = True
+            logger.info(f"Executing command: {command if use_shell else ' '.join(command)}")
             
             # Execute the job
             self.process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                shell=use_shell,
             )
             
             # Monitor execution
