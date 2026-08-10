@@ -11,6 +11,7 @@ import threading
 import time
 import os
 import sys
+import signal
 import subprocess
 import psutil
 import logging
@@ -82,7 +83,7 @@ class GCONAgent:
                     "gpu_id": gpu.id,
                     "gpu_name": gpu.name,
                     "memory_total": gpu.memoryTotal,
-                    "memory_available": gpu.memoryAvailable,
+                    "memory_available": gpu.memoryFree,
                     "memory_used": gpu.memoryUsed,
                     "load": gpu.load,
                     "temperature": gpu.temperature
@@ -137,9 +138,37 @@ class GCONAgent:
         """
         Terminate the currently running job's process, if any.
         Returns True if a live process was actually killed.
+
+        Two real bugs fixed here, found by the stress suite
+        (test_cancel_job_kills_process_and_frees_node):
+
+        1. self.process.kill() only killed the shell wrapper when the
+           job used shell syntax (verified: shell exits, the actual
+           command it ran keeps going as an orphan) -- now kills the
+           whole process group instead, via the session started in
+           execute_job().
+        2. cancel() could be called in the brief window after a job
+           is marked "running" but before its background thread has
+           actually reached subprocess.Popen() yet, and would then
+           silently report nothing was killed even though a process
+           was about to start. A short bounded wait closes that gap.
         """
+        deadline = time.time() + 2.0
+        while self.process is None and time.time() < deadline:
+            time.sleep(0.02)
+
         if self.process is not None and self.process.poll() is None:
-            self.process.kill()
+            pid = self.process.pid
+            try:
+                if os.name == "posix":
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                else:
+                    self.process.kill()
+            except (ProcessLookupError, PermissionError):
+                # Already exited between the poll() check and the
+                # kill, or the group is gone -- either way there's
+                # nothing left to kill, not a real failure.
+                return False
             return True
         return False
 
@@ -185,6 +214,14 @@ class GCONAgent:
                 stderr=subprocess.PIPE,
                 text=True,
                 shell=use_shell,
+                # With shell=True, self.process IS /bin/sh, not the
+                # real command -- killing just that PID leaves
+                # whatever the shell spawned running as an orphan
+                # (verified: shell exits, grandchild keeps running).
+                # start_new_session puts the whole tree in its own
+                # process group so cancel() can kill all of it at
+                # once via os.killpg, not just the shell wrapper.
+                start_new_session=(os.name == "posix"),
             )
             
             # Monitor execution
