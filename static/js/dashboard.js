@@ -550,13 +550,20 @@ function bindJobActionButtons() {
 }
 
 
+let jobsPageLimit = 50; // grows by 50 each "Load more" click, resets on filter change
+
 async function loadJobs() {
 
     const body = document.getElementById("jobs-body");
+    const statusFilter = document.getElementById("jobs-status-filter");
+    const status = statusFilter ? statusFilter.value : "";
 
     try {
 
-        const jobs = await fetchJson("/jobs");
+        const qs = new URLSearchParams();
+        if (status) qs.set("status", status);
+        qs.set("limit", jobsPageLimit);
+        const jobs = await fetchJson(`/jobs?${qs.toString()}`);
 
         if (!body) {
             return jobs;
@@ -565,7 +572,7 @@ async function loadJobs() {
         if (jobs.length === 0) {
 
             body.innerHTML =
-                `<tr><td colspan="7" class="text-center text-secondary">No jobs submitted.</td></tr>`;
+                `<tr><td colspan="7" class="text-center text-secondary">No jobs${status ? ` with status "${escapeHtml(status)}"` : ""}.</td></tr>`;
 
         } else {
 
@@ -591,6 +598,14 @@ async function loadJobs() {
 
             bindJobActionButtons();
 
+        }
+
+        // Fewer rows than we asked for means we've reached the end;
+        // hide "Load more" instead of offering a click that changes
+        // nothing (and would otherwise look broken).
+        const loadMoreBtn = document.getElementById("jobs-load-more-btn");
+        if (loadMoreBtn) {
+            loadMoreBtn.style.display = jobs.length < jobsPageLimit ? "none" : "inline-block";
         }
 
         return jobs;
@@ -2267,6 +2282,22 @@ function updateClock() {
 function setupControls() {
     const refreshBtn = document.getElementById("refresh-now-btn");
     if (refreshBtn) refreshBtn.addEventListener("click", refreshDashboard);
+
+    const jobsStatusFilter = document.getElementById("jobs-status-filter");
+    if (jobsStatusFilter) {
+        jobsStatusFilter.addEventListener("change", () => {
+            jobsPageLimit = 50; // reset paging when the filter changes
+            loadJobs();
+        });
+    }
+
+    const jobsLoadMoreBtn = document.getElementById("jobs-load-more-btn");
+    if (jobsLoadMoreBtn) {
+        jobsLoadMoreBtn.addEventListener("click", () => {
+            jobsPageLimit += 50;
+            loadJobs();
+        });
+    }
 
     const pauseBtn = document.getElementById("pause-btn");
     if (pauseBtn) {

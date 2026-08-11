@@ -134,8 +134,12 @@ class WebServer:
             return self.presentation.get_nodes()
         
         @self.app.get("/jobs")
-        def jobs(user=Depends(self.current_user)):
-            return self.presentation.get_jobs()
+        def jobs(
+            status: str | None = None,
+            limit: int | None = None,
+            user=Depends(self.current_user),
+        ):
+            return self.presentation.get_jobs(status=status, limit=limit)
 
         @self.app.get("/jobs/{job_id}")
         def job_detail(job_id: str, user=Depends(self.current_user)):

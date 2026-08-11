@@ -1,6 +1,12 @@
 # GCON API Reference
 
-Complete guide to the GCON REST API, Python SDK, and verification library.
+Complete guide to the GCON Public API (`/api/v1`) and the `gcon_sdk` Python client.
+
+This document was rebuilt by reading the live source — `src/gcon/api/api_v1.py`
+(the FastAPI app that defines every route) and `sdk/gcon_sdk/client.py` (the
+SDK that wraps it) — not from assumptions about what the API "should" have.
+If this ever disagrees with what you see running, trust the code and the
+interactive docs at `/api/v1/docs` over this file.
 
 ---
 
@@ -10,9 +16,9 @@ Complete guide to the GCON REST API, Python SDK, and verification library.
 2. [Authentication](#authentication)
 3. [Endpoints](#endpoints)
 4. [Python SDK](#python-sdk)
-5. [Verification API](#verification-api)
+5. [Verification](#verification)
 6. [Error Handling](#error-handling)
-7. [Rate Limiting & Quotas](#rate-limiting--quotas)
+7. [Interactive Docs](#interactive-docs)
 
 ---
 
@@ -23,509 +29,318 @@ Complete guide to the GCON REST API, Python SDK, and verification library.
 http://localhost:8000/api/v1
 ```
 
-**Protocol:** HTTP/REST
+**Protocol:** HTTP/REST, JSON request and response bodies.
 
-**Response Format:** JSON
+**API Version:** v1 (`FastAPI` app mounted at `/api/v1` by the dashboard's
+`web_server.py`, defined in `src/gcon/api/api_v1.py`).
 
-**API Version:** v1
+The public API is intentionally separate from the dashboard's own
+cookie-session routes (`/management/...`, `/dashboard/...`): every request
+here is authenticated with a real API key, never a browser session. Both
+the public API and the dashboard read from the same shared
+`PresentationLayer`/`Coordinator` instances, so they always report the same
+live state — there is no mock or placeholder data.
+
+There is no `/events` or `/stream` endpoint on `/api/v1` in the current
+build. Live push updates are served to the dashboard UI itself over a
+WebSocket at `/ws` (cookie-authenticated), not through the public API.
 
 ---
 
 ## Authentication
 
-### Development (Local)
+Every route in `api_v1.py` is protected by an API key, checked by
+`require_scope()`. Send the key as **either**:
 
 ```bash
-# No authentication required for local development
-# All API calls work without credentials
-curl http://localhost:8000/api/v1/cluster
-```
-
-### Production (Future)
-
-```bash
-# Bearer token (JWT)
 curl -H "Authorization: Bearer gcon_YOUR_API_KEY" \
-  http://api.gcon.io/api/v1/cluster
+  http://localhost:8000/api/v1/cluster
+
+# or
+
+curl -H "X-API-Key: gcon_YOUR_API_KEY" \
+  http://localhost:8000/api/v1/cluster
 ```
 
-**Getting an API Key:**
-1. Log in to the dashboard
-2. Go to Management → API Keys → Create Key
-3. Choose scopes:
-   - `Read` (monitoring, read-only)
-   - `Submit` (submit/cancel jobs)
-   - `Admin` (scale, deregister agents)
-4. Copy the secret (shown only once)
+There is no unauthenticated/dev mode — a request with no key returns
+`401` with `"Missing API key. Send it as 'Authorization: Bearer <key>' or
+'X-API-Key: <key>'."`.
+
+### Getting an API key
+
+1. Log in to the dashboard.
+2. Go to **Management → API Keys → Create Key**.
+3. Choose scopes. Scopes are free-form strings (`APIKeyManager.create_key`
+   accepts any list), but only two values are actually enforced by the
+   public API today:
+   - `View monitoring` — required by every `GET` endpoint below
+   - `Submit workflows` — required by every job/workflow write endpoint
+   - A key created without an explicit scope list defaults to both:
+     `["Submit workflows", "View monitoring"]`.
+4. Copy the secret — it's shown only once.
+
+An invalid, unknown, expired, or revoked key returns `401` with a
+deliberately generic `"Invalid or expired API key."` (so a failed request
+can't be used to enumerate valid keys). A key missing the required scope
+returns `401` with `"This API key does not have the '<scope>' scope."`.
 
 ---
 
 ## Endpoints
 
-### Cluster Information
+Every route below is defined in `src/gcon/api/api_v1.py`. "Scope" is the
+value passed to `require_scope(...)` for that route.
+
+### Cluster
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/cluster` | `View monitoring` | Current cluster state |
+| `GET` | `/health` | `View monitoring` | Overall cluster health |
+| `GET` | `/metrics` | `View monitoring` | Aggregate node/job metrics |
 
 #### `GET /cluster`
 
-Get overall cluster state.
-
-**Response:**
 ```json
 {
-  "status": "healthy",
-  "coordinator_online": true,
   "total_nodes": 4,
   "idle_nodes": 2,
-  "busy_nodes": 2,
-  "offline_nodes": 0,
-  "total_capacity": 16,
-  "available_capacity": 8,
-  "queued_jobs": 0,
-  "running_jobs": 4,
-  "completed_jobs": 127,
+  "registered_node_count": 4,
+  "running_jobs": 1,
+  "completed_jobs": 126,
   "failed_jobs": 3
 }
 ```
+The response model (`ClusterStateOut`) allows extra fields, and the
+coordinator's raw payload also includes `registered_nodes` (the full
+per-node list) alongside the counts above.
+
+#### `GET /health`
+
+```json
+{
+  "state": "healthy",
+  "score": 98,
+  "reason": "All checks passing",
+  "reasons": [],
+  "computed_at": "2026-08-10T09:00:00+00:00",
+  "checks": { "coordinator": {"healthy": true}, "storage": {"healthy": true} },
+  "services": {
+    "coordinator": "online",
+    "cluster": "healthy",
+    "event_system": "running",
+    "storage": "connected"
+  },
+  "last_issue": null,
+  "metrics": {
+    "total_nodes": 4,
+    "running_jobs": 1,
+    "completed_jobs": 126,
+    "failed_jobs": 3
+  }
+}
+```
+
+#### `GET /metrics`
+
+```json
+{
+  "avg_cpu": 12.4,
+  "avg_memory": 34.1,
+  "running_jobs": 1,
+  "completed_jobs": 126,
+  "failed_jobs": 3,
+  "event_count": 512,
+  "uptime_seconds": 7340
+}
+```
+
+---
+
+### Nodes
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/nodes` | `View monitoring` | List all registered nodes |
+| `GET` | `/nodes/{node_id}` | `View monitoring` | Get one node |
+
+```json
+{
+  "node_id": "worker-01",
+  "status": "idle",
+  "cpu": 5.2,
+  "memory": 12.4,
+  "running_jobs": 0,
+  "last_seen": "2026-08-10T09:00:00+00:00",
+  "draining": false
+}
+```
+`cpu`/`memory` come back as the string `"N/A"` instead of a number until
+the node has reported a reading. `GET /nodes/{node_id}` returns `404` if
+the node isn't currently registered.
 
 ---
 
 ### Jobs
 
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/jobs` | `View monitoring` | List all jobs |
+| `GET` | `/jobs/{job_id}` | `View monitoring` | Get one job |
+| `POST` | `/jobs` | `Submit workflows` | Submit a new job |
+| `POST` | `/jobs/{job_id}/cancel` | `Submit workflows` | Cancel a running job |
+
+There is **no** `DELETE /jobs/{job_id}` — cancellation is a `POST` to a
+`/cancel` sub-path, not a `DELETE` on the job resource.
+
 #### `POST /jobs`
 
-Submit a new job.
-
 **Request:**
 ```json
 {
   "job_id": "my-job-001",
   "command": "python train.py --epochs 10",
-  "timeout_seconds": 300,
-  "tags": ["training", "v1"]
+  "artifacts": ["model.pkl"]
 }
 ```
-
-**Response (201 Created):**
-```json
-{
-  "job_id": "my-job-001",
-  "status": "pending",
-  "command": "python train.py --epochs 10",
-  "created_at": "2026-07-20T13:31:23Z",
-  "assigned_agent": null,
-  "started_at": null,
-  "completed_at": null
-}
-```
-
-**Errors:**
-- `400 Bad Request` — Missing required fields or invalid job_id
-- `409 Conflict` — Job with this ID already exists
-- `503 Service Unavailable` — Coordinator not ready
-
----
-
-#### `GET /jobs`
-
-List all jobs (optionally filtered).
-
-**Query Parameters:**
-- `status` (optional): `pending`, `running`, `completed`, `failed`
-- `limit` (default: 100)
-- `offset` (default: 0)
-
-**Request:**
-```bash
-GET /jobs?status=running&limit=50
-```
+`artifacts` is optional — a plain list of file paths to register, not a
+separate upload step. There is no `timeout_seconds` or `tags` field on
+this endpoint.
 
 **Response:**
 ```json
-{
-  "total": 127,
-  "limit": 50,
-  "offset": 0,
-  "jobs": [
-    {
-      "job_id": "my-job-001",
-      "status": "completed",
-      "command": "python train.py",
-      "created_at": "2026-07-20T13:31:23Z",
-      "started_at": "2026-07-20T13:31:25Z",
-      "completed_at": "2026-07-20T13:35:50Z",
-      "assigned_agent": "gpu-1",
-      "exit_code": 0,
-      "artifacts_count": 3
-    }
-  ]
-}
+{ "job_id": "my-job-001", "submitted": true }
 ```
 
----
+**Errors:** `400` if the job can't be submitted (e.g. duplicate
+`job_id` — the coordinator raises `ValueError`, which becomes `400`, not
+`409`). `401` for a missing/invalid/under-scoped key.
 
-#### `GET /jobs/{job_id}`
+#### `GET /jobs` / `GET /jobs/{job_id}`
 
-Get a specific job.
-
-**Response:**
 ```json
 {
   "job_id": "my-job-001",
   "status": "completed",
-  "command": "python train.py",
-  "created_at": "2026-07-20T13:31:23Z",
-  "started_at": "2026-07-20T13:31:25Z",
-  "completed_at": "2026-07-20T13:35:50Z",
-  "assigned_agent": "gpu-1",
-  "exit_code": 0,
-  "artifacts": [
-    { "path": "model.pkl", "size_bytes": 524288, "hash": "sha256:abc..." },
-    { "path": "metrics.json", "size_bytes": 1024, "hash": "sha256:def..." }
-  ]
+  "node_id": "worker-01",
+  "created_at": "2026-08-10T09:00:00+00:00",
+  "completed_at": "2026-08-10T09:00:04+00:00",
+  "receipt_id": "a1b2c3d4e5f6...",
+  "artifacts": 1,
+  "created_by": "user_abc123",
+  "workflow_id": null
 }
 ```
+`GET /jobs` returns a plain JSON array (not wrapped in `{"jobs": [...],
+"total": ...}`) — there's no pagination (`limit`/`offset`) or `status`
+query filter on this endpoint. `artifacts` here is a **count**, not a list
+of artifact objects; fetch `/artifacts` separately for file details.
+`GET /jobs/{job_id}` returns `404` if the job doesn't exist.
 
-**Errors:**
-- `404 Not Found` — Job does not exist
+#### `POST /jobs/{job_id}/cancel`
 
----
-
-#### `DELETE /jobs/{job_id}`
-
-Cancel a running job.
-
-**Response (200 OK):**
 ```json
-{
-  "job_id": "my-job-001",
-  "status": "cancelled",
-  "cancelled_at": "2026-07-20T13:40:00Z"
-}
+{ "job_id": "my-job-001", "cancelled": true, "process_killed": false }
 ```
-
-**Errors:**
-- `404 Not Found` — Job does not exist
-- `400 Bad Request` — Job is already completed/failed (can't cancel)
+**Errors:** `400` if the job can't be cancelled (already finished, etc.).
 
 ---
 
 ### Workflows
 
-#### `POST /workflows`
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `POST` | `/workflows` | `Submit workflows` | Submit a workflow (DAG of jobs) |
+| `GET` | `/workflows` | `View monitoring` | List all workflows |
 
-Submit a multi-step workflow (DAG of tasks).
+There is no `GET /workflows/{workflow_id}` detail route on the public API
+today — only the list endpoint.
+
+#### `POST /workflows`
 
 **Request:**
 ```json
 {
   "workflow_id": "training-pipeline-v1",
-  "tasks": [
-    {
-      "task_id": "download",
-      "command": "python download_data.py",
-      "depends_on": []
-    },
-    {
-      "task_id": "preprocess",
-      "command": "python preprocess.py",
-      "depends_on": ["download"]
-    },
-    {
-      "task_id": "train",
-      "command": "python train.py",
-      "depends_on": ["preprocess"]
-    },
-    {
-      "task_id": "evaluate",
-      "command": "python evaluate.py",
-      "depends_on": ["train"]
-    }
+  "name": "Training pipeline",
+  "jobs": [
+    { "job_id": "download", "command": "python download_data.py", "depends_on": [] },
+    { "job_id": "train", "command": "python train.py", "depends_on": ["download"] }
   ]
 }
 ```
+Note the field is `jobs` (each with `job_id` / `command` / `depends_on`),
+not `tasks` / `task_id`.
 
-**Response (201 Created):**
+**Response:**
 ```json
-{
-  "workflow_id": "training-pipeline-v1",
-  "status": "running",
-  "created_at": "2026-07-20T13:31:23Z",
-  "tasks": [
-    {
-      "task_id": "download",
-      "status": "running",
-      "depends_on": [],
-      "job_id": "training-pipeline-v1/download"
-    }
-  ]
-}
+{ "workflow_id": "training-pipeline-v1", "status": "pending", "submitted": true }
 ```
-
-**Errors:**
-- `400 Bad Request` — Invalid DAG (cycle detected, orphaned task, missing dependency)
-- `409 Conflict` — Workflow with this ID already exists
-
----
+**Errors:** `400` for an invalid DAG (cycle, unknown dependency, etc.).
 
 #### `GET /workflows`
 
-List all workflows.
-
-**Query Parameters:**
-- `status` (optional): `pending`, `running`, `completed`, `failed`
-- `limit` (default: 100)
-
-**Response:**
-```json
-{
-  "total": 23,
-  "workflows": [
-    {
-      "workflow_id": "training-pipeline-v1",
-      "status": "completed",
-      "created_at": "2026-07-20T13:31:23Z",
-      "completed_at": "2026-07-20T13:50:00Z",
-      "task_count": 4,
-      "completed_tasks": 4
-    }
-  ]
-}
-```
+Returns a plain array of workflow state summaries (`workflow_id`,
+`status`, plus whatever else `WorkflowState.summary()` includes — the
+schema allows extra fields).
 
 ---
 
-#### `GET /workflows/{workflow_id}`
+### Receipts & Artifacts
 
-Get workflow details and task status.
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/receipts` | `View monitoring` | List all job receipts |
+| `GET` | `/artifacts` | `View monitoring` | List all registered artifacts |
 
-**Response:**
-```json
-{
-  "workflow_id": "training-pipeline-v1",
-  "status": "completed",
-  "created_at": "2026-07-20T13:31:23Z",
-  "completed_at": "2026-07-20T13:50:00Z",
-  "tasks": [
-    {
-      "task_id": "download",
-      "status": "completed",
-      "job_id": "training-pipeline-v1/download",
-      "depends_on": [],
-      "started_at": "2026-07-20T13:31:25Z",
-      "completed_at": "2026-07-20T13:32:50Z",
-      "exit_code": 0
-    }
-  ]
-}
-```
-
----
-
-### Receipts (Execution Proofs)
+There is no `/receipts/{receipt_id}` or `/receipts/{receipt_id}/verify`
+route on the public API — receipt verification is done directly against
+the signed proof (see [Verification](#verification)), not as a server
+round-trip.
 
 #### `GET /receipts`
 
-List all receipts.
-
-**Query Parameters:**
-- `agent_id` (optional): Filter by agent
-- `limit` (default: 100)
-
-**Response:**
 ```json
-{
-  "total": 127,
-  "receipts": [
-    {
-      "receipt_id": "receipt-001",
-      "job_id": "my-job-001",
-      "agent_id": "gpu-1",
-      "status": "completed",
-      "timestamp": "2026-07-20T13:35:50Z",
-      "exit_code": 0,
-      "signature_valid": true
-    }
-  ]
-}
+[
+  {
+    "receipt_id": "a1b2c3d4e5f6...",
+    "job_id": "my-job-001",
+    "status": "completed",
+    "created_at": "2026-08-10T09:00:04+00:00"
+  }
+]
+```
+
+#### `GET /artifacts`
+
+```json
+[
+  {
+    "artifact_id": "art_001",
+    "filename": "model.pkl",
+    "sha256": "9f86d081884c7d65...",
+    "size": 524288,
+    "uploaded_at": "2026-08-10T09:00:04+00:00"
+  }
+]
 ```
 
 ---
 
-#### `GET /receipts/{receipt_id}`
+### Auth
 
-Get a specific receipt (the signed proof).
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/whoami` | *(any valid key)* | Identify the calling API key |
 
-**Response:**
 ```json
 {
-  "receipt_id": "receipt-001",
-  "job_id": "my-job-001",
-  "agent_id": "gpu-1",
-  "command": "python train.py",
-  "status": "completed",
-  "exit_code": 0,
-  "timestamp": "2026-07-20T13:35:50Z",
-  "stdout": "Epoch 1: loss=0.523\nEpoch 2: loss=0.412\n...",
-  "stderr": "",
-  "artifacts": [
-    {
-      "path": "model.pkl",
-      "size_bytes": 524288,
-      "hash": "sha256:abc123..."
-    }
-  ],
-  "signature": "-----BEGIN RSA SIGNATURE-----\nMIGEAoGBAJR8...\n-----END RSA SIGNATURE-----",
-  "public_key": "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCS...\n-----END PUBLIC KEY-----"
+  "key_id": "key_abc123",
+  "key_name": "CI pipeline",
+  "scopes": ["Submit workflows", "View monitoring"],
+  "owner_user_id": "user_abc123",
+  "owner_name": "Jane Doe"
 }
-```
-
----
-
-#### `POST /receipts/{receipt_id}/verify`
-
-Verify a receipt offline (check signature, timestamp).
-
-**Request:**
-```json
-{
-  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
-}
-```
-
-**Response:**
-```json
-{
-  "receipt_id": "receipt-001",
-  "valid": true,
-  "signature_valid": true,
-  "timestamp_valid": true,
-  "checks": [
-    { "check": "signature", "passed": true },
-    { "check": "timestamp_recent", "passed": true },
-    { "check": "job_id_binding", "passed": true },
-    { "check": "agent_id_binding", "passed": true }
-  ]
-}
-```
-
-**Errors:**
-- `400 Bad Request` — Public key format invalid
-- `404 Not Found` — Receipt not found
-
----
-
-### Nodes (Agents)
-
-#### `GET /nodes`
-
-List all agents in the cluster.
-
-**Response:**
-```json
-{
-  "total": 4,
-  "nodes": [
-    {
-      "agent_id": "gpu-1",
-      "hostname": "worker-1.gcon.internal",
-      "status": "idle",
-      "capacity": 4,
-      "running_jobs": 0,
-      "completed_jobs": 42,
-      "failed_jobs": 1,
-      "last_heartbeat": "2026-07-20T13:40:05Z",
-      "cpu_percent": 5.2,
-      "memory_percent": 12.4
-    }
-  ]
-}
-```
-
----
-
-#### `GET /nodes/{agent_id}`
-
-Get details for a specific agent.
-
-**Response:**
-```json
-{
-  "agent_id": "gpu-1",
-  "hostname": "worker-1.gcon.internal",
-  "status": "idle",
-  "capacity": 4,
-  "running_jobs": 0,
-  "completed_jobs": 42,
-  "failed_jobs": 1,
-  "last_heartbeat": "2026-07-20T13:40:05Z",
-  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
-  "registered_at": "2026-07-20T10:00:00Z"
-}
-```
-
----
-
-#### `DELETE /nodes/{agent_id}`
-
-Deregister an agent (graceful shutdown, no new jobs assigned).
-
-**Response (200 OK):**
-```json
-{
-  "agent_id": "gpu-1",
-  "status": "deregistering",
-  "deregistered_at": "2026-07-20T13:40:10Z"
-}
-```
-
-**Errors:**
-- `404 Not Found` — Agent not found
-- `400 Bad Request` — Agent already deregistered
-
----
-
-### Events (Live Updates)
-
-#### `GET /events`
-
-Poll for recent events.
-
-**Query Parameters:**
-- `limit` (default: 50)
-- `since` (optional): ISO 8601 timestamp
-
-**Response:**
-```json
-{
-  "events": [
-    {
-      "event_id": "evt-001",
-      "type": "job.submitted",
-      "timestamp": "2026-07-20T13:31:23Z",
-      "job_id": "my-job-001",
-      "details": {
-        "command": "python train.py"
-      }
-    }
-  ]
-}
-```
-
----
-
-#### `GET /stream`
-
-Server-Sent Events for real-time updates (low-latency dashboard).
-
-**Request:**
-```bash
-curl -H "Accept: text/event-stream" http://localhost:8000/api/v1/stream
-```
-
-**Response Stream:**
-```
-data: {"type":"job.submitted","job_id":"my-job-001","timestamp":"2026-07-20T13:31:23Z"}
-
-data: {"type":"job.assigned","job_id":"my-job-001","agent_id":"gpu-1","timestamp":"2026-07-20T13:31:25Z"}
 ```
 
 ---
@@ -535,120 +350,134 @@ data: {"type":"job.assigned","job_id":"my-job-001","agent_id":"gpu-1","timestamp
 ### Installation
 
 ```bash
-pip install gcon-sdk
-# or, from the repo:
 cd sdk && pip install -e .
+# or just copy gcon_sdk/ into your project — its only dependency is `requests`
 ```
 
-### Basic Usage
+### Basic usage
 
 ```python
 from gcon_sdk import GconClient
 
-client = GconClient(api_key="gcon_dev", base_url="http://localhost:8000")
+client = GconClient(api_key="gcon_...", base_url="http://localhost:8000")
 
 # Cluster info
 print(client.get_cluster())
+print(client.get_health())
 print(client.list_nodes())
+print(client.get_node("worker-01"))
 
-# Submit a job
+# Jobs
 client.submit_job("job-001", "echo hello")
 job = client.get_job("job-001")
-
-# Cancel a job
+jobs = client.list_jobs()
 client.cancel_job("job-001")
 
-# List jobs
-jobs = client.list_jobs(status="completed", limit=50)
+# Workflows / receipts / artifacts
+print(client.list_workflows())
+print(client.list_receipts())
+print(client.list_artifacts())
 
-# Workflows
-workflow = {
-    "workflow_id": "pipeline-v1",
-    "tasks": [
-        {"task_id": "step-1", "command": "python a.py", "depends_on": []},
-        {"task_id": "step-2", "command": "python b.py", "depends_on": ["step-1"]}
-    ]
-}
-client.submit_workflow(workflow)
-
-# Receipts
-receipts = client.list_receipts()
-receipt = client.get_receipt("receipt-001")
-
-# Verify receipt
-is_valid = client.verify_receipt(receipt)
-print(f"Valid: {is_valid}")
+# Who am I
+print(client.whoami())
 ```
 
-### Error Handling
+> **Note:** `GconClient` (`sdk/gcon_sdk/client.py`) currently exposes
+> `whoami`, `get_cluster`, `get_health`, `get_metrics`, `list_nodes`,
+> `get_node`, `list_jobs`, `get_job`, `submit_job`, `cancel_job`,
+> `list_workflows`, `list_receipts`, and `list_artifacts`. It does **not**
+> have a `submit_workflow`, `get_receipt`, or `verify_receipt` wrapper
+> yet — call `POST /workflows` directly (e.g. with `requests`) until the
+> SDK grows a helper for it.
+
+Use it as a context manager to close the underlying session:
+
+```python
+with GconClient(api_key="gcon_...") as client:
+    print(client.list_jobs())
+```
+
+### Error handling
+
+All non-2xx responses raise `gcon_sdk.GconAPIError`, carrying
+`.status_code` and `.detail`:
 
 ```python
 from gcon_sdk import GconClient, GconAPIError
 
-client = GconClient(api_key="gcon_dev")
-
+client = GconClient(api_key="gcon_...")
 try:
     client.submit_job("dup-id", "echo hi")
-    client.submit_job("dup-id", "echo hi")  # Duplicate
+    client.submit_job("dup-id", "echo hi")  # duplicate job_id
 except GconAPIError as e:
-    print(f"Error {e.status_code}: {e.detail}")
+    print(e.status_code, e.detail)  # 400 "Job 'dup-id' already exists."
 ```
 
 ---
 
-## Verification API
+## Verification
 
-### Standalone Verification (No Coordinator)
+There is no server-side `/receipts/{id}/verify` endpoint. Receipts are
+checked against their signed proof directly. The coordinator itself
+recomputes `verified` live via `ExecutionVerifier.validate_proof()` on
+every call to `get_receipts()` (so the dashboard and `GET /receipts` can
+never show a stale flag). Standalone, without a running coordinator:
 
 ```python
-from gcon.verification import ReceiptVerifier
-import json
+from gcon.execution.run_job import JobRunner
 
-receipt = json.load(open("receipt.json"))
-verifier = ReceiptVerifier()
-is_valid = verifier.verify(receipt)
-
-if is_valid:
-    print(f"Receipt is valid")
-    print(f"  Job: {receipt['job_id']}")
-    print(f"  Agent: {receipt['agent_id']}")
-else:
-    print(f"Receipt failed verification")
+runner = JobRunner()
+receipt = runner.get_job_receipt("a1b2c3d4e5f6...")
+print(runner.print_receipt(receipt["receipt_id"], format="summary"))
 ```
+
+Note there are two related but distinct verification paths in the
+codebase — `gcon.execution.verifier.ExecutionVerifier` for locally-run,
+single-agent job receipts (`JobRunner`), and the coordinator's own
+verifier in `gcon.cluster.coordinator` for HMAC-signed, cluster-issued
+receipts. Don't assume one substitutes for the other.
 
 ---
 
 ## Error Handling
 
-### HTTP Status Codes
+### HTTP status codes actually used by `/api/v1`
 
-| Code | Meaning |
-|------|----------|
-| `200 OK` | Request succeeded |
-| `201 Created` | Resource created |
-| `400 Bad Request` | Invalid input |
-| `404 Not Found` | Resource not found |
-| `409 Conflict` | Resource already exists |
-| `500 Internal Server Error` | Server error |
-| `503 Service Unavailable` | Service down |
+| Code | Meaning | Where it comes from |
+|------|----------|---|
+| `200 OK` | Request succeeded | all `GET`s and successful `POST`s |
+| `400 Bad Request` | Invalid input / `ValueError` from the coordinator (duplicate job/workflow id, bad DAG, job not cancellable, etc.) | `submit_job`, `cancel_job`, `submit_workflow` |
+| `401 Unauthorized` | Missing, invalid, expired, or under-scoped API key | `require_scope()` |
+| `404 Not Found` | Node or job id doesn't exist | `get_node`, `get_job` |
+| `422 Unprocessable Entity` | Request body fails Pydantic validation | FastAPI's default, before your handler runs |
 
-### Error Response Format
+There is currently no `201 Created`, `409 Conflict`, or `503 Service
+Unavailable` in this router — duplicate-id and "not ready" conditions both
+surface as `400`.
+
+### Error response format
+
+FastAPI's default shape, produced by every `HTTPException` in this router:
 
 ```json
-{
-  "error": "ConflictError",
-  "detail": "Job 'my-job' already exists.",
-  "status_code": 409,
-  "request_id": "req-123456"
-}
+{ "detail": "Job 'my-job' already exists." }
 ```
+
+There is no `error`, `status_code`, or `request_id` field in the body —
+the status code lives only in the HTTP response line.
 
 ---
 
-## Interactive API Docs
+## Interactive Docs
 
-Once the dashboard is running, access interactive Swagger UI:
+Once the server is running:
 
 ```
-http://localhost:8000/api/v1/docs
+http://localhost:8000/api/v1/docs          # Swagger UI
+http://localhost:8000/api/v1/redoc         # ReDoc
+http://localhost:8000/api/v1/openapi.json  # raw schema
 ```
+
+These are generated straight from `api_v1.py`'s route/model definitions,
+so they're the fastest way to confirm this document against whatever
+version of GCON you're actually running.

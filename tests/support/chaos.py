@@ -21,6 +21,7 @@ from datetime import datetime, UTC
 from typing import Callable, Dict, List, Optional
 
 from .test_utils import get_logger
+from .pyexe import PY
 
 logger = get_logger("chaos", log_file="logs/chaos.log")
 
@@ -173,7 +174,7 @@ class ChaosMonkey:
                          detail="select_node will raise TypeError on next call")
 
     def flood_job_queue(self, count: int = 10_000,
-                         command: str = "python3 -c \"pass\"") -> None:
+                         command: str = None) -> None:
         """
         Submits `count` trivial jobs as fast as possible with no
         artifacts, to exercise queue-saturation behavior
@@ -181,6 +182,8 @@ class ChaosMonkey:
         (2.2) under sustained submission pressure.
         """
         from .test_utils import unique_id
+        if command is None:
+            command = f'{PY} -c "pass"'
         for _ in range(count):
             job_id = unique_id("chaos-flood")
             try:

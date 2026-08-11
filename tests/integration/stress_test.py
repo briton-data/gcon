@@ -99,6 +99,18 @@ PROJECT_ROOT = os.environ.get(
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# pyproject.toml declares a src/ layout ([tool.setuptools.package-dir]
+# "" = "src"), so the actual gcon package lives at PROJECT_ROOT/src,
+# not PROJECT_ROOT itself. Without this, every `from gcon...` import
+# below fails, gets silently swallowed into IMPORT_ERROR, and the
+# real cause only surfaces ~280 lines later as a confusing
+# `NameError: name 'CommunicationManager' is not defined` when a
+# class tries to subclass a name that was never bound -- instead of
+# the actual, actionable "gcon isn't importable" message.
+GCON_SRC = os.path.join(PROJECT_ROOT, "src")
+if os.path.isdir(GCON_SRC) and GCON_SRC not in sys.path:
+    sys.path.insert(0, GCON_SRC)
+
 try:
     import psutil
 except ImportError:
@@ -123,6 +135,7 @@ try:
     from gcon.execution.artifact_registry import ArtifactRegistry
     from gcon.storage.storage_manager import StorageManager
     from tests.support.policy import PolicyEngine
+    from tests.support.pyexe import PY
     from gcon.workflow.dag import DAG
     from gcon.workflow.workflow import Workflow, WorkflowJob
     from gcon.workflow.workflow_engine import WorkflowEngine
@@ -135,6 +148,12 @@ try:
     from gcon.cluster.node import GCONNode
 except Exception as exc:  # pragma: no cover - environment problem, not a test result
     IMPORT_ERROR = exc
+
+if IMPORT_ERROR is not None:
+    print(f"FATAL: could not import GCON's own modules -- {type(IMPORT_ERROR).__name__}: {IMPORT_ERROR}")
+    print("Check that GCON_PROJECT_ROOT points at the repo root (containing src/gcon), "
+          "and that all of requirements.txt is installed.")
+    sys.exit(2)
 
 try:
     import fastapi  # noqa: F401
@@ -656,7 +675,7 @@ def test_e2e_single_job_submit_execute_receipt():
         try:
             agent = make_agent("node-e2e")
             coord.register_agent(agent)
-            coord.submit_job("job-e2e", "python3 -c \"print('hello-gcon')\"")
+            coord.submit_job("job-e2e", f"{PY} -c \"print('hello-gcon')\"")
             ok = wait_until(lambda: coord.get_job_status("job-e2e")["status"] == "completed",
                              timeout_s=10)
             assert ok, f"job never completed: {coord.get_job_status('job-e2e')}"
@@ -676,7 +695,7 @@ def test_e2e_failing_job_marks_failed_and_frees_node():
         coord = make_coordinator()
         agent = make_agent("node-fail")
         coord.register_agent(agent)
-        coord.submit_job("job-fail", "python3 -c \"import sys; sys.exit(1)\"")
+        coord.submit_job("job-fail", f"{PY} -c \"import sys; sys.exit(1)\"")
         ok = wait_until(lambda: coord.get_job_status("job-fail")["status"] == "failed", timeout_s=10)
         assert ok, coord.get_job_status("job-fail")
         assert wait_until(lambda: coord.registry.nodes["node-fail"]["status"] == "idle", timeout_s=5), \
@@ -692,7 +711,7 @@ def test_node_drain_stop_restart_lifecycle():
 
         coord.drain_node("node-lc")
         assert coord.registry.nodes["node-lc"]["draining"] is True
-        coord.submit_job("job-drain", "python3 -c \"print(1)\"")
+        coord.submit_job("job-drain", f"{PY} -c \"print(1)\"")
         time.sleep(0.5)
         assert coord.get_job_status("job-drain")["status"] == "pending", \
             "a draining node must not receive new work"
@@ -712,7 +731,7 @@ def test_cancel_job_kills_process_and_frees_node():
         coord = make_coordinator()
         agent = make_agent("node-cancel")
         coord.register_agent(agent)
-        coord.submit_job("job-cancel", "python3 -c \"import time; time.sleep(30)\"")
+        coord.submit_job("job-cancel", f"{PY} -c \"import time; time.sleep(30)\"")
         assert wait_until(lambda: coord.get_job_status("job-cancel")["status"] == "running", timeout_s=5)
         killed = coord.cancel_job("job-cancel")
         assert killed is True
@@ -749,7 +768,7 @@ def test_node_offline_recovers_running_job_to_another_node():
         coord.register_agent(slow_node)
         coord.register_agent(backup_node)
 
-        coord.submit_job("job-orphan", "python3 -c \"import time; time.sleep(1)\"")
+        coord.submit_job("job-orphan", f"{PY} -c \"import time; time.sleep(1)\"")
         assert wait_until(lambda: coord.get_job_status("job-orphan")["status"] == "running", timeout_s=5)
         running_node_id = coord.get_job_status("job-orphan")["node_id"]
 
@@ -788,9 +807,9 @@ def test_KNOWN_DEFECT_workflow_engine_executes_full_diamond_dag():
         coord.register_agent(make_agent("node-wf"))
 
         wf = Workflow("wf-diamond")
-        wf.add_job(WorkflowJob("a", "python3 -c \"print('a')\""))
-        wf.add_job(WorkflowJob("b", "python3 -c \"print('b')\""))
-        wf.add_job(WorkflowJob("c", "python3 -c \"print('c')\""))
+        wf.add_job(WorkflowJob("a", f"{PY} -c \"print('a')\""))
+        wf.add_job(WorkflowJob("b", f"{PY} -c \"print('b')\""))
+        wf.add_job(WorkflowJob("c", f"{PY} -c \"print('c')\""))
         wf.add_dependency("a", "c")
         wf.add_dependency("b", "c")
 
@@ -837,7 +856,7 @@ def test_concurrent_assign_job_never_double_books_a_node():
             coord.register_agent(make_agent(f"node-race-{i}"))
         job_ids = [f"job-race-{i}" for i in range(40)]
         for jid in job_ids:
-            coord.submit_job(jid, "python3 -c \"import time; time.sleep(0.05)\"")
+            coord.submit_job(jid, f"{PY} -c \"import time; time.sleep(0.05)\"")
 
         original_select = coord.scheduler.select_node
 
@@ -907,7 +926,7 @@ def test_many_concurrent_job_submissions_all_eventually_complete():
         start = time.perf_counter()
         with ThreadPoolExecutor(max_workers=20) as pool:
             list(pool.map(
-                lambda i: coord.submit_job(f"job-conc-{i}", "python3 -c \"print('x')\""),
+                lambda i: coord.submit_job(f"job-conc-{i}", f"{PY} -c \"print('x')\""),
                 range(n_jobs),
             ))
         submit_duration = time.perf_counter() - start
@@ -966,7 +985,7 @@ def test_queue_drains_fairly_no_job_starves():
         for i in range(n_jobs):
             jid = f"job-starve-{i}"
             submit_times[jid] = time.perf_counter()
-            coord.submit_job(jid, "python3 -c \"pass\"")
+            coord.submit_job(jid, f"{PY} -c \"pass\"")
 
         completion_times = {}
 
@@ -1063,7 +1082,7 @@ def test_async_style_concurrent_clients_submit_and_poll():
 
         async def client(idx):
             jid = f"job-async-{idx}"
-            await asyncio.to_thread(coord.submit_job, jid, "python3 -c \"print('ok')\"")
+            await asyncio.to_thread(coord.submit_job, jid, f"{PY} -c \"print('ok')\"")
             deadline = time.perf_counter() + 10
             while time.perf_counter() < deadline:
                 status = await asyncio.to_thread(lambda: coord.get_job_status(jid)["status"])
@@ -1105,7 +1124,7 @@ def test_network_partition_simulation_does_not_hang_coordinator():
 
         n_jobs = 20
         for i in range(n_jobs):
-            coord.submit_job(f"job-flaky-{i}", "python3 -c \"print(1)\"")
+            coord.submit_job(f"job-flaky-{i}", f"{PY} -c \"print(1)\"")
 
         done = wait_until(
             lambda: all(coord.jobs[f"job-flaky-{i}"]["status"] in ("completed", "failed")
@@ -1147,7 +1166,7 @@ def test_random_node_termination_during_load():
 
         n_jobs = 15
         for i in range(n_jobs):
-            coord.submit_job(f"job-chaos-{i}", "python3 -c \"print('survived')\"")
+            coord.submit_job(f"job-chaos-{i}", f"{PY} -c \"print('survived')\"")
             time.sleep(0.1)
 
         deadline = time.time() + 15
@@ -1179,7 +1198,7 @@ def test_random_node_termination_during_load():
 def test_agent_execute_job_respects_explicit_timeout():
     agent = make_agent("node-timeout-explicit")
     start = time.perf_counter()
-    result = agent.execute_job("job-t", "python3 -c \"import time; time.sleep(5)\"", timeout=1)
+    result = agent.execute_job("job-t", f"{PY} -c \"import time; time.sleep(5)\"", timeout=1)
     duration = time.perf_counter() - start
     assert result["status"] == "timeout"
     assert duration < 3, f"timeout enforcement took {duration:.2f}s, should be ~1s"
@@ -1239,7 +1258,7 @@ def test_watchdog_infrastructure_detects_a_genuine_hang():
 FUZZ_JOB_IDS = [None, "", " ", "a" * 10_000, "../../etc/passwd", "job;rm -rf /",
                 12345, ("tuple",), {"dict": True}, "job\x00with\x00nulls"]
 FUZZ_COMMANDS = [None, "", " ", "\x00\x01\x02", "a" * 100_000,
-                 "python3 -c \"import os; os.system('echo pwned')\"",
+                 f"{PY} -c \"import os; os.system('echo pwned')\"",
                  "$(echo injected)", "`echo backticks`"]
 
 
@@ -1267,7 +1286,7 @@ def test_fuzz_submit_job_never_crashes_the_coordinator_process():
         # Coordinator must still be usable after the fuzzing barrage.
         coord.resume_scheduler()
         coord.register_agent(make_agent("node-postfuzz"))
-        coord.submit_job("job-postfuzz", "python3 -c \"print(1)\"")
+        coord.submit_job("job-postfuzz", f"{PY} -c \"print(1)\"")
         assert wait_until(lambda: coord.get_job_status("job-postfuzz")["status"] == "completed", timeout_s=10)
 
 
@@ -1366,7 +1385,7 @@ def test_large_job_output_does_not_explode_memory():
         proc = psutil.Process(os.getpid())
         rss_before = proc.memory_info().rss
         # ~5MB of stdout
-        coord.submit_job("job-bigout", "python3 -c \"print('x' * 5_000_000)\"")
+        coord.submit_job("job-bigout", f"{PY} -c \"print('x' * 5_000_000)\"")
         assert wait_until(lambda: coord.get_job_status("job-bigout")["status"] == "completed", timeout_s=15)
         rss_after = proc.memory_info().rss
         growth_mb = (rss_after - rss_before) / (1024 * 1024)
@@ -1417,7 +1436,7 @@ def test_slow_disk_does_not_deadlock_job_completion():
         shutil.copy2 = slow_copy2
         try:
             start = time.perf_counter()
-            coord.submit_job("job-slowdisk", "python3 -c \"print(1)\"", artifacts=[artifact_path])
+            coord.submit_job("job-slowdisk", f"{PY} -c \"print(1)\"", artifacts=[artifact_path])
             done = wait_until(lambda: coord.get_job_status("job-slowdisk")["status"] == "completed",
                                timeout_s=15)
             duration = time.perf_counter() - start
@@ -1504,7 +1523,7 @@ def test_soak_sustained_job_stream_no_degradation():
         for i in range(n_jobs):
             jid = f"job-soak-{i}"
             t0 = time.perf_counter()
-            coord.submit_job(jid, "python3 -c \"print(1)\"")
+            coord.submit_job(jid, f"{PY} -c \"print(1)\"")
             wait_until(lambda jid=jid: coord.jobs[jid]["status"] == "completed", timeout_s=10)
             latencies.append(time.perf_counter() - t0)
 
@@ -1586,7 +1605,7 @@ def test_job_lifecycle_emits_expected_events():
         coord.register_agent(make_agent("node-log"))
         seen = []
         coord.event_bus.subscribe(lambda e: seen.append(e.event_type))
-        coord.submit_job("job-log", "python3 -c \"print(1)\"")
+        coord.submit_job("job-log", f"{PY} -c \"print(1)\"")
         assert wait_until(lambda: coord.get_job_status("job-log")["status"] == "completed", timeout_s=10)
         for expected in ("JOB_SUBMITTED", "JOB_STARTED", "JOB_COMPLETED", "RECEIPT_GENERATED"):
             assert expected in seen, f"expected event {expected} was not published; saw {seen}"
@@ -1601,7 +1620,7 @@ def test_verify_all_receipts_detects_tampering():
     with isolated_cwd():
         coord = make_coordinator()
         coord.register_agent(make_agent("node-receipt"))
-        coord.submit_job("job-receipt", "python3 -c \"print('ok')\"")
+        coord.submit_job("job-receipt", f"{PY} -c \"print('ok')\"")
         assert wait_until(lambda: coord.get_job_status("job-receipt")["status"] == "completed", timeout_s=10)
 
         results = coord.verify_all_receipts()

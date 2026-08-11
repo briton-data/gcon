@@ -1,7 +1,11 @@
-from gcon.cluster.network import GCONNetwork
+# gcon.cluster.network.GCONNetwork and gcon.cluster.node.GCONNode were
+# imported here but never used anywhere below -- GCONNetwork was removed
+# as dead code in an earlier refactor (the coordinator never called it;
+# see the comment in stage5_test.py), and this script never picked up
+# the stale import. GCONNode is also unrelated to what this script
+# actually uses (GCONAgent, imported below).
 from gcon.cluster.coordinator import GCONCoordinator
 from gcon.execution.agent import GCONAgent
-from gcon.cluster.node import GCONNode
 from gcon.monitoring.metrics import MetricsCollector, MetricsSummary
 from gcon.dashboard.dashboard import Dashboard
 

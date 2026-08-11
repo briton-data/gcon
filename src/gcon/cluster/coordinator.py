@@ -507,24 +507,26 @@ class GCONCoordinator:
 
                 if job["node_id"] == node_id and job["status"] == "running":
 
-                    print(f"Recovering job '{job_id}'")
-
                     # Reset the job
                     job["status"] = "pending"
                     job["node_id"] = None
 
-                    # Reassign the job -- only for the job(s) we just
-                    # reset above, not every job in self.jobs. This
-                    # used to run unconditionally for the whole
-                    # collection (a stray indent had it outside the
-                    # `if`), which meant every recovery pass silently
-                    # tried to re-assign every already-pending/running/
-                    # completed job in the cluster too.
-                    try:
-                        self.assign_job(job_id)
-                        print(f"Job '{job_id}' reassigned successfully.")
-                    except RuntimeError as e:
-                        print(f"Recovery failed for '{job_id}': {e}")
+                    # Hand off to the same retry-safe path submit_job()
+                    # uses (job_queue -> scheduler_loop), instead of a
+                    # single direct assign_job() attempt here. A direct
+                    # call only gets one shot: if the only surviving
+                    # node happened to be busy at this exact instant
+                    # (the common case under load, right when another
+                    # node just died), assign_job() raises RuntimeError,
+                    # the job is left pending with no node and outside
+                    # job_queue, and nothing ever retries it again --
+                    # it required a manual re-trigger to move at all.
+                    # scheduler_loop already retries on RuntimeError and
+                    # waits for has_available_node(), so queuing here
+                    # gets recovered jobs the same guarantees as any
+                    # freshly submitted job.
+                    print(f"Recovering job '{job_id}'")
+                    self.queue_job(job_id)
     
     
     def receive_heartbeat(self, heartbeat):
@@ -1325,21 +1327,34 @@ class GCONCoordinator:
 
         return nodes
 
-    def get_jobs(self, created_by=None):
+    def get_jobs(self, created_by=None, status=None, limit=None):
         """
-        Return a dashboard summary about all jobs.
+        Return a dashboard summary about all jobs, newest first.
 
         `created_by` optionally filters the result down to jobs
         submitted by a single user_id -- used by
         ManagementLayer.get_user_stats() to compute real, live
         per-user usage metrics instead of a permanently-zero counter.
+
+        `status` optionally filters to a single job status (e.g.
+        "failed", "pending"). `limit` caps how many jobs are
+        returned. Both exist because the dashboard's jobs panel was
+        previously handed every job ever submitted, unfiltered and
+        unpaginated -- fine at low volume, unusable once a cluster
+        has run a few hundred jobs and someone just wants to see
+        what's currently failed or pending.
         """
         jobs = []
-        
+
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
-        for job_id, job in jobs_snapshot:
+        # Newest first: self.jobs is insertion-ordered (oldest first),
+        # which buried exactly the jobs someone checking the dashboard
+        # cares most about -- the ones that just ran -- at the bottom.
+        for job_id, job in reversed(jobs_snapshot):
             if created_by is not None and job.get("created_by") != created_by:
+                continue
+            if status is not None and job["status"] != status:
                 continue
             receipt = self.receipts.get(job_id)
             jobs.append({
@@ -1353,6 +1368,8 @@ class GCONCoordinator:
                 "created_by": job.get("created_by"),
                 "workflow_id": job.get("workflow_id"),
             })
+            if limit is not None and len(jobs) >= limit:
+                break
         return jobs
 
     def get_storage(self):

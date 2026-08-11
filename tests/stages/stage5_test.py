@@ -1,14 +1,5 @@
 from gcon.cluster.coordinator import GCONCoordinator
-from gcon.cluster.registry import NodeRegistry
-from gcon.cluster.node import GCONNode
-
-# Create registry
-registry = NodeRegistry()
-
-# Register three nodes
-registry.register(GCONNode("node-001"))
-registry.register(GCONNode("node-002"))
-registry.register(GCONNode("node-003"))
+from gcon.execution.agent import GCONAgent
 
 # Create coordinator (cluster.dispatcher.JobDispatcher / cluster.network.GCONNetwork
 # used to be built here, but GCONCoordinator never actually called them --
@@ -16,6 +7,20 @@ registry.register(GCONNode("node-003"))
 # have been removed; this script's coordinator was always driven entirely
 # by its own registry/communication stack.)
 coordinator = GCONCoordinator()
+
+# Register three nodes directly with the coordinator -- it owns its own
+# NodeRegistry internally (coordinator.registry); a separately-constructed
+# NodeRegistry, as this script previously used, is never seen by
+# coordinator.assign_job()/scheduler, so it always finds zero available
+# nodes regardless of what was registered into the standalone registry.
+#
+# GCONAgent (not GCONNode -- a different, incompatible class with a
+# similar-looking constructor) is the node type the coordinator actually
+# expects here: assign_job() calls node.heartbeat(), which GCONAgent
+# implements and GCONNode does not.
+coordinator.register_agent(GCONAgent("node-001"))
+coordinator.register_agent(GCONAgent("node-002"))
+coordinator.register_agent(GCONAgent("node-003"))
 
 # Submit a job
 coordinator.submit_job(

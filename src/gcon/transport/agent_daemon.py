@@ -103,19 +103,55 @@ class AgentDaemon:
             self._run_thread.join(timeout=self.config.graceful_shutdown_grace_seconds)
 
     # ------------------------------------------------------------ session
+    def _resolve_ipv4_target(self) -> tuple[str, str]:
+        """
+        Resolve `self.coordinator_address` to an IPv4 literal.
+
+        gRPC's default (c-ares) resolver doesn't consult the local
+        routing table, so in environments with a broken/absent IPv6
+        route but a real AAAA record for the target (Colab, several
+        container/sandbox setups, some corporate networks), it can
+        get stuck retrying an unreachable IPv6 address indefinitely
+        instead of falling through to a working IPv4 one.
+
+        Returns (ipv4_target, original_host) so the caller can keep
+        using `original_host` for TLS SNI / hostname verification --
+        forcing IPv4 at the socket layer must not change what
+        certificate identity we validate against.
+        """
+        host, _, port = self.coordinator_address.rpartition(":")
+        if not host:
+            # no ":" in the address -- nothing to split, leave as-is
+            return self.coordinator_address, self.coordinator_address
+        infos = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_STREAM)
+        if not infos:
+            raise OSError(f"No IPv4 address found for coordinator host '{host}'")
+        ipv4 = infos[0][4][0]
+        return f"{ipv4}:{port}", host
+
     def _connect_and_serve(self) -> None:
         credentials = tls.load_agent_channel_credentials(self.cert_dir, self.node_id)
-        channel = grpc.secure_channel(
-            self.coordinator_address,
-            credentials,
-            options=[
-                ("grpc.keepalive_time_ms", 20000),
-                ("grpc.keepalive_timeout_ms", 10000),
-                ("grpc.keepalive_permit_without_calls", 1),
-                ("grpc.max_send_message_length", self.config.grpc_max_message_bytes),
-                ("grpc.max_receive_message_length", self.config.grpc_max_message_bytes),
-            ],
-        )
+        try:
+            target, original_host = self._resolve_ipv4_target()
+        except OSError:
+            logger.warning(
+                "Could not resolve an IPv4 address for %s; falling back to "
+                "letting gRPC's own resolver pick (may retry IPv6).",
+                self.coordinator_address,
+            )
+            target, original_host = self.coordinator_address, None
+        options = [
+            ("grpc.keepalive_time_ms", 20000),
+            ("grpc.keepalive_timeout_ms", 10000),
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.max_send_message_length", self.config.grpc_max_message_bytes),
+            ("grpc.max_receive_message_length", self.config.grpc_max_message_bytes),
+        ]
+        if original_host is not None:
+            # Keep TLS validating against the real hostname's cert
+            # identity even though we're dialing an IP literal.
+            options.append(("grpc.ssl_target_name_override", original_host))
+        channel = grpc.secure_channel(target, credentials, options=options)
         try:
             stub = pb_grpc.AgentControlStub(channel)
 
