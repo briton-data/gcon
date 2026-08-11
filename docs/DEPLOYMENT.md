@@ -43,27 +43,28 @@ git clone https://github.com/briton-data/gcon.git
 cd gcon
 pip install -r requirements.txt
 
-# 2. Start coordinator + dashboard
-python -m gcon.dashboard.dashboard_server
+# 2. Generate dev mTLS certs (coordinator + agent + CA)
+python scripts/generate_dev_certs.py --node worker-01
 
-# 3. Open browser
+# 3. Start the coordinator (gRPC on :50051, dashboard/API on :8000)
+python scripts/run_coordinator.py
+
+# 4. Open the dashboard
 # http://localhost:8000
 
-# 4. In another terminal, register agents
-python -c "
-from gcon.execution.agent import GCONAgent
-from gcon_sdk import GconClient
+# 5. In another terminal, start an agent — it connects to the
+#    coordinator over mTLS gRPC, not an HTTP "register" call
+python scripts/run_worker.py \
+  --node-id worker-01 \
+  --coordinator localhost:50051 \
+  --cert-dir keys/grpc
 
-client = GconClient(api_key='dev')
-for i in range(4):
-    agent = GCONAgent(f'local-agent-{i}', capacity=4)
-    agent.register('http://localhost:8000')
-"
-
-# 5. Submit a test job
+# 6. Create an API key from the dashboard (Management > API Keys),
+#    then submit a test job with the SDK — there is no "dev" bypass
+#    key; every /api/v1 call needs a real key (see docs/API.md)
 python -c "
 from gcon_sdk import GconClient
-client = GconClient(api_key='dev')
+client = GconClient(api_key='gcon_YOUR_API_KEY')
 client.submit_job('test-job', 'echo hello')
 print(client.get_job('test-job'))
 "
@@ -141,41 +142,58 @@ chmod 700 keys
 
 **Environment Variables** (`/opt/gcon/.env`):
 
+These are the real settings read by `gcon.transport.config.TransportConfig`
+(the gRPC/agent side) and documented in `scripts/run_coordinator.py`'s own
+docstring (the dashboard/API side). There is no S3 or Postgres storage
+backend — persistence is SQLite via `gcon.persistence.control_plane`
+(`data/gcon_control_plane.db`), matching the "Single coordinator,
+SQLite-backed, no HA/failover yet" status the README calls out. Env vars
+override the `settings` table in that database, which overrides hardcoded
+defaults — see `TransportConfig`'s docstring for the full precedence
+rule.
+
 ```bash
-# Coordinator settings
-GCON_COORDINATOR_HOST=0.0.0.0
-GCON_COORDINATOR_PORT=8000
-GCON_WORKER_THREADS=4
+# gRPC transport (coordinator <-> agents, mTLS) — see gcon.transport.config
+GCON_GRPC_HOST=0.0.0.0
+GCON_GRPC_PORT=50051
+GCON_TLS_CERT_DIR=/opt/gcon/keys/grpc
+GCON_HEARTBEAT_INTERVAL_SECONDS=5
+GCON_HEARTBEAT_MISS_THRESHOLD=3
+GCON_JOB_DISPATCH_TIMEOUT_SECONDS=3600
+GCON_GRPC_MAX_WORKERS=256          # effectively "how many agents can be
+                                    # connected at once" — scale with fleet size
+GCON_GRACEFUL_SHUTDOWN_GRACE_SECONDS=30
 
-# Storage
-GCON_STORAGE_BACKEND=local  # local, s3, postgresql
-GCON_STORAGE_PATH=/var/lib/gcon/storage
-
-# Security
-GCON_API_KEY_REQUIRED=false  # Set to true in production
-GCON_ENABLE_HTTPS=false      # Set to true + configure certificates
-GCON_TLS_CERT=/etc/gcon/certs/gcon.crt
-GCON_TLS_KEY=/etc/gcon/certs/gcon.key
-
-# Logging
-GCON_LOG_LEVEL=INFO
-GCON_LOG_FILE=/var/log/gcon/coordinator.log
-
-# Job execution
-GCON_JOB_TIMEOUT_SECONDS=300
-GCON_JOB_MAX_RETRIES=3
-GCON_AGENT_HEARTBEAT_TIMEOUT_SECONDS=15
+# Dashboard / public API (see scripts/run_coordinator.py docstring)
+GCON_DASHBOARD_HOST=127.0.0.1
+GCON_DASHBOARD_PORT=8000
+GCON_FORCE_HTTPS=0                 # 1 to terminate TLS here too, enable
+                                    # HSTS, and mark the session cookie Secure
+GCON_API_CORS_ORIGINS=             # comma-separated origins allowed to
+                                    # call /api/v1 from a browser; unset =
+                                    # no CORS (API-key/SDK clients unaffected)
 ```
+
+There is no `GCON_STORAGE_BACKEND`, `GCON_API_KEY_REQUIRED`, or
+`GCON_ENABLE_HTTPS` setting — API-key auth on `/api/v1` and RBAC on
+`/management` are always on (see `docs/API.md`), and HTTPS is controlled
+by `GCON_FORCE_HTTPS` above, not a separate cert/key pair passed via env.
 
 ### Systemd Service
 
 **File:** `/etc/systemd/system/gcon-coordinator.service`
 
+`scripts/run_coordinator.py` is the real production entry point — it
+starts the mTLS gRPC transport *and* serves the dashboard + `/api/v1` in
+the same process. (`python -m gcon.dashboard.dashboard_server` is a
+separate, in-memory **local-dev** convenience script — it boots a fake
+local cluster of `GCON_LOCAL_NODE_COUNT` in-process agents with no mTLS,
+useful for manual testing, not for a real fleet. Don't use it here.)
+
 ```ini
 [Unit]
 Description=GCON Coordinator
 After=network.target
-Wants=gcon-coordinator.service
 
 [Service]
 Type=simple
@@ -183,7 +201,7 @@ User=gcon
 WorkingDirectory=/opt/gcon
 Environment="PATH=/opt/gcon/venv/bin"
 EnvironmentFile=/opt/gcon/.env
-ExecStart=/opt/gcon/venv/bin/python -m gcon.dashboard.dashboard_server
+ExecStart=/opt/gcon/venv/bin/python scripts/run_coordinator.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -265,93 +283,79 @@ sudo systemctl restart nginx
 
 ## Docker Deployment
 
+There is exactly one `Dockerfile` in this repo (`docker/Dockerfile`), and
+it packages the **agent only** — not the coordinator. There is currently
+no `docker-compose.yml` in the repo and no coordinator container image;
+if you want the coordinator containerized you'll need to write that
+Dockerfile yourself (a plain `python scripts/run_coordinator.py` on top
+of the same base image works). What follows is what actually ships.
+
 ### Dockerfile
 
-**File:** `Dockerfile`
+**File:** `docker/Dockerfile`
 
 ```dockerfile
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy repository
-COPY . /app
-
-# Install Python dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create directories
-RUN mkdir -p /app/keys /var/lib/gcon/storage /var/log/gcon
+COPY src/ src/
+COPY scripts/run_worker.py scripts/run_worker.py
+COPY docker/entrypoint.sh entrypoint.sh
+RUN chmod +x entrypoint.sh
 
-# Expose port
-EXPOSE 8000
-
-# Run coordinator
-CMD ["python", "-m", "gcon.dashboard.dashboard_server"]
+ENTRYPOINT ["./entrypoint.sh"]
 ```
 
-### Docker Compose
+### Entrypoint
 
-**File:** `docker-compose.yml`
+**File:** `docker/entrypoint.sh`
 
-```yaml
-version: '3.8'
+The entrypoint doesn't `docker run` straight into `run_worker.py` — it
+first **materializes the agent's mTLS cert material from base64-encoded
+env vars**, because the image's filesystem is treated as ephemeral (the
+comment in the script calls it out explicitly: "Enclave filesystem is a
+ramdisk — nothing here survives a restart"). It expects:
 
-services:
-  coordinator:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      GCON_COORDINATOR_HOST: 0.0.0.0
-      GCON_COORDINATOR_PORT: 8000
-      GCON_STORAGE_PATH: /var/lib/gcon/storage
-      GCON_LOG_LEVEL: INFO
-    volumes:
-      - ./keys:/app/keys:ro
-      - gcon_storage:/var/lib/gcon/storage
-      - gcon_logs:/var/log/gcon
-    restart: unless-stopped
+- `GCON_CA_CERT_B64` — the CA's public cert, base64-encoded
+- `GCON_AGENT_CERT_B64` / `GCON_AGENT_KEY_B64` — this node's own
+  pre-issued cert/key pair, base64-encoded (generate these once with
+  `scripts/generate_dev_certs.py`, or your real CA tooling — the CA's
+  *private* key is never put in an env var or baked into the image)
+- `GCON_NODE_ID` — used both to name the materialized cert files and as
+  the agent's node id
+- `GCON_TLS_CERT_DIR` — where to write them (default `/etc/gcon/certs`)
 
-  # Optional: Add agents as separate containers
-  agent-1:
-    build: .
-    depends_on:
-      - coordinator
-    environment:
-      GCON_AGENT_ID: docker-agent-1
-      GCON_AGENT_CAPACITY: 4
-      GCON_COORDINATOR_URL: http://coordinator:8000
-    command: >
-      python -c "
-      from gcon.execution.agent import GCONAgent
-      agent = GCONAgent('docker-agent-1', capacity=4)
-      agent.register('http://coordinator:8000')
-      agent.run()
-      "
-    restart: unless-stopped
+It also starts a trivial background HTTP listener on `$PORT` (default
+`8080`) purely so host platforms that health-check by scanning for an
+open port (e.g. some PaaS "web service" types) don't kill the container
+— the agent itself never serves HTTP; it only holds an outbound gRPC
+connection to the coordinator. Then it execs
+`python scripts/run_worker.py`, which reads `GCON_NODE_ID`,
+`GCON_COORDINATOR_ADDRESS`, and `GCON_TLS_CERT_DIR` (see
+`scripts/run_worker.py`'s own `--help`).
 
-volumes:
-  gcon_storage:
-  gcon_logs:
-```
-
-**Run:**
+**Build and run an agent container:**
 
 ```bash
-docker-compose up -d
+docker build -f docker/Dockerfile -t gcon-agent .
 
-# View logs
-docker-compose logs -f coordinator
-
-# Stop
-docker-compose down
+docker run -d \
+  -e GCON_NODE_ID=worker-01 \
+  -e GCON_COORDINATOR_ADDRESS=coordinator.example.com:50051 \
+  -e GCON_CA_CERT_B64="$(base64 -w0 keys/grpc/ca.cert.pem)" \
+  -e GCON_AGENT_CERT_B64="$(base64 -w0 certs/agent-worker-01.cert.pem)" \
+  -e GCON_AGENT_KEY_B64="$(base64 -w0 certs/agent-worker-01.key.pem)" \
+  --name gcon-agent-worker-01 \
+  gcon-agent
 ```
+
+The coordinator itself is run as a plain process today (`python
+scripts/run_coordinator.py`), not from a container image — see
+[Multi-Node Cluster](#multi-node-cluster) and the systemd unit below.
 
 ---
 
@@ -382,6 +386,12 @@ docker-compose down
 
 **On each worker node:**
 
+Agents connect to the coordinator directly over mTLS gRPC via
+`scripts/run_worker.py` — there's no separate "start-agent.py" wrapper or
+HTTP `register()` call to write; the script itself is the entry point,
+and every identifying value (node id, coordinator address, cert dir)
+comes from CLI args or env vars (see the script's own docstring).
+
 ```bash
 # 1. Install
 git clone https://github.com/briton-data/gcon.git
@@ -390,36 +400,25 @@ python3.12 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Create agent startup script (start-agent.py)
-cat > start-agent.py << 'EOF'
-import os
-from gcon.execution.agent import GCONAgent
-
-agent_id = os.environ.get('AGENT_ID', 'default-agent')
-coordinator_url = os.environ.get('COORDINATOR_URL', 'http://localhost:8000')
-capacity = int(os.environ.get('AGENT_CAPACITY', '4'))
-
-agent = GCONAgent(agent_id, capacity=capacity)
-agent.register(coordinator_url)
-agent.run()
-EOF
+# 2. Provision this node's mTLS identity (once, from your CA / dev-cert
+#    tooling) — e.g. keys/grpc/{ca.cert.pem,worker-1.cert.pem,worker-1.key.pem}
+#    or use scripts/generate_dev_certs.py for local/dev clusters.
 
 # 3. Create systemd service
 sudo tee /etc/systemd/system/gcon-agent.service > /dev/null << 'EOF'
 [Unit]
 Description=GCON Agent
 After=network.target
-Wants=gcon-agent.service
 
 [Service]
 Type=simple
 User=gcon
 WorkingDirectory=/opt/gcon
 Environment="PATH=/opt/gcon/venv/bin"
-Environment="AGENT_ID=worker-1"
-Environment="COORDINATOR_URL=http://coordinator.internal:8000"
-Environment="AGENT_CAPACITY=4"
-ExecStart=/opt/gcon/venv/bin/python start-agent.py
+Environment="GCON_NODE_ID=worker-1"
+Environment="GCON_COORDINATOR_ADDRESS=coordinator.internal:50051"
+Environment="GCON_TLS_CERT_DIR=/opt/gcon/keys/grpc"
+ExecStart=/opt/gcon/venv/bin/python scripts/run_worker.py
 Restart=on-failure
 RestartSec=10
 
@@ -433,41 +432,29 @@ sudo systemctl start gcon-agent
 
 ### Shared Storage Setup
 
-**PostgreSQL (for metadata):**
+There is currently **no PostgreSQL or S3 storage backend** in GCON, and
+no `GCON_STORAGE_BACKEND` / `GCON_ARTIFACT_BACKEND` setting to switch one
+on — this whole section described infrastructure the codebase doesn't
+have. Persistence is exclusively local SQLite, via
+`gcon.persistence.control_plane.ControlPlane` and the coordinator's own
+`gcon.persistence.db` module:
 
-```bash
-# 1. Install PostgreSQL
-sudo apt-get install -y postgresql postgresql-contrib
+- `data/gcon.db` — coordinator's primary state
+- `data/gcon_control_plane.db` — settings, API keys, users, audit log
 
-# 2. Create database
-sudo -u postgres psql << EOF
-CREATE DATABASE gcon;
-CREATE USER gcon WITH PASSWORD 'secure_password';
-ALTER ROLE gcon SET client_encoding TO 'utf8';
-ALTER ROLE gcon SET default_transaction_isolation TO 'read committed';
-ALTER ROLE gcon SET default_transaction_deferrable TO on;
-ALTER ROLE gcon SET default_transaction_level TO 'read committed';
-GRANT ALL PRIVILEGES ON DATABASE gcon TO gcon;
-EOF
+Both use SQLite's WAL mode (you'll see matching `-shm`/`-wal` files next
+to each `.db`). This is exactly what the README's status section already
+flags: **single coordinator, SQLite-backed, no HA/failover yet.** For a
+production deployment today, that means:
 
-# 3. Configure GCON to use PostgreSQL
-export GCON_STORAGE_BACKEND=postgresql
-export GCON_DATABASE_URL=postgresql://gcon:secure_password@localhost/gcon
-```
-
-**S3 (for artifacts):**
-
-```bash
-# 1. Create S3 bucket
-aws s3 mb s3://gcon-artifacts --region us-east-1
-
-# 2. Configure GCON
-export GCON_ARTIFACT_BACKEND=s3
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export GCON_S3_BUCKET=gcon-artifacts
-export GCON_S3_REGION=us-east-1
-```
+- `data/` and `keys/`/`certs/` must live on durable, backed-up storage
+  (see [Backup and Restore](#backup-and-restore) below) — there is no
+  built-in replication.
+- Running two coordinators against the same `data/` directory is not a
+  supported HA setup; SQLite isn't a multi-writer network database.
+- If you need a different storage backend, that's a real gap to file an
+  issue/PR against — don't configure env vars for a backend that isn't
+  wired up, since GCON will silently ignore them and keep using SQLite.
 
 ---
 
@@ -533,27 +520,32 @@ openssl rsa -in keys/agent-{id}.key -pubout -out keys/agent-{id}.pub
 
 **API Keys:**
 
-```bash
-# In production, require API key for all requests
-export GCON_API_KEY_REQUIRED=true
+Every `/api/v1` request already requires a real API key — there is no
+"require API keys" toggle to flip in production; it's unconditional (see
+`docs/API.md`). Keys are created through the management layer (either
+from the dashboard's **Management → API Keys** panel, or its
+`POST /management/api-keys` route), not generated standalone with
+`secrets.token_urlsafe` — that ties the key to an owner, its scopes, and
+an expiry in `APIKeyManager`, which a hand-rolled token wouldn't have:
 
-# Generate keys for users/applications
-python -c "
-import secrets
-key = 'gcon_' + secrets.token_urlsafe(32)
-print(f'New API Key: {key}')
-# Store in secure key management system
-"
+```bash
+curl -X POST -b "session=<dashboard session cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI pipeline", "owner_user_id": "user_abc123",
+       "scopes": ["View monitoring", "Submit workflows"], "expires_in_days": 90}' \
+  http://localhost:8000/management/api-keys
 ```
 
-**JWT Tokens (Future):**
+Send the returned secret as `Authorization: Bearer <key>` or
+`X-API-Key: <key>` on `/api/v1` calls:
 
 ```bash
-# Once implemented, use JWT bearer tokens
-# instead of static API keys
-curl -H "Authorization: Bearer eyJ0eXA..." \
+curl -H "Authorization: Bearer gcon_..." \
   https://gcon.example.com/api/v1/cluster
 ```
+
+There is no JWT support — bearer tokens are opaque API-key secrets
+looked up in the `api_keys` table, not signed/decoded JWTs.
 
 ### 4. Agent Verification
 
@@ -744,9 +736,13 @@ journalctl -u gcon-agent -f
 
 **Issues:**
 
-- Firewall blocking port 8000
-- Hostname resolution failing (`coordinator:8000` not resolvable)
-- Agent capacity = 0 (check AGENT_CAPACITY env var)
+- Firewall blocking port 50051 (the gRPC transport port agents actually
+  connect on — not 8000, which is the dashboard/API port) or the
+  coordinator's gRPC hostname not resolvable
+- Agent stuck as `busy` and not picking up new work — there's no
+  configurable per-agent "capacity"/concurrency setting in the current
+  code (`GCONAgent` takes only a `node_id`); check `status` and
+  `running_jobs` on `GET /api/v1/nodes/{node_id}` instead
 
 ### Jobs stuck in pending
 
@@ -818,16 +814,28 @@ curl http://localhost:8000/api/v1/nodes | grep "docker-agent-1"
 
 ### Deregister an Agent
 
+There is no `DELETE /api/v1/nodes/{id}` on the public API — draining and
+deregistration are dashboard/session-authenticated routes (RBAC
+`"Manage cluster"` permission), not part of the API-key-authenticated
+`/api/v1` surface. Call them from an authenticated dashboard session (or
+script one with a logged-in session cookie), not with a bare `curl` and
+an API key:
+
 ```bash
 # Graceful deregistration (drain jobs first)
 
-# 1. Mark agent as deregistering
-curl -X DELETE http://localhost:8000/api/v1/nodes/gpu-1
+# 1. Drain the node — coordinator stops assigning it new jobs, running
+#    jobs finish normally (POST /cluster/nodes/{node_id}/drain)
+curl -X POST -b "session=<your dashboard session cookie>" \
+  http://localhost:8000/cluster/nodes/gpu-1/drain
 
-# 2. Wait for running jobs to complete
-# The coordinator stops assigning new jobs to gpu-1
+# 2. Wait for running jobs on gpu-1 to complete
 
-# 3. Stop agent
+# 3. Deregister it (POST /admin/nodes/{node_id}/deregister)
+curl -X POST -b "session=<your dashboard session cookie>" \
+  http://localhost:8000/admin/nodes/gpu-1/deregister
+
+# 4. Stop agent
 sudo systemctl stop gcon-agent
 
 # 4. Perform maintenance
@@ -840,33 +848,42 @@ sudo systemctl start gcon-agent
 ### Backup & Restore
 
 ```bash
-# Backup all state and artifacts
+# Back up the real state: the SQLite databases (data/), the mTLS keys
+# (keys/, certs/) — there is no separate "storage" or S3 path; this is
+# it, per gcon.persistence.control_plane and the repo's data/ directory
 tar czf /backups/gcon-full-$(date +%Y%m%d).tar.gz \
-  /var/lib/gcon/storage \
-  /opt/gcon/keys
+  /opt/gcon/data \
+  /opt/gcon/keys \
+  /opt/gcon/certs
 
 # Restore
-tar xzf /backups/gcon-full-20260720.tar.gz -C /
-
-# Restore from S3
-aws s3 cp s3://gcon-backups/gcon-full-20260720.tar.gz - | tar xz -C /
+sudo systemctl stop gcon-coordinator
+tar xzf /backups/gcon-full-20260720.tar.gz -C /opt/gcon
+sudo systemctl start gcon-coordinator
 ```
 
 ### Monitor Coordinator Health
 
+`GET /api/v1/cluster` has no `status` field — use `GET /api/v1/health`,
+whose `state` field is exactly what `HealthService.compute()` produces
+(`"healthy"`, or one of the other states — check `checks`/`reasons` in
+the same response for why, if not):
+
 ```bash
 #!/bin/bash
-# Monitor coordinator in production
+# Monitor coordinator in production — requires an API key with
+# 'View monitoring' scope (see docs/API.md)
 
 while true; do
-  response=$(curl -s http://localhost:8000/api/v1/cluster)
-  status=$(echo $response | jq -r '.status')
+  response=$(curl -s -H "Authorization: Bearer $GCON_API_KEY" \
+    http://localhost:8000/api/v1/health)
+  state=$(echo "$response" | jq -r '.state')
   timestamp=$(date)
-  
-  echo "[$timestamp] Coordinator: $status"
-  
-  if [ "$status" != "healthy" ]; then
-    echo "ALERT: Coordinator unhealthy!"
+
+  echo "[$timestamp] Coordinator: $state"
+
+  if [ "$state" != "healthy" ]; then
+    echo "ALERT: Coordinator unhealthy! $(echo "$response" | jq -c '.reasons')"
     # Send to alert system
   fi
   

@@ -53,6 +53,7 @@ from tests.support.test_utils import (
     MetricsCollector, TestAssertionError,
     assert_eventually, get_logger, run_concurrently, unique_id,
 )
+from tests.support.pyexe import PY
 
 logger = get_logger("stress_test2", log_file="logs/stress_test2.log")
 
@@ -389,7 +390,7 @@ class TestWorkflowDAG:
 
         n = 5000
         for i in range(n):
-            workflow.add_job(WorkflowJob(f"job-{i}", "python3 -c \"pass\""))
+            workflow.add_job(WorkflowJob(f"job-{i}", f'{PY} -c "pass"'))
         for i in range(n - 1):
             workflow.add_dependency(f"job-{i}", f"job-{i+1}")
 

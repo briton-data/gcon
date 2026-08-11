@@ -48,11 +48,12 @@ from tests.support.mock_network import (
     preset, temporary_partition,
 )
 from tests.support.chaos import ChaosMonkey
+from tests.support.pyexe import PY
 
 logger = get_logger("stress_test", log_file="logs/stress_test.log")
 
-TRIVIAL_CMD = "python3 -c \"pass\""
-SLEEP_CMD_TEMPLATE = "python3 -c \"import time; time.sleep({secs})\""
+TRIVIAL_CMD = f'{PY} -c "pass"'
+SLEEP_CMD_TEMPLATE = f'{PY} -c "import time; time.sleep({{secs}})"'
 
 
 # =======================================================================

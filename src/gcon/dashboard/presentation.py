@@ -40,11 +40,14 @@ class PresentationLayer:
 
         return self.coordinator.get_nodes()
     
-    def get_jobs(self):
+    def get_jobs(self, status=None, limit=None):
         """
-        Return information about all jobs.
+        Return information about all jobs, newest first.
+
+        `status` filters to a single job status; `limit` caps how
+        many are returned. See coordinator.get_jobs() for why.
         """
-        return self.coordinator.get_jobs()
+        return self.coordinator.get_jobs(status=status, limit=limit)
     
     def get_storage(self):
         """

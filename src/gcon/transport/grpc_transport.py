@@ -265,7 +265,20 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         kind = envelope.WhichOneof("payload")
         if kind == "heartbeat":
             hb = envelope.heartbeat
-            recorded = self.control_plane.heartbeats.record(
+            # `record()`'s return value only tells us whether this exact
+            # (node_id, sequence) row was already logged -- it protects
+            # the append-only heartbeat log from duplicate rows when an
+            # agent retries delivery within the *same* session. It must
+            # never gate whether the node is considered alive: an agent
+            # that restarted resets its sequence counter to 1, so its
+            # new session's early heartbeats collide with rows left over
+            # from its previous session and come back False here even
+            # though the node is genuinely up. Previously that also
+            # skipped updating registry/dashboard status, so a restarted
+            # node could sit marked offline indefinitely (until its new
+            # sequence climbed back past the old session's high-water
+            # mark) despite heartbeating normally the whole time.
+            self.control_plane.heartbeats.record(
                 node_id=envelope.node_id,
                 sequence=hb.sequence,
                 status=hb.status,
@@ -273,18 +286,17 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 memory_percent=hb.memory_percent,
                 running_jobs=hb.running_jobs,
             )
-            if recorded:
-                self.control_plane.nodes.set_status(envelope.node_id, hb.status)
-                if self.on_heartbeat:
-                    self.on_heartbeat(
-                        envelope.node_id,
-                        {
-                            "status": hb.status,
-                            "cpu_percent": hb.cpu_percent,
-                            "memory_percent": hb.memory_percent,
-                            "running_jobs": hb.running_jobs,
-                            "timestamp": hb.timestamp,
-                        },
+            self.control_plane.nodes.set_status(envelope.node_id, hb.status)
+            if self.on_heartbeat:
+                self.on_heartbeat(
+                    envelope.node_id,
+                    {
+                        "status": hb.status,
+                        "cpu_percent": hb.cpu_percent,
+                        "memory_percent": hb.memory_percent,
+                        "running_jobs": hb.running_jobs,
+                        "timestamp": hb.timestamp,
+                    },
                     )
         elif kind == "job_result":
             jr = envelope.job_result

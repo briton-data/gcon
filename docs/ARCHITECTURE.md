@@ -240,8 +240,20 @@ class ExecutionMetrics:
 ## Execution Flow - Detailed
 
 ### Step 1: Job Submission
-```
-Customer: gcon submit train.py --gpu RTX-4090
+
+There is no `gcon submit ...` CLI. The real entry points are the
+`JobRunner` CLI (single machine, no coordinator) and the cluster path
+(coordinator + agents + `/api/v1`):
+
+```bash
+# Standalone (this section's pipeline)
+python -m gcon.execution.run_job "python train.py" --job-id train-001
+
+# Or, against a running coordinator (see docs/API.md)
+curl -X POST -H "Authorization: Bearer $GCON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": "train-001", "command": "python train.py"}' \
+  http://localhost:8000/api/v1/jobs
 ```
 
 ### Step 2: Provider Agent Setup
@@ -372,21 +384,45 @@ yet.
 - Decentralized verification
 - Smart contracts for dispute resolution
 
+## Already Built (not "future" anymore)
+
+The sections above describe the original single-agent verification
+pipeline in isolation. Since then, a real multi-node cluster layer has
+been built around it — this list used to appear under "Future
+Enhancements," which was no longer accurate:
+
+- **Coordinator + agent fleet** (`gcon.cluster.coordinator`,
+  `gcon.transport`) — mTLS gRPC transport, node registry, scheduler, job
+  recovery/restart from the control-plane database on coordinator
+  restart. See [Known Limitations](#known-limitations) above for the
+  single-coordinator constraint this still has.
+- **REST API** — versioned, API-key-authenticated `/api/v1` (see
+  [docs/API.md](API.md)), plus a Python SDK (`gcon_sdk`).
+- **WebSocket real-time monitoring** — `/ws` on the dashboard, pushing
+  live cluster events to connected browser sessions.
+- **Dashboard UI** — session-authenticated web dashboard
+  (`gcon.dashboard`) with RBAC (5 roles), audit log, and a Management
+  panel for users, API keys, and settings.
+- **DAG workflows** — multi-job dependency graphs (`gcon.workflow`),
+  submittable via `POST /api/v1/workflows` or the dashboard.
+
 ## Future Enhancements
 
-1. **Container Support**
-   - Docker/Singularity support
+Genuinely not built yet, as of this doc:
+
+1. **HA Coordinator** — leader election / consensus-replicated cluster
+   state across multiple Coordinator processes (see
+   [Known Limitations](#known-limitations)).
+
+2. **Container Support**
+   - Docker/Singularity job execution (job commands run as subprocesses
+     today, not in a container runtime)
    - Reproducible execution environments
 
-2. **Advanced Verification**
+3. **Advanced Verification**
    - Zero-knowledge proofs
    - Hardware attestation (TPM/SGX)
    - Trusted execution environments
-
-3. **API & Monitoring**
-   - REST API
-   - WebSocket real-time monitoring
-   - Dashboard UI
 
 4. **Performance**
    - Multi-GPU support
@@ -397,3 +433,7 @@ yet.
    - Token system
    - Reputation scoring
    - Dispute resolution
+
+None of the items in this second list should be assumed to exist just
+because they're described elsewhere in speculative/marketing material —
+check `src/gcon/` for what's actually implemented.
