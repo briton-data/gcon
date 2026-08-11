@@ -1357,6 +1357,20 @@ class GCONCoordinator:
             if status is not None and job["status"] != status:
                 continue
             receipt = self.receipts.get(job_id)
+            # Raw stdout: the coordinator hashes this for the receipt's
+            # output_hash (a verification proof, not a readable result)
+            # but never surfaced the actual text anywhere the SDK/API
+            # could return it -- fine for jobs where only the *side
+            # effect* mattered, but useless for a job whose entire
+            # point is a computed answer (e.g. an ML prediction).
+            # Capped at 8KB so one runaway job can't bloat every
+            # /jobs response; full output is still in job["result"]
+            # in-process if ever needed.
+            output = None
+            result = job.get("result")
+            if result and "stdout" in result:
+                stdout = result["stdout"] or ""
+                output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
             jobs.append({
                 "job_id": job_id,
                 "status": job["status"],
@@ -1367,6 +1381,7 @@ class GCONCoordinator:
                 "artifacts": len(job.get("artifacts", [])),
                 "created_by": job.get("created_by"),
                 "workflow_id": job.get("workflow_id"),
+                "output": output,
             })
             if limit is not None and len(jobs) >= limit:
                 break
