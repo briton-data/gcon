@@ -18,6 +18,15 @@ certs/*.pem
 certs/*.key
 certs/*.crt
 
+# Cert material staged for manual transfer to Colab/Render/Tinfoil (base64
+# blobs, tarballs, loose cert-shaped files) -- these get created at the repo
+# root during multi-node setup and must never be committed even by accident.
+*.b64
+*-certs.tar.gz
+*-certs.zip
+worker0*
+!worker0*.py
+
 # Local SQLite databases
 data/*.db
 data/*.db-shm

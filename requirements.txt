@@ -1,6 +1,13 @@
 psutil>=5.9.0
 GPUtil>=1.4.0
 cryptography>=45.0.0
+
+# Real ML inference workloads (scripts/train_demo_model.py,
+# scripts/ml_inference_job.py) -- lets jobs run actual model inference
+# instead of only shell/echo commands.
+numpy>=1.26.0
+scikit-learn>=1.4.0
+joblib>=1.3.0
 pytest
 pytest-cov
 fastapi

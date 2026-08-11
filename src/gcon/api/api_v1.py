@@ -44,6 +44,7 @@ class JobOut(BaseModel):
     artifacts: int = 0
     created_by: Optional[str] = None
     workflow_id: Optional[str] = None
+    output: Optional[str] = None
 
 
 class JobSubmitRequest(BaseModel):
