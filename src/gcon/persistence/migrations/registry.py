@@ -170,4 +170,23 @@ MIGRATIONS: List[Migration] = [
             """,
         ],
     ),
+    Migration(
+        version=2,
+        name="add_org_id_to_nodes_and_jobs",
+        up_sql=[
+            # Dedicated-node multi-tenancy: which company a node belongs
+            # to (set at agent registration, see AgentDaemon/run_worker.py
+            # --org-id and grpc_transport.py's Register handler) and
+            # which company a job was submitted for (set at submission
+            # time, derived from the submitting API key's owner's
+            # organization -- see api_v1.py's submit_job route).
+            # NULL is a legitimate value: pre-migration rows, and any
+            # node/job that genuinely isn't associated with a company
+            # (e.g. local dev clusters), aren't backfilled or guessed at.
+            "ALTER TABLE nodes ADD COLUMN org_id TEXT",
+            "CREATE INDEX idx_nodes_org ON nodes (org_id)",
+            "ALTER TABLE jobs ADD COLUMN org_id TEXT",
+            "CREATE INDEX idx_jobs_org ON jobs (org_id)",
+        ],
+    ),
 ]

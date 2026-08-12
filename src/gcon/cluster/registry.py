@@ -57,6 +57,14 @@ class NodeRegistry:
                 "running_jobs": 0,
                 "resource_timestamp": None,
                 "draining": False,
+                # Which company this (dedicated) node belongs to, if
+                # any -- read from the node object itself (set by
+                # RemoteNodeProxy/GCONNode at construction) rather than
+                # passed as a separate register() argument, so every
+                # existing caller of register(node) keeps working
+                # unchanged. getattr with a default: not every node
+                # type is required to have this attribute.
+                "org_id": getattr(node, "org_id", None),
             }
 
     def remove(self, node_id):

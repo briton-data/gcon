@@ -44,7 +44,6 @@ class JobOut(BaseModel):
     artifacts: int = 0
     created_by: Optional[str] = None
     workflow_id: Optional[str] = None
-    output: Optional[str] = None
 
 
 class JobSubmitRequest(BaseModel):
@@ -264,12 +263,20 @@ def create_api_v1_app(management, presentation):
     )
     def submit_job(payload: JobSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
         owner = auth["owner"]
+        # A job is attributed to a company via its submitter's
+        # organization_id -- not the API key itself, since scopes/keys
+        # aren't org-scoped objects in this codebase, users are (see
+        # gcon.management.users.User.organization_id). No owner (e.g.
+        # a system/internal key with no user attached) or a user with
+        # no organization both legitimately resolve to org_id=None.
+        org_id = getattr(owner, "organization_id", None) if owner else None
         try:
             presentation.submit_job(
                 payload.job_id,
                 payload.command,
                 payload.artifacts,
                 created_by=owner.user_id if owner else None,
+                org_id=org_id,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

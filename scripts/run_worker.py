@@ -12,12 +12,14 @@ Usage:
     python scripts/run_worker.py \
         --node-id worker-01 \
         --coordinator coordinator.example.com:50051 \
-        --cert-dir /etc/gcon/certs
+        --cert-dir /etc/gcon/certs \
+        --org-id acme-corp
 
 Env var equivalents (useful for systemd/containers):
     GCON_NODE_ID
     GCON_COORDINATOR_ADDRESS
     GCON_TLS_CERT_DIR
+    GCON_ORG_ID
 
 GPU capability is auto-detected via GCONAgent.detect_gpu() (GPUtil,
 falls back to "Unknown GPU" if no GPU / GPUtil isn't installed) --
@@ -55,6 +57,14 @@ def main():
              "(from generate_dev_certs.py). Default: /etc/gcon/certs",
     )
     parser.add_argument(
+        "--org-id",
+        default=os.environ.get("GCON_ORG_ID"),
+        help="Which company/organization this (dedicated) node belongs to. "
+             "Optional -- omit for a shared/unassigned node -- but required "
+             "for a node to show up under a company on the dashboard's "
+             "Companies panel or be counted in that org's usage.",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("GCON_LOG_LEVEL", "INFO"),
     )
@@ -78,10 +88,17 @@ def main():
     # in job receipts.
     gpu_info = agent.detect_gpu()
     capabilities = {"gpu": gpu_info.get("gpu_name", "Unknown GPU")}
+    if args.org_id:
+        # "org_id" is a reserved capability key, not a real hardware
+        # capability -- the coordinator's Register handler
+        # (grpc_transport.py) special-cases it: pulled out into the
+        # node's own org_id column, never stored alongside genuine
+        # capabilities like gpu=A100 in node_capabilities.
+        capabilities["org_id"] = args.org_id
 
     logger.info(
-        "Starting agent '%s' -> coordinator %s (cert dir: %s, detected gpu: %s)",
-        args.node_id, args.coordinator, args.cert_dir, capabilities["gpu"],
+        "Starting agent '%s' -> coordinator %s (cert dir: %s, org: %s, detected gpu: %s)",
+        args.node_id, args.coordinator, args.cert_dir, args.org_id or "(none)", capabilities["gpu"],
     )
 
     daemon = AgentDaemon(
