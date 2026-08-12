@@ -142,12 +142,17 @@ class WebServer:
             return self.presentation.get_cluster_state()    
             
         @self.app.get("/nodes")
-        def nodes(user=Depends(self.current_user)):
-            return self.presentation.get_nodes()
+        def nodes(org_id: str | None = None, user=Depends(self.current_user)):
+            return self.presentation.get_nodes(org_id=org_id)
         
         @self.app.get("/jobs")
-        def jobs(user=Depends(self.current_user)):
-            return self.presentation.get_jobs()
+        def jobs(
+            status: str | None = None,
+            limit: int | None = None,
+            org_id: str | None = None,
+            user=Depends(self.current_user),
+        ):
+            return self.presentation.get_jobs(status=status, limit=limit, org_id=org_id)
 
         @self.app.get("/jobs/{job_id}")
         def job_detail(job_id: str, user=Depends(self.current_user)):

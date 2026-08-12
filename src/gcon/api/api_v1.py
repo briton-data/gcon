@@ -32,6 +32,7 @@ class NodeOut(BaseModel):
     running_jobs: int
     last_seen: object
     draining: bool
+    org_id: Optional[str] = None
 
 
 class JobOut(BaseModel):
@@ -44,6 +45,10 @@ class JobOut(BaseModel):
     artifacts: int = 0
     created_by: Optional[str] = None
     workflow_id: Optional[str] = None
+    org_id: Optional[str] = None
+    runtime_seconds: object = None
+    usage: object = None
+    output: Optional[str] = None
 
 
 class JobSubmitRequest(BaseModel):
@@ -212,7 +217,16 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}},
     )
     def list_nodes(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_nodes())
+        # Org-scoped keys (a user with organization_id set) only ever
+        # see their own company's nodes -- previously this endpoint
+        # returned every node in the cluster to any key with "View
+        # monitoring", regardless of which company it belonged to.
+        # A key with no organization_id (system/internal) still sees
+        # everything, matching the same convention submit_job already
+        # uses for attribution.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_nodes(org_id=org_id))
 
     @app.get(
         "/nodes/{node_id}",
@@ -222,9 +236,15 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def get_node(node_id: str, auth=Depends(require_scope("View monitoring"))):
-        for node in presentation.get_nodes():
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        for node in presentation.get_nodes(org_id=org_id):
             if node["node_id"] == node_id:
                 return jsonable_encoder(node)
+        # Deliberately the same 404 whether the node doesn't exist at
+        # all or exists but belongs to a different company -- an
+        # org-scoped 403/differentiated error would leak that a node
+        # with this id exists somewhere in the cluster.
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found.")
 
     # ------------------------------------------------------------
@@ -239,7 +259,12 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}},
     )
     def list_jobs(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_jobs())
+        # Same org-scoping as list_nodes above -- this previously
+        # returned every job ever submitted by every company to any
+        # key with "View monitoring", not just the caller's own jobs.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_jobs(org_id=org_id))
 
     @app.get(
         "/jobs/{job_id}",
@@ -249,9 +274,14 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def get_job(job_id: str, auth=Depends(require_scope("View monitoring"))):
-        for job in presentation.get_jobs():
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        for job in presentation.get_jobs(org_id=org_id):
             if job["job_id"] == job_id:
                 return jsonable_encoder(job)
+        # Same reasoning as get_node: identical 404 for "doesn't
+        # exist" and "belongs to a different company" so the error
+        # can't be used to probe for other companies' job ids.
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
     @app.post(

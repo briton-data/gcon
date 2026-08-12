@@ -1359,9 +1359,9 @@ class GCONCoordinator:
 
         return nodes
 
-    def get_jobs(self, created_by=None, org_id=None):
+    def get_jobs(self, created_by=None, org_id=None, status=None, limit=None):
         """
-        Return a dashboard summary about all jobs.
+        Return a dashboard summary about all jobs, newest first.
 
         `created_by` optionally filters the result down to jobs
         submitted by a single user_id -- used by
@@ -1371,19 +1371,43 @@ class GCONCoordinator:
         `org_id` optionally filters down to jobs submitted for a
         single company -- used by the dashboard's Companies panel and
         by an org-scoped API key's view of its own jobs.
+
+        `status` optionally filters to a single job status (e.g.
+        "failed", "pending"). `limit` caps how many jobs are
+        returned. Both exist because the dashboard's jobs panel was
+        previously handed every job ever submitted, unfiltered and
+        unpaginated -- fine at low volume, unusable once a cluster
+        has run a few hundred jobs and someone just wants to see
+        what's currently failed or pending.
         """
         jobs = []
-        
+
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
-        for job_id, job in jobs_snapshot:
+        # Newest first: self.jobs is insertion-ordered (oldest first),
+        # which buried exactly the jobs someone checking the dashboard
+        # cares most about -- the ones that just ran -- at the bottom.
+        for job_id, job in reversed(jobs_snapshot):
             if created_by is not None and job.get("created_by") != created_by:
                 continue
             if org_id is not None and job.get("org_id") != org_id:
                 continue
+            if status is not None and job["status"] != status:
+                continue
             receipt = self.receipts.get(job_id)
             result = job.get("result") or {}
             metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+            # Raw stdout: hashed into the receipt's output_hash (a
+            # verification proof, not a readable result) but never
+            # otherwise surfaced -- fine for jobs where only the side
+            # effect mattered, useless for a job whose entire point is
+            # a computed answer (e.g. an ML prediction). Capped at 8KB
+            # so one runaway job can't bloat every /jobs response;
+            # full output is still in job["result"] in-process.
+            stdout = result.get("stdout")
+            output = None
+            if stdout is not None:
+                output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
             jobs.append({
                 "job_id": job_id,
                 "status": job["status"],
@@ -1408,7 +1432,10 @@ class GCONCoordinator:
                 # too old to capture it, or (most commonly) the job's
                 # command didn't write one. Never fabricated.
                 "usage": metrics.get("usage"),
+                "output": output,
             })
+            if limit is not None and len(jobs) >= limit:
+                break
         return jobs
 
     def get_storage(self):
