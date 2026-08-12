@@ -534,6 +534,90 @@ class ManagementLayer:
         data["team_count"] = len(self.org_registry.list_teams(org.org_id))
         return data
 
+    def get_org_usage_summary(self):
+        """
+        Per-company rollup for the dashboard's Companies panel: which
+        organizations have nodes online right now, and the status
+        breakdown of their jobs (pending/running/completed/failed/
+        cancelled), plus whatever compute/token usage those jobs
+        reported (see GCONAgent.execute_job's usage_report_path /
+        GCONCoordinator.get_jobs()'s "usage" field).
+
+        Every count here comes from a live query against the
+        coordinator's real node registry and job list, filtered by
+        org_id -- never a cached or incrementally-maintained counter,
+        so it can't drift out of sync with what's actually running.
+        Organizations with no dedicated nodes and no jobs yet are
+        still listed (zeroed out), since "onboarded but not yet
+        provisioned" is a real, useful state to see on the dashboard.
+
+        `org_id` on nodes/jobs is populated only for nodes started
+        with --org-id (see run_worker.py) and jobs submitted through a
+        path that resolves the submitter's organization (see
+        api_v1.py's submit_job route) -- rows submitted before this
+        feature existed, or through a path that doesn't yet resolve an
+        org, will have org_id = None and simply won't be attributed to
+        any company here.
+        """
+        if self.coordinator is None:
+            return []
+
+        all_nodes = self.coordinator.get_nodes()
+        all_jobs = self.coordinator.get_jobs()
+
+        summaries = []
+        for org in self.org_registry.list_organizations():
+            org_nodes = [n for n in all_nodes if n.get("org_id") == org.org_id]
+            org_jobs = [j for j in all_jobs if j.get("org_id") == org.org_id]
+
+            nodes_online = sum(1 for n in org_nodes if n.get("status") in ("idle", "busy"))
+
+            job_status_counts = {
+                "pending": 0, "running": 0, "completed": 0,
+                "failed": 0, "cancelled": 0,
+            }
+            for job in org_jobs:
+                status = job.get("status", "")
+                if status in job_status_counts:
+                    job_status_counts[status] += 1
+
+            compute_seconds = 0.0
+            llm_input_tokens = 0
+            llm_output_tokens = 0
+            jobs_with_usage = 0
+            for job in org_jobs:
+                # Automatically-measured runtime -- always available
+                # once a job finishes, no cooperation from the job
+                # required. This is the real compute-usage signal.
+                compute_seconds += float(job.get("runtime_seconds") or 0)
+
+                usage = job.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                jobs_with_usage += 1
+                tokens = usage.get("llm_tokens")
+                if isinstance(tokens, dict):
+                    llm_input_tokens += int(tokens.get("input", 0) or 0)
+                    llm_output_tokens += int(tokens.get("output", 0) or 0)
+
+            summaries.append({
+                "org_id": org.org_id,
+                "name": org.name,
+                "plan": getattr(org, "plan", None),
+                "nodes_online": nodes_online,
+                "nodes_total": len(org_nodes),
+                "jobs": job_status_counts,
+                "jobs_total": len(org_jobs),
+                "usage": {
+                    "jobs_reporting_usage": jobs_with_usage,
+                    "llm_input_tokens": llm_input_tokens,
+                    "llm_output_tokens": llm_output_tokens,
+                    "compute_seconds": compute_seconds,
+                },
+            })
+
+        return summaries
+
     def update_organization(self, org_id, **fields):
         org = self.org_registry.update_organization(org_id, **fields)
         self.audit_logger.log("Admin", "updated organization", org.name)

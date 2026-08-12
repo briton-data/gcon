@@ -1,0 +1,63 @@
+<div class="gcon-panel h-100">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Companies</h5>
+        <a href="#" class="gcon-panel-link" data-tab="management">Manage &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="companies-body">
+
+        {% if not dashboard.companies %}
+        <div class="text-muted small px-2 py-3">
+            No organizations yet. Add one from Management &rarr; Organizations.
+        </div>
+        {% else %}
+        <table class="table table-sm gcon-table" id="companies-table">
+            <thead>
+                <tr>
+                    <th>Company</th>
+                    <th class="text-center">Nodes</th>
+                    <th class="text-center">Pending</th>
+                    <th class="text-center">Running</th>
+                    <th class="text-center">Completed</th>
+                    <th class="text-center">Failed</th>
+                    <th class="text-center">Cancelled</th>
+                    <th class="text-end">Compute</th>
+                    <th class="text-end">LLM tokens (in / out)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for company in dashboard.companies %}
+                <tr>
+                    <td>
+                        {% if company.nodes_online > 0 %}
+                        <span class="badge bg-success me-1" title="{{ company.nodes_online }} node(s) online">&nbsp;</span>
+                        {% else %}
+                        <span class="badge bg-secondary me-1" title="No nodes online">&nbsp;</span>
+                        {% endif %}
+                        {{ company.name }}
+                        <span class="text-muted small">{{ company.plan }}</span>
+                    </td>
+                    <td class="text-center">{{ company.nodes_online }}/{{ company.nodes_total }}</td>
+                    <td class="text-center">{{ company.jobs.pending }}</td>
+                    <td class="text-center">{{ company.jobs.running }}</td>
+                    <td class="text-center text-success">{{ company.jobs.completed }}</td>
+                    <td class="text-center text-danger">{{ company.jobs.failed }}</td>
+                    <td class="text-center text-muted">{{ company.jobs.cancelled }}</td>
+                    <td class="text-end">{{ "%.1f"|format(company.usage.compute_seconds / 60) }} min</td>
+                    <td class="text-end">
+                        {% if company.usage.jobs_reporting_usage > 0 %}
+                        {{ "{:,}".format(company.usage.llm_input_tokens) }} / {{ "{:,}".format(company.usage.llm_output_tokens) }}
+                        {% else %}
+                        <span class="text-muted" title="No job on this account has reported LLM token usage yet -- see docs/API.md's usage-report convention (GCON_USAGE_REPORT_PATH)">&mdash;</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+    </div>
+
+</div>
