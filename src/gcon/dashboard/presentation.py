@@ -40,14 +40,11 @@ class PresentationLayer:
 
         return self.coordinator.get_nodes()
     
-    def get_jobs(self, status=None, limit=None):
+    def get_jobs(self):
         """
-        Return information about all jobs, newest first.
-
-        `status` filters to a single job status; `limit` caps how
-        many are returned. See coordinator.get_jobs() for why.
+        Return information about all jobs.
         """
-        return self.coordinator.get_jobs(status=status, limit=limit)
+        return self.coordinator.get_jobs()
     
     def get_storage(self):
         """
@@ -138,7 +135,7 @@ class PresentationLayer:
         """
         return self.coordinator.submit_workflow(workflow)
 
-    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None):
+    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None, org_id=None):
         """
         Submit a new job to the cluster.
 
@@ -147,6 +144,11 @@ class PresentationLayer:
         analytics are computed from live execution data rather than
         remaining permanently zero. Callers with no authenticated
         identity (internal/system submissions) leave it as None.
+
+        `org_id` similarly carries which company this job should be
+        attributed to (see api_v1.py's submit_job route, which derives
+        it from the submitting user's organization_id) for the
+        dashboard's Companies panel.
         """
         return self.coordinator.submit_job(
             job_id,
@@ -154,6 +156,7 @@ class PresentationLayer:
             artifacts,
             created_by=created_by,
             workflow_id=workflow_id,
+            org_id=org_id,
     ) 
     def register_node(self, node):
         """

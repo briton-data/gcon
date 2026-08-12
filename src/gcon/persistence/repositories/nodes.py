@@ -30,11 +30,21 @@ class NodeRepository:
         agent_version: Optional[str] = None,
         auth_fingerprint: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        org_id: Optional[str] = None,
     ) -> None:
         """
         Idempotent registration: safe to call every time an agent
         (re)connects, including after a coordinator restart or an
         agent reconnect following a network blip.
+
+        `org_id` identifies which company this (dedicated) node
+        belongs to -- see grpc_transport.py's Register handler for
+        where it's extracted from the agent's registration request.
+        On an UPDATE (a node re-registering), org_id is intentionally
+        NOT overwritten if the caller passes None -- a reconnecting
+        agent that, for whatever reason, registers without repeating
+        its org_id should not silently wipe the durable record of
+        which company it belongs to.
         """
         now = datetime.now(UTC).isoformat()
         existing = self.get(node_id)
@@ -46,8 +56,8 @@ class NodeRepository:
                     INSERT INTO nodes (
                         node_id, hostname, status, transport_endpoint,
                         agent_version, auth_fingerprint, registered_at,
-                        last_seen_at, draining, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        last_seen_at, draining, metadata_json, org_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         node_id,
@@ -59,6 +69,7 @@ class NodeRepository:
                         now,
                         now,
                         json.dumps(metadata or {}),
+                        org_id,
                     ),
                 )
             else:
@@ -67,7 +78,8 @@ class NodeRepository:
                     UPDATE nodes
                     SET hostname = ?, status = ?, transport_endpoint = ?,
                         agent_version = ?, auth_fingerprint = ?,
-                        last_seen_at = ?, metadata_json = ?
+                        last_seen_at = ?, metadata_json = ?,
+                        org_id = COALESCE(?, org_id)
                     WHERE node_id = ?
                     """,
                     (
@@ -78,6 +90,7 @@ class NodeRepository:
                         auth_fingerprint,
                         now,
                         json.dumps(metadata or {}),
+                        org_id,
                         node_id,
                     ),
                 )

@@ -153,6 +153,9 @@ class GCONCoordinator:
                     "created_at": job["submitted_at"],
                     "completed_at": job.get("completed_at"),
                     "result": job.get("result"),
+                    "created_by": job.get("created_by"),
+                    "workflow_id": job.get("workflow_id"),
+                    "org_id": job.get("org_id"),
                 }
         except Exception as e:
             print(f"[RESTORE] Failed to restore jobs from control plane: {e!r}")
@@ -216,7 +219,7 @@ class GCONCoordinator:
     )
 )
     
-    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None):
+    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None, org_id=None):
         """
         Submit a new job to the coordinator.
 
@@ -226,7 +229,11 @@ class GCONCoordinator:
         placeholder, and is left as None when the submission path has
         no authenticated identity attached (e.g. internal/system jobs).
         `workflow_id` links a job back to the workflow that generated
-        it, when applicable.
+        it, when applicable. `org_id` is the company this job should
+        be attributed to for the dashboard's Companies panel and
+        org-scoped API access -- normally derived from `created_by`'s
+        organization (see api_v1.py's submit_job route), left None for
+        jobs with no company association.
         """
         if artifacts is None:
              artifacts = []
@@ -253,9 +260,28 @@ class GCONCoordinator:
                 "completed_at": None,
                 "created_by": created_by,
                 "workflow_id": workflow_id,
+                "org_id": org_id,
     }
         self.queue_job(job_id)
-        
+
+        if self.control_plane is not None:
+            # Persist immediately, not just lazily at dispatch time
+            # (grpc_transport.py's send_job() also calls ensure_exists,
+            # but only once a node picks the job up -- without this, a
+            # job that's still pending when the coordinator restarts,
+            # or a LocalTransport-based coordinator that never dispatches
+            # over gRPC at all, would never get a durable row, and
+            # org_id specifically would never make it into the DB for
+            # jobs dispatched through send_job's no-op ensure_exists,
+            # since that call site doesn't have org_id in scope).
+            try:
+                self.control_plane.jobs.ensure_exists(
+                    job_id, command, workflow_id=workflow_id,
+                    created_by=created_by, org_id=org_id,
+                )
+            except Exception as e:
+                print(f"[PERSIST] Failed to persist job '{job_id}': {e!r}")
+
         self.event_bus.publish(
             Event(
                 timestamp=datetime.now(UTC),
@@ -267,6 +293,7 @@ class GCONCoordinator:
                     "artifacts": artifact_ids,
                     "created_by": created_by,
                     "workflow_id": workflow_id,
+                    "org_id": org_id,
         },
     )
 )
@@ -507,26 +534,24 @@ class GCONCoordinator:
 
                 if job["node_id"] == node_id and job["status"] == "running":
 
+                    print(f"Recovering job '{job_id}'")
+
                     # Reset the job
                     job["status"] = "pending"
                     job["node_id"] = None
 
-                    # Hand off to the same retry-safe path submit_job()
-                    # uses (job_queue -> scheduler_loop), instead of a
-                    # single direct assign_job() attempt here. A direct
-                    # call only gets one shot: if the only surviving
-                    # node happened to be busy at this exact instant
-                    # (the common case under load, right when another
-                    # node just died), assign_job() raises RuntimeError,
-                    # the job is left pending with no node and outside
-                    # job_queue, and nothing ever retries it again --
-                    # it required a manual re-trigger to move at all.
-                    # scheduler_loop already retries on RuntimeError and
-                    # waits for has_available_node(), so queuing here
-                    # gets recovered jobs the same guarantees as any
-                    # freshly submitted job.
-                    print(f"Recovering job '{job_id}'")
-                    self.queue_job(job_id)
+                    # Reassign the job -- only for the job(s) we just
+                    # reset above, not every job in self.jobs. This
+                    # used to run unconditionally for the whole
+                    # collection (a stray indent had it outside the
+                    # `if`), which meant every recovery pass silently
+                    # tried to re-assign every already-pending/running/
+                    # completed job in the cluster too.
+                    try:
+                        self.assign_job(job_id)
+                        print(f"Job '{job_id}' reassigned successfully.")
+                    except RuntimeError as e:
+                        print(f"Recovery failed for '{job_id}': {e}")
     
     
     def receive_heartbeat(self, heartbeat):
@@ -1302,15 +1327,21 @@ class GCONCoordinator:
     ]
 
 
-    def get_nodes(self):
+    def get_nodes(self, org_id=None):
         """
         Return a list of dicts describing every registered node, for
         use by presentation/dashboard clients. Uses getattr/get with
         defaults so a missing field never crashes the endpoint.
+
+        `org_id` optionally filters down to nodes belonging to a
+        single company -- used by the dashboard's Companies panel and
+        by an org-scoped API key's view of its own fleet.
         """
         nodes = []
         
         for node_id, info in self.registry.snapshot().items():
+            if org_id is not None and info.get("org_id") != org_id:
+                continue
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
@@ -1323,54 +1354,36 @@ class GCONCoordinator:
                     else info.get("last_seen", "N/A")
                 ),
                 "draining": info.get("draining", False),
+                "org_id": info.get("org_id"),
             })
 
         return nodes
 
-    def get_jobs(self, created_by=None, status=None, limit=None):
+    def get_jobs(self, created_by=None, org_id=None):
         """
-        Return a dashboard summary about all jobs, newest first.
+        Return a dashboard summary about all jobs.
 
         `created_by` optionally filters the result down to jobs
         submitted by a single user_id -- used by
         ManagementLayer.get_user_stats() to compute real, live
         per-user usage metrics instead of a permanently-zero counter.
 
-        `status` optionally filters to a single job status (e.g.
-        "failed", "pending"). `limit` caps how many jobs are
-        returned. Both exist because the dashboard's jobs panel was
-        previously handed every job ever submitted, unfiltered and
-        unpaginated -- fine at low volume, unusable once a cluster
-        has run a few hundred jobs and someone just wants to see
-        what's currently failed or pending.
+        `org_id` optionally filters down to jobs submitted for a
+        single company -- used by the dashboard's Companies panel and
+        by an org-scoped API key's view of its own jobs.
         """
         jobs = []
-
+        
         with self.jobs_lock:
             jobs_snapshot = list(self.jobs.items())
-        # Newest first: self.jobs is insertion-ordered (oldest first),
-        # which buried exactly the jobs someone checking the dashboard
-        # cares most about -- the ones that just ran -- at the bottom.
-        for job_id, job in reversed(jobs_snapshot):
+        for job_id, job in jobs_snapshot:
             if created_by is not None and job.get("created_by") != created_by:
                 continue
-            if status is not None and job["status"] != status:
+            if org_id is not None and job.get("org_id") != org_id:
                 continue
             receipt = self.receipts.get(job_id)
-            # Raw stdout: the coordinator hashes this for the receipt's
-            # output_hash (a verification proof, not a readable result)
-            # but never surfaced the actual text anywhere the SDK/API
-            # could return it -- fine for jobs where only the *side
-            # effect* mattered, but useless for a job whose entire
-            # point is a computed answer (e.g. an ML prediction).
-            # Capped at 8KB so one runaway job can't bloat every
-            # /jobs response; full output is still in job["result"]
-            # in-process if ever needed.
-            output = None
-            result = job.get("result")
-            if result and "stdout" in result:
-                stdout = result["stdout"] or ""
-                output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
+            result = job.get("result") or {}
+            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
             jobs.append({
                 "job_id": job_id,
                 "status": job["status"],
@@ -1381,10 +1394,21 @@ class GCONCoordinator:
                 "artifacts": len(job.get("artifacts", [])),
                 "created_by": job.get("created_by"),
                 "workflow_id": job.get("workflow_id"),
-                "output": output,
+                "org_id": job.get("org_id"),
+                # Automatically measured wall-clock runtime for this
+                # job (GCONAgent.execute_job), None until it finishes.
+                # This is the real, always-available "compute usage"
+                # signal -- distinct from the opt-in "usage" below,
+                # which only exists if the job's own command chose to
+                # report something (e.g. LLM token counts).
+                "runtime_seconds": result.get("runtime_seconds"),
+                # Opt-in usage report a job's own command wrote to
+                # GCON_USAGE_REPORT_PATH (see GCONAgent.execute_job) --
+                # None if the job hasn't finished yet, ran on a node
+                # too old to capture it, or (most commonly) the job's
+                # command didn't write one. Never fabricated.
+                "usage": metrics.get("usage"),
             })
-            if limit is not None and len(jobs) >= limit:
-                break
         return jobs
 
     def get_storage(self):

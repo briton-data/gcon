@@ -32,6 +32,12 @@ def main():
     parser.add_argument("--cert-dir", required=True)
     parser.add_argument("--hostname", default=None)
     parser.add_argument(
+        "--org-id", default=None,
+        help="Which company/organization this (dedicated) node belongs to. "
+             "Optional; required for the node to appear under a company on "
+             "the dashboard's Companies panel.",
+    )
+    parser.add_argument(
         "--capability", action="append", default=[],
         metavar="KEY=VALUE", help="repeatable, e.g. --capability gpu=A100",
     )
@@ -49,6 +55,12 @@ def main():
             parser.error(f"--capability must be KEY=VALUE, got: {item}")
         key, value = item.split("=", 1)
         capabilities[key] = value
+    if args.org_id:
+        # Reserved key -- see grpc_transport.py's Register handler,
+        # which pulls this back out of capabilities into the node's
+        # own org_id column rather than storing it as a real
+        # capability.
+        capabilities["org_id"] = args.org_id
 
     agent = GCONAgent(node_id=args.node_id)
     daemon = AgentDaemon(

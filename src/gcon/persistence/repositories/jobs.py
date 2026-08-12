@@ -19,13 +19,14 @@ class JobRepository:
         workflow_id: Optional[str] = None,
         created_by: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
+        org_id: Optional[str] = None,
     ) -> None:
         self.db.execute(
             """
             INSERT INTO jobs (
                 job_id, command, status, priority, workflow_id,
-                created_by, timeout_seconds, submitted_at
-            ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+                created_by, timeout_seconds, submitted_at, org_id
+            ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -35,6 +36,7 @@ class JobRepository:
                 created_by,
                 timeout_seconds,
                 datetime.now(UTC).isoformat(),
+                org_id,
             ),
         )
 
@@ -46,6 +48,7 @@ class JobRepository:
         workflow_id: Optional[str] = None,
         created_by: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
+        org_id: Optional[str] = None,
     ) -> None:
         """
         Idempotent get-or-create. `job_attempts.job_id` is a foreign
@@ -63,6 +66,7 @@ class JobRepository:
             self.create(
                 job_id, command, priority=priority, workflow_id=workflow_id,
                 created_by=created_by, timeout_seconds=timeout_seconds,
+                org_id=org_id,
             )
         except Exception:
             # Lost a race with a concurrent ensure_exists/create for the
