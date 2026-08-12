@@ -12,9 +12,10 @@ from datetime import datetime, UTC
 
 
 class RemoteNodeProxy:
-    def __init__(self, node_id, transport):
+    def __init__(self, node_id, transport, org_id=None):
         self.node_id = node_id
         self.transport = transport
+        self.org_id = org_id
         self.status = "idle"
 
     def execute_job(self, job_id, command, timeout=None):
