@@ -115,11 +115,23 @@ class WebServer:
             if not user:
                 return RedirectResponse(url="/login")
 
+            dashboard_data = self.presentation.get_dashboard()
+            # Per-company node/job/usage rollup for the Companies panel
+            # -- lives in ManagementLayer (not PresentationLayer) since
+            # it needs both the coordinator's live node/job state AND
+            # the organization registry, and joining those two is
+            # exactly ManagementLayer's job elsewhere (see
+            # get_user_stats). Merged into the same `dashboard` context
+            # dict every other panel already reads from, so
+            # companies.html can use `dashboard.companies` like every
+            # other panel uses `dashboard.node_summary` etc.
+            dashboard_data["companies"] = self.management.get_org_usage_summary()
+
             return self.templates.TemplateResponse(
                 request=request,
                 name="dashboard.html",
                 context={
-                    "dashboard": self.presentation.get_dashboard(),
+                    "dashboard": dashboard_data,
                      "current_user": user.to_dict(),
         },
     )
@@ -134,12 +146,8 @@ class WebServer:
             return self.presentation.get_nodes()
         
         @self.app.get("/jobs")
-        def jobs(
-            status: str | None = None,
-            limit: int | None = None,
-            user=Depends(self.current_user),
-        ):
-            return self.presentation.get_jobs(status=status, limit=limit)
+        def jobs(user=Depends(self.current_user)):
+            return self.presentation.get_jobs()
 
         @self.app.get("/jobs/{job_id}")
         def job_detail(job_id: str, user=Depends(self.current_user)):
