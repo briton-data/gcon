@@ -155,6 +155,14 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         with self._lock:
             self._sessions[request.node_id] = NodeSession(request.node_id, session_token)
 
+        capabilities = dict(request.capabilities)
+        # "org_id" is a reserved capability key (see gcon_agent_daemon.py /
+        # run_worker.py), not a real hardware capability -- it's carried in
+        # the capabilities map only because the Register RPC has nowhere
+        # else to put it, and belongs on the node's own org_id column, not
+        # alongside genuine capabilities.
+        org_id = capabilities.pop("org_id", None)
+
         self.control_plane.nodes.upsert(
             node_id=request.node_id,
             hostname=request.hostname or request.node_id,
@@ -162,11 +170,12 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             transport_endpoint=context.peer(),
             agent_version=request.agent_version or None,
             auth_fingerprint=peer_cn,
-            metadata={"capabilities": dict(request.capabilities)},
+            metadata={"capabilities": capabilities},
+            org_id=org_id,
         )
-        if request.capabilities:
+        if capabilities:
             self.control_plane.node_capabilities.set_capabilities(
-                request.node_id, dict(request.capabilities)
+                request.node_id, capabilities
             )
         self.control_plane.cluster_events.record(
             "NODE_REGISTERED", node_id=request.node_id,
@@ -174,7 +183,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         )
         
         if self.on_node_registered:
-            self.on_node_registered(request.node_id, dict(request.capabilities))
+            self.on_node_registered(request.node_id, capabilities, org_id=org_id)
         
         logger.info("Node '%s' registered from %s", request.node_id, context.peer())
         return pb.RegisterResponse(
