@@ -33,18 +33,26 @@ class PresentationLayer:
         self.autoscaler = AutoScaler(coordinator)
         self.started_at = datetime.now(UTC)
   
-    def get_nodes(self):
+    def get_nodes(self, org_id=None):
         """
         Return information about all registered nodes.
+
+        `org_id` optionally scopes to a single company's nodes -- used
+        by the dashboard's Companies panel and by an org-scoped API
+        key's view of its own nodes (see coordinator.get_nodes()).
         """
 
-        return self.coordinator.get_nodes()
+        return self.coordinator.get_nodes(org_id=org_id)
     
-    def get_jobs(self):
+    def get_jobs(self, status=None, limit=None, org_id=None):
         """
-        Return information about all jobs.
+        Return information about all jobs, newest first.
+
+        `status` filters to a single job status; `limit` caps how
+        many are returned. `org_id` scopes to a single company's
+        jobs -- see coordinator.get_jobs() for why each exists.
         """
-        return self.coordinator.get_jobs()
+        return self.coordinator.get_jobs(status=status, limit=limit, org_id=org_id)
     
     def get_storage(self):
         """
