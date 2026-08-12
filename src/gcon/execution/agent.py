@@ -16,6 +16,7 @@ import subprocess
 import psutil
 import logging
 import shlex
+import json
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime, UTC
@@ -83,7 +84,7 @@ class GCONAgent:
                     "gpu_id": gpu.id,
                     "gpu_name": gpu.name,
                     "memory_total": gpu.memoryTotal,
-                    "memory_available": gpu.memoryFree,
+                    "memory_available": gpu.memoryAvailable,
                     "memory_used": gpu.memoryUsed,
                     "load": gpu.load,
                     "temperature": gpu.temperature
@@ -172,13 +173,33 @@ class GCONAgent:
             return True
         return False
 
-    def execute_job(self, job_id, job_script: str, timeout: Optional[int] = None) -> Dict[str, Any]:
+    def execute_job(
+        self,
+        job_id,
+        job_script: str,
+        timeout: Optional[int] = None,
+        usage_report_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Execute a job script and monitor execution.
         
         Args:
             job_script: Path to Python script or command to execute
             timeout: Maximum execution time in seconds
+            usage_report_path: If given, this path is exported to the
+                job's subprocess as GCON_USAGE_REPORT_PATH. GCON never
+                inspects what a job's command actually does (it may be
+                an arbitrary shell command, not necessarily an LLM
+                call), so consumption metering -- LLM token counts in
+                particular -- can only be captured by convention: if
+                the job script chooses to write a small JSON object
+                (e.g. {"llm_tokens": {"input": 1200, "output": 340,
+                "model": "..."}}) to the path in that env var before
+                it exits, it's picked up here and returned as
+                result["usage"]. A job that doesn't cooperate with the
+                convention (most won't -- it's opt-in) simply leaves
+                result["usage"] as None; this is never fabricated or
+                estimated.
             
         Returns:
             Dict containing execution results and metrics
@@ -186,8 +207,20 @@ class GCONAgent:
         logger.info(f"Starting job execution: {job_script}")
         self.start_time = time.time()
         self.status = "busy"
-        
-        
+
+        job_env = None
+        if usage_report_path:
+            job_env = dict(os.environ)
+            job_env["GCON_USAGE_REPORT_PATH"] = usage_report_path
+            # Belt-and-braces: if a stale file from a previous job
+            # happens to already exist at this path, don't let its
+            # content leak into this job's usage report.
+            try:
+                if os.path.exists(usage_report_path):
+                    os.remove(usage_report_path)
+            except OSError:
+                pass
+
         try:
             # Determine if it's a file or command
             if os.path.isfile(job_script) and job_script.endswith('.py'):
@@ -214,6 +247,7 @@ class GCONAgent:
                 stderr=subprocess.PIPE,
                 text=True,
                 shell=use_shell,
+                env=job_env,
                 # With shell=True, self.process IS /bin/sh, not the
                 # real command -- killing just that PID leaves
                 # whatever the shell spawned running as an orphan
@@ -229,7 +263,7 @@ class GCONAgent:
             self.end_time = time.time()
             
             runtime = self.end_time - self.start_time
-            final_metrics = self.collect_metrics(job_id)            
+            final_metrics = self.collect_metrics(job_id)
             result = {
                 "job_id": job_id,
                 "status": "success" if self.process.returncode == 0 else "failed",
@@ -238,6 +272,7 @@ class GCONAgent:
                 "stdout": stdout,
                 "stderr": stderr,
                 "metrics": final_metrics.to_dict(),
+                "usage": self._read_usage_report(usage_report_path),
                 "timestamp": datetime.now(UTC).isoformat()
             }
             
@@ -256,6 +291,7 @@ class GCONAgent:
                 "status": "timeout",
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": f"Execution timeout after {timeout}s",
+                "usage": self._read_usage_report(usage_report_path),
                 "timestamp": datetime.now(UTC).isoformat()
             }
         except Exception as e:
@@ -267,8 +303,34 @@ class GCONAgent:
                 "status": "error",
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": str(e),
+                "usage": self._read_usage_report(usage_report_path),
                 "timestamp": datetime.now(UTC).isoformat()
             }
+
+    @staticmethod
+    def _read_usage_report(usage_report_path: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        Read back and remove the (optional) usage report a job script
+        may have written to GCON_USAGE_REPORT_PATH. Returns None --
+        never a fabricated/zeroed default -- if no path was given, no
+        file was written, or the file isn't valid JSON, so a missing
+        report is always distinguishable from a genuine "zero usage"
+        report the job wrote on purpose.
+        """
+        if not usage_report_path or not os.path.exists(usage_report_path):
+            return None
+        try:
+            with open(usage_report_path, "r") as f:
+                content = f.read()
+            return json.loads(content) if content.strip() else None
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read usage report at {usage_report_path}: {e}")
+            return None
+        finally:
+            try:
+                os.remove(usage_report_path)
+            except OSError:
+                pass
     
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get summary of collected metrics."""
