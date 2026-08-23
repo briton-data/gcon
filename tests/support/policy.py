@@ -35,7 +35,7 @@ class PolicyEngine:
         if runtime >self.policy["max_runtime"]:
             return (
                 False,
-                f"Runtime {runtime:.2f}s exceeds limit of {self.max_runtime:.2f}s"
+                f"Runtime {runtime:.2f}s exceeds limit of {self.policy['max_runtime']:.2f}s"
             )
 
         return True, f"Runtime {runtime:.2f}s within policy"

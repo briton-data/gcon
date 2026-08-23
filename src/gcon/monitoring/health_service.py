@@ -258,7 +258,7 @@ class HealthService:
     # Trust score
     # ------------------------------------------------------------
 
-    def compute_trust(self):
+    def compute_trust(self, receipts=None, verified_count=None, total_count=None):
         """
         Compute an execution-trust score, distinct from operational
         Cluster Health. Cluster Health asks "is the system running
@@ -267,10 +267,28 @@ class HealthService:
         rather than raw uptime, and is always derived live from the
         coordinator's real receipt store and node registry (never
         cached or hardcoded).
+
+        Give it EITHER `receipts` (a get_receipts()-style list, each
+        with a `verified` bool) OR `verified_count`/`total_count`
+        directly. The latter is what health_check_loop's periodic tick
+        passes -- it tracks these as running totals incrementally
+        (coordinator._verified_receipt_count /
+        _unverified_receipt_count, updated as each receipt is first
+        verified) rather than rebuilding/summing the full receipt list
+        every 3 seconds, so this stays O(1) on that path no matter how
+        large the cumulative receipt history grows. Defaults to
+        fetching the full list internally when neither is given, so
+        every other existing caller (get_trust_score(), tests, etc.)
+        is unaffected.
         """
-        receipts = self.coordinator.get_receipts()
-        total_receipts = len(receipts)
-        verified = sum(1 for r in receipts if r.get("verified"))
+        if total_count is not None:
+            total_receipts = total_count
+            verified = verified_count or 0
+        else:
+            if receipts is None:
+                receipts = self.coordinator.get_receipts()
+            total_receipts = len(receipts)
+            verified = sum(1 for r in receipts if r.get("verified"))
         verification_rate = (verified / total_receipts * 100) if total_receipts else 100.0
 
         nodes = self.coordinator.get_nodes()

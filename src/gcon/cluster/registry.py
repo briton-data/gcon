@@ -65,6 +65,12 @@ class NodeRegistry:
                 # unchanged. getattr with a default: not every node
                 # type is required to have this attribute.
                 "org_id": getattr(node, "org_id", None),
+                # Real remote IP captured at registration time (see
+                # RemoteNodeProxy.address / grpc_transport._peer_address).
+                # None for local/in-process nodes (GCONNode), which
+                # have no network address of their own -- not a
+                # placeholder, a legitimate "not applicable" value.
+                "address": getattr(node, "address", None),
             }
 
     def remove(self, node_id):
@@ -134,6 +140,49 @@ class NodeRegistry:
         """
         with self._lock:
             return dict(self.nodes)
+
+    def claim_best_idle_node(self, score_fn):
+        """
+        Atomically select the best available idle node (lowest
+        score_fn(info) wins) and mark it busy, in one locked
+        operation.
+
+        This closes a real race (AUDIT_REPORT.md 2.3 / audit finding
+        C-1): Scheduler.select_node() used to just scan for an idle
+        node and return it, leaving a window between "read: this node
+        is idle" and "write: mark it busy" (done afterwards, in
+        GCONCoordinator.assign_job()) during which a second, genuinely
+        concurrent assign_job() call could select that exact same
+        node before the first call ever marked it busy -- both would
+        then dispatch a different job to it at once. Selecting and
+        claiming under a single lock acquisition means a second caller
+        either blocks until this one finishes (and then sees the node
+        already "busy"), or already finished and released the lock
+        before this call started -- either way, only one caller can
+        ever walk away with a given node.
+
+        `score_fn(info)` scores one candidate node's info dict; the
+        lowest score wins. Returns the claimed node's live node/agent
+        object (info["node"]), or None if no idle, non-draining node
+        is available.
+        """
+        with self._lock:
+            best_info = None
+            lowest_score = float("inf")
+            for info in self.nodes.values():
+                if info["status"] != "idle" or info.get("draining"):
+                    continue
+                score = score_fn(info)
+                if score < lowest_score:
+                    lowest_score = score
+                    best_info = info
+            if best_info is None:
+                return None
+            # Claim it before releasing the lock -- this is the step
+            # that closes the race; no concurrent caller can see this
+            # node as "idle" again until something explicitly frees it.
+            best_info["status"] = "busy"
+            return best_info["node"]
 
     def heartbeat(self, node_id, status, timestamp):
         """

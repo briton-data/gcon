@@ -13,7 +13,8 @@ Usage:
         --node-id worker-01 \
         --coordinator coordinator.example.com:50051 \
         --cert-dir /etc/gcon/certs \
-        --org-id acme-corp
+        --org-id acme-corp \
+        --capability gpu=A100 --capability ram_gb=128
 
 Env var equivalents (useful for systemd/containers):
     GCON_NODE_ID
@@ -24,12 +25,20 @@ Env var equivalents (useful for systemd/containers):
 GPU capability is auto-detected via GCONAgent.detect_gpu() (GPUtil,
 falls back to "Unknown GPU" if no GPU / GPUtil isn't installed) --
 it is not hardcoded, so this reports whatever hardware is actually
-on the machine it runs on.
+on the machine it runs on. Any --capability flag with the same key
+(e.g. --capability gpu=...) overrides the auto-detected value.
+
+Handles SIGTERM/SIGINT by calling AgentDaemon.stop() with the signal
+as the reason, so an operator- or orchestrator-initiated shutdown (a
+service manager stopping the unit, a container getting SIGTERM) is
+recorded as a deliberate stop rather than surfacing as the node going
+silently offline.
 """
 
 import argparse
 import logging
 import os
+import signal
 import sys
 
 sys.path.insert(0, "src")
@@ -65,6 +74,21 @@ def main():
              "Companies panel or be counted in that org's usage.",
     )
     parser.add_argument(
+        "--hostname",
+        default=os.environ.get("GCON_HOSTNAME"),
+        help="Override the hostname this node reports to the coordinator "
+             "(e.g. for a container whose auto-detected hostname isn't "
+             "externally reachable/meaningful). Default: the machine's "
+             "actual hostname (socket.gethostname()).",
+    )
+    parser.add_argument(
+        "--capability", action="append", default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable, e.g. --capability ram_gb=128. Merged with the "
+             "auto-detected gpu capability; a --capability gpu=... here "
+             "overrides the auto-detected value.",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("GCON_LOG_LEVEL", "INFO"),
     )
@@ -88,6 +112,11 @@ def main():
     # in job receipts.
     gpu_info = agent.detect_gpu()
     capabilities = {"gpu": gpu_info.get("gpu_name", "Unknown GPU")}
+    for item in args.capability:
+        if "=" not in item:
+            parser.error(f"--capability must be KEY=VALUE, got: {item}")
+        key, value = item.split("=", 1)
+        capabilities[key] = value
     if args.org_id:
         # "org_id" is a reserved capability key, not a real hardware
         # capability -- the coordinator's Register handler
@@ -97,8 +126,10 @@ def main():
         capabilities["org_id"] = args.org_id
 
     logger.info(
-        "Starting agent '%s' -> coordinator %s (cert dir: %s, org: %s, detected gpu: %s)",
-        args.node_id, args.coordinator, args.cert_dir, args.org_id or "(none)", capabilities["gpu"],
+        "Starting agent '%s' -> coordinator %s (cert dir: %s, org: %s, "
+        "hostname: %s, capabilities: %s)",
+        args.node_id, args.coordinator, args.cert_dir, args.org_id or "(none)",
+        args.hostname or "(auto)", capabilities,
     )
 
     daemon = AgentDaemon(
@@ -106,8 +137,18 @@ def main():
         coordinator_address=args.coordinator,
         cert_dir=args.cert_dir,
         agent=agent,
+        hostname=args.hostname,
         capabilities=capabilities,
     )
+
+    def handle_signal(signum, frame):
+        logger.info("received signal %s, shutting down", signum)
+        daemon.stop(reason=f"received signal {signum}")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
     daemon.run_forever()
 
 

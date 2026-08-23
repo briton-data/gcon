@@ -37,9 +37,11 @@ class PresentationLayer:
         """
         Return information about all registered nodes.
 
-        `org_id` optionally scopes to a single company's nodes -- used
-        by the dashboard's Companies panel and by an org-scoped API
-        key's view of its own nodes (see coordinator.get_nodes()).
+        `org_id` optionally filters down to nodes belonging to a
+        single company -- passed straight through to
+        GCONCoordinator.get_nodes(), which does the actual filtering.
+        Used by the dashboard's Companies panel and by an org-scoped
+        API key's view of its own fleet (see api/api_v1.py).
         """
 
         return self.coordinator.get_nodes(org_id=org_id)
@@ -536,7 +538,11 @@ class PresentationLayer:
     def get_system_metrics(self):
         """
         Return aggregate resource usage across all nodes, plus basic
-        cluster throughput figures, for the monitoring view.
+        cluster throughput figures, for the monitoring view. Every
+        field here is derived from a live source already used
+        elsewhere on the dashboard (get_node_summary,
+        get_storage_summary, get_global_status) -- nothing here is a
+        separate, potentially-drifting computation.
         """
         nodes = self.coordinator.get_nodes()
 
@@ -544,20 +550,32 @@ class PresentationLayer:
         mem_values = [n["memory"] for n in nodes if isinstance(n["memory"], (int, float))]
 
         jobs = self.coordinator.get_jobs()
+        queued = sum(1 for j in jobs if j["status"] == "pending")
         completed = sum(1 for j in jobs if j["status"] == "completed")
         failed = sum(1 for j in jobs if j["status"] == "failed")
         running = sum(1 for j in jobs if j["status"] == "running")
 
         uptime_seconds = (datetime.now(UTC) - self.started_at).total_seconds()
 
+        health = self.get_cluster_health()
+        global_status = self.get_global_status(health)
+        storage = self.get_storage_summary(health)
+
         return {
             "avg_cpu": round(sum(cpu_values) / len(cpu_values), 1) if cpu_values else 0,
             "avg_memory": round(sum(mem_values) / len(mem_values), 1) if mem_values else 0,
+            "queued_jobs": queued,
             "running_jobs": running,
             "completed_jobs": completed,
             "failed_jobs": failed,
             "event_count": self.coordinator.event_bus.count(),
             "uptime_seconds": int(uptime_seconds),
+            "node_summary": self.get_node_summary(),
+            "scheduler_running": global_status.get("scheduler_running"),
+            "coordinator_online": global_status.get("coordinator_online"),
+            "heartbeat_age_seconds": global_status.get("heartbeat_age_seconds"),
+            "disk_remaining_pct": storage.get("disk_remaining_pct"),
+            "artifact_count": storage.get("artifact_count", 0),
         }
 
     # ------------------------------------------------------------------

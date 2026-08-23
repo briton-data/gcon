@@ -1,116 +1,167 @@
-<div class="gcon-sidebar p-3">
+<div class="gcon-sidebar p-3 d-flex flex-column">
 
-    <h5 class="text-white mb-3 gcon-sidebar-group-label">
-        Operations
-    </h5>
+    <div class="flex-grow-1">
 
-    <div class="list-group" id="tab-nav">
+        <div id="tab-nav">
 
-        <a href="#" data-tab="control-center"
-           class="list-group-item list-group-item-action active">
-            <i class="bi bi-speedometer2 me-2"></i>
-            Control Center
-        </a>
+        <h5 class="mb-2 gcon-sidebar-group-label">Operate</h5>
 
-        <a href="#" data-tab="executions"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-play-circle me-2"></i>
-            Executions
-        </a>
+        <div class="list-group mb-3">
 
-        <a href="#" data-tab="topology"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-diagram-3 me-2"></i>
-            Cluster Visualization
-        </a>
+            <a href="#" data-tab="control-center"
+               class="list-group-item list-group-item-action active">
+                <i class="bi bi-speedometer2 me-2"></i>
+                <span class="gcon-sidebar-label">Control Center</span>
+            </a>
 
-        <a href="#" data-tab="receipts"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-patch-check me-2"></i>
-            Receipts
-        </a>
+            <a href="#" data-tab="executions"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-play-circle me-2"></i>
+                <span class="gcon-sidebar-label">Executions</span>
+            </a>
 
-        <a href="#" data-tab="trust-center"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-shield-check me-2"></i>
-            Trust Center
-        </a>
+            <a href="#" data-tab="cluster"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-diagram-3 me-2"></i>
+                <span class="gcon-sidebar-label">Cluster</span>
+            </a>
 
-        <a href="#" data-tab="explorer"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-compass me-2"></i>
-            Explorer
-        </a>
+            <a href="#" data-tab="explorer" data-explorer-default="nodes"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-hdd-network me-2"></i>
+                <span class="gcon-sidebar-label">Workers</span>
+            </a>
 
-        <a href="#" data-tab="monitoring"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-activity me-2"></i>
-            Real-Time Monitoring
-        </a>
+            <a href="#" data-tab="workflows"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-diagram-2 me-2"></i>
+                <span class="gcon-sidebar-label">Workflows</span>
+            </a>
 
-        <a href="#" data-tab="analytics"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-graph-up me-2"></i>
-            Analytics &amp; History
-        </a>
+        </div>
 
-        <a href="#" data-tab="admin"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-gear me-2"></i>
-            Administration
-        </a>
+        <h5 class="mb-2 gcon-sidebar-group-label">Verify</h5>
+
+        <div class="list-group mb-3">
+
+            <a href="#" data-tab="receipts"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-patch-check me-2"></i>
+                <span class="gcon-sidebar-label">Receipts</span>
+            </a>
+
+            <a href="#" data-tab="trust-center"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-shield-check me-2"></i>
+                <span class="gcon-sidebar-label">Trust Center</span>
+            </a>
+
+        </div>
+
+        <h5 class="mb-2 gcon-sidebar-group-label">Observe</h5>
+
+        <div class="list-group mb-3">
+
+            <a href="#" data-tab="monitoring"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-activity me-2"></i>
+                <span class="gcon-sidebar-label">Real-Time Monitoring</span>
+            </a>
+
+            <a href="#" data-tab="analytics"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-graph-up me-2"></i>
+                <span class="gcon-sidebar-label">Analytics &amp; History</span>
+            </a>
+
+            <a href="#" data-tab="events"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-list-ul me-2"></i>
+                <span class="gcon-sidebar-label">Events</span>
+            </a>
+
+        </div>
+
+        <h5 class="mb-2 gcon-sidebar-group-label">Data</h5>
+
+        <div class="list-group mb-3">
+
+            <a href="#" data-tab="storage"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-server me-2"></i>
+                <span class="gcon-sidebar-label">Storage</span>
+            </a>
+
+            <a href="#" data-tab="explorer" data-explorer-default="artifacts"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-archive me-2"></i>
+                <span class="gcon-sidebar-label">Artifact Registry</span>
+            </a>
+
+        </div>
+
+        </div>
+
+        <h5 class="mb-2 gcon-sidebar-group-label">Manage</h5>
+
+        <div class="list-group" id="tab-nav-mgmt">
+
+            <a href="#" data-tab="organizations"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-building me-2"></i>
+                <span class="gcon-sidebar-label">Organizations</span>
+            </a>
+
+            <a href="#" data-tab="teams"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-people-fill me-2"></i>
+                <span class="gcon-sidebar-label">Teams</span>
+            </a>
+
+            <a href="#" data-tab="users"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-people me-2"></i>
+                <span class="gcon-sidebar-label">Users</span>
+            </a>
+
+            <a href="#" data-tab="api-keys"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-key me-2"></i>
+                <span class="gcon-sidebar-label">API Keys</span>
+            </a>
+
+            <a href="#" data-tab="permissions"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-shield-lock me-2"></i>
+                <span class="gcon-sidebar-label">Permissions</span>
+            </a>
+
+            <a href="#" data-tab="audit-logs"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-journal-text me-2"></i>
+                <span class="gcon-sidebar-label">Audit Logs</span>
+            </a>
+
+            <a href="#" data-tab="notifications"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-bell me-2"></i>
+                <span class="gcon-sidebar-label">Notifications</span>
+                <span class="badge bg-danger ms-1 d-none" id="sidebar-notif-count-badge"></span>
+            </a>
+
+            <a href="#" data-tab="admin"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-gear me-2"></i>
+                <span class="gcon-sidebar-label">Administration</span>
+            </a>
+
+        </div>
 
     </div>
 
-    <h5 class="text-white mb-3 mt-4 gcon-sidebar-group-label">
-        Management
-    </h5>
-
-    <div class="list-group" id="tab-nav-mgmt">
-
-        <a href="#" data-tab="users"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-people me-2"></i>
-            Users
-        </a>
-
-        <a href="#" data-tab="organizations"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-building me-2"></i>
-            Organizations
-        </a>
-
-        <a href="#" data-tab="teams"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-people-fill me-2"></i>
-            Teams
-        </a>
-
-        <a href="#" data-tab="api-keys"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-key me-2"></i>
-            API Keys
-        </a>
-
-        <a href="#" data-tab="permissions"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-shield-lock me-2"></i>
-            Permissions
-        </a>
-
-        <a href="#" data-tab="audit-logs"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-journal-text me-2"></i>
-            Audit Logs
-        </a>
-
-        <a href="#" data-tab="notifications"
-           class="list-group-item list-group-item-action">
-            <i class="bi bi-bell me-2"></i>
-            Notifications
-            <span class="badge bg-danger ms-1" id="notif-count-badge"></span>
-        </a>
-
-    </div>
+    <button type="button" class="gcon-sidebar-collapse-btn mt-3" id="sidebar-collapse-btn">
+        <i class="bi bi-chevron-double-left me-1"></i>
+        <span class="gcon-sidebar-collapse-label">Collapse</span>
+    </button>
 
 </div>

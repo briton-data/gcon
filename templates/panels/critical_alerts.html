@@ -13,6 +13,7 @@
 
         {% if dashboard.critical_alerts %}
 
+            <div class="gcon-alerts-grid">
             {% for alert in dashboard.critical_alerts %}
             <div class="gcon-alert-item {{ alert.severity }}">
                 <i class="bi bi-exclamation-triangle-fill gcon-alert-icon"></i>
@@ -22,6 +23,7 @@
                 </div>
             </div>
             {% endfor %}
+            </div>
 
         {% else %}
 

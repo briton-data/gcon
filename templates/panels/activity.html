@@ -1,55 +1,23 @@
-<div class="gcon-panel">
+<div class="gcon-panel h-100">
 
     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-
-        <h5 class="mb-0">
-
-            Cluster Activity
-
-        </h5>
-
-        <span class="badge bg-success">
-
-            Live
-
-        </span>
-
+        <h5 class="mb-0"><i class="bi bi-activity me-2"></i>Recent Activity</h5>
+        <a href="#" class="gcon-panel-link" data-tab="events">View all &rarr;</a>
     </div>
 
-    <div class="gcon-panel-body">
+    <div class="gcon-panel-body" style="min-height:auto;">
 
-        <div class="gcon-activity-feed" id="activity-feed">
+        <div class="gcon-activity-feed compact" id="activity-feed">
 
         {% if dashboard.events %}
-
-            {% for event in dashboard.events %}
-
+            {% for event in dashboard.events[:6] %}
             <div class="gcon-activity-item">
-
-                <div class="gcon-activity-time">
-
-                    {{ event.timestamp }}
-
-                </div>
-
-                <div class="gcon-activity-message">
-
-                    {{ event.message }}
-
-                </div>
-
+                <div class="gcon-activity-time">{{ event.timestamp }}</div>
+                <div class="gcon-activity-message">{{ event.message }}</div>
             </div>
-
             {% endfor %}
-
         {% else %}
-
-            <div class="text-secondary">
-
-                No recent activity.
-
-            </div>
-
+            <div class="text-secondary small">No recent activity.</div>
         {% endif %}
 
         </div>

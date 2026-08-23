@@ -16,32 +16,22 @@ class Scheduler:
 
     def select_node(self):
         """
-        Select the least-loaded idle node.
+        Select the least-loaded idle node and atomically claim it
+        (marks it busy in the registry) in one locked operation, so
+        two concurrent callers can never both walk away with the same
+        node (AUDIT_REPORT.md 2.3 / audit finding C-1) -- see
+        NodeRegistry.claim_best_idle_node() for how the race is
+        closed.
         """
 
-        best_node = None
-        lowest_score = float("inf")
-
-        # Snapshot rather than iterate the live registry dict: another
-        # thread can concurrently register()/remove() a node, which
-        # would otherwise raise "dictionary changed size during
-        # iteration" mid-scan.
-        for info in self.registry.snapshot().values():
-
-            if info["status"] != "idle" or info.get("draining"):
-                continue
-
-            score = (
+        def score(info):
+            return (
                 info["cpu"] * 0.5 +
                 info["memory"] * 0.3 +
                 info["running_jobs"] * 20
-        )
-        
-            if score < lowest_score:
-                lowest_score = score
-                best_node = info["node"]
+            )
 
-        return best_node
+        return self.registry.claim_best_idle_node(score)
     
 
     def has_available_node(self):

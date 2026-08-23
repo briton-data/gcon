@@ -77,12 +77,12 @@ def main():
             "timestamp": datetime.now(UTC),
         })
 
-    def on_node_registered(node_id, capabilities, org_id=None):
-        proxy = RemoteNodeProxy(node_id, transport, org_id=org_id)
+    def on_node_registered(node_id, capabilities, org_id=None, address=None):
+        proxy = RemoteNodeProxy(node_id, transport, org_id=org_id, address=address)
         coordinator.register_agent(proxy)
         logger.info(
-            "'%s' registered with scheduler, org=%s, capabilities=%s",
-            node_id, org_id or "(none)", capabilities,
+            "'%s' registered with scheduler from %s, org=%s, capabilities=%s",
+            node_id, address or "(unknown address)", org_id or "(none)", capabilities,
         )
 
     def on_node_disconnected(node_id):

@@ -153,12 +153,16 @@ function renderFeed(containerId, events) {
 const TAB_TITLES = {
     "control-center": "Control Center",
     "executions": "Executions",
+    "cluster": "Cluster",
     "topology": "Cluster Visualization",
     "receipts": "Receipts",
     "trust-center": "Trust Center",
     "explorer": "Explorer",
+    "workflows": "Workflows",
     "monitoring": "Real-Time Monitoring",
     "analytics": "Analytics & History",
+    "events": "Events",
+    "storage": "Storage",
     "admin": "Administration",
     "users": "Users",
     "organizations": "Organizations",
@@ -166,6 +170,29 @@ const TAB_TITLES = {
     "api-keys": "API Keys",
     "permissions": "Permissions",
     "audit-logs": "Audit Logs",
+    "notifications": "Notifications",
+};
+
+const TAB_SUBTITLES = {
+    "control-center": "Execution Verification Platform",
+    "executions": "Every job GCON has queued, run, or verified",
+    "cluster": "Coordinator, scheduler, node registry, storage, and live topology",
+    "topology": "Live cluster topology",
+    "receipts": "Execution receipts and verification status",
+    "trust-center": "Receipt integrity, signatures, and verification history",
+    "explorer": "Nodes and artifacts registered with the cluster",
+    "workflows": "Workflow / DAG orchestration",
+    "monitoring": "CPU, GPU, memory, and queue health in real time",
+    "analytics": "Historical execution, resource, and verification trends",
+    "events": "Searchable cluster event stream",
+    "storage": "Artifact capacity and disk health",
+    "admin": "Cluster-wide administration",
+    "users": "User accounts and roles",
+    "organizations": "Organizations using this cluster",
+    "teams": "Teams and membership",
+    "api-keys": "API keys and scopes",
+    "permissions": "Role permissions",
+    "audit-logs": "Operator action history",
     "notifications": "Notifications",
 };
 
@@ -208,7 +235,7 @@ function applyPermissionGating() {
     }
 }
 
-function switchTab(tab) {
+function switchTab(tab, clickedEl) {
     if (!canAccessTab(tab)) return;
 
     currentTab = tab;
@@ -218,10 +245,12 @@ function switchTab(tab) {
     if (target) target.classList.remove("d-none");
 
     document.querySelectorAll("#tab-nav a, #tab-nav-mgmt a").forEach(el => {
-        el.classList.toggle("active", el.dataset.tab === tab);
+        const matches = clickedEl ? el === clickedEl : el.dataset.tab === tab;
+        el.classList.toggle("active", matches);
     });
 
     setText("tab-title", TAB_TITLES[tab] || tab);
+    setText("tab-subtitle", TAB_SUBTITLES[tab] || "");
     loadActiveTab();
 }
 
@@ -229,13 +258,28 @@ function setupTabNav() {
     document.querySelectorAll("#tab-nav a, #tab-nav-mgmt a").forEach(el => {
         el.addEventListener("click", (e) => {
             e.preventDefault();
-            switchTab(el.dataset.tab);
+
+            if (el.dataset.tab === "explorer" && el.dataset.explorerDefault) {
+                explorerView = el.dataset.explorerDefault;
+                const subBtn = document.querySelector(`#explorer-subnav button[data-explorer="${explorerView}"]`);
+                if (subBtn) {
+                    document.querySelectorAll("#explorer-subnav button").forEach(b => {
+                        b.classList.remove("btn-primary");
+                        b.classList.add("btn-outline-primary");
+                    });
+                    subBtn.classList.remove("btn-outline-primary");
+                    subBtn.classList.add("btn-primary");
+                }
+            }
+
+            switchTab(el.dataset.tab, el);
         });
     });
 }
 
 function loadActiveTab() {
     if (currentTab === "control-center") loadControlCenter();
+    else if (currentTab === "cluster") loadControlCenter();
     else if (currentTab === "executions") loadExecutionsTab();
     else if (currentTab === "topology") loadTopology();
     else if (currentTab === "receipts") loadReceiptsTab();
@@ -243,6 +287,8 @@ function loadActiveTab() {
     else if (currentTab === "explorer") loadExplorer();
     else if (currentTab === "monitoring") loadMonitoring();
     else if (currentTab === "analytics") loadAnalytics();
+    else if (currentTab === "events") loadEventsTab();
+    else if (currentTab === "storage") loadControlCenter();
     else if (currentTab === "admin") loadAdmin();
     else if (currentTab === "users") loadUsersTab();
     else if (currentTab === "organizations") loadOrganizationsTab();
@@ -366,119 +412,18 @@ async function loadCluster() {
     }
 }
 
-function nodeActionButtons(node) {
-    return `
-        <div class="btn-group">
-            <button class="btn btn-sm btn-outline-warning gcon-node-action-btn"
-                data-action="drain"
-                data-node-id="${escapeHtml(node.node_id)}"
-                title="Drain">
-                <i class="bi bi-sign-turn-slight-right"></i>
-            </button>
-
-            <button class="btn btn-sm btn-outline-info gcon-node-action-btn"
-                data-action="restart"
-                data-node-id="${escapeHtml(node.node_id)}"
-                title="Restart">
-                <i class="bi bi-arrow-repeat"></i>
-            </button>
-
-            <button class="btn btn-sm btn-outline-danger gcon-node-action-btn"
-                data-action="stop"
-                data-node-id="${escapeHtml(node.node_id)}"
-                title="Stop">
-                <i class="bi bi-stop-circle"></i>
-            </button>
-        </div>
-    `;
-}
-
-function bindNodeActionButtons() {
-    document.querySelectorAll(".gcon-node-action-btn").forEach(btn => {
-
-        btn.addEventListener("click", async () => {
-
-            const action = btn.dataset.action;
-            const nodeId = btn.dataset.nodeId;
-
-            if (
-                action === "stop" &&
-                !confirm(`Stop and remove node ${nodeId} from the cluster?`)
-            ) {
-                return;
-            }
-
-            btn.disabled = true;
-
-            try {
-
-                await fetchJson(
-                    `/cluster/nodes/${encodeURIComponent(nodeId)}/${action}`,
-                    {
-                        method: "POST",
-                    }
-                );
-
-                await refreshDashboard();
-
-            } catch (err) {
-
-                console.error(`Failed to ${action} node:`, err);
-
-                showToast(err.message || `Failed to ${action} node.`, true);
-
-                btn.disabled = false;
-
-            }
-
-        });
-
-    });
-}
-
+// Fetches the full node list for loadControlCenter()'s Promise.all(),
+// whose return value populates the "Select node…" dropdown in the
+// Operations Panel (see populateOperationsSelectors()). No longer
+// renders its own table: templates/panels/nodes.html was removed once
+// the Explorer/Admin tabs replaced it as the real, live node browser --
+// this fetch-and-return half is a genuine, separate dependency of
+// loadControlCenter() and stayed after that cleanup.
 async function loadNodes() {
-
-    const body = document.getElementById("nodes-body");
 
     try {
 
         const nodes = await fetchJson("/nodes");
-
-        if (!body) {
-            return nodes;
-        }
-
-        if (nodes.length === 0) {
-
-            body.innerHTML =
-                `<tr><td colspan="7" class="text-center text-secondary">No registered nodes.</td></tr>`;
-
-        } else {
-
-            let rows = "";
-
-            for (const node of nodes) {
-
-                rows += `
-                    <tr>
-                        <td>${escapeHtml(node.node_id)}</td>
-                        <td>${statusBadge(node.status)}</td>
-                        <td>${escapeHtml(node.running_jobs)}</td>
-                        <td>${escapeHtml(node.cpu)}</td>
-                        <td>${escapeHtml(node.memory)}</td>
-                        <td>${escapeHtml(node.last_seen)}</td>
-                        <td>${nodeActionButtons(node)}</td>
-                    </tr>
-                `;
-
-            }
-
-            body.innerHTML = rows;
-
-            bindNodeActionButtons();
-
-        }
-
         return nodes;
 
     } catch (err) {
@@ -493,121 +438,23 @@ async function loadNodes() {
 
 }
 
-function jobActionCell(job) {
-
-    if (job.status !== "running") {
-        return `<span class="text-secondary">&mdash;</span>`;
-    }
-
-    return `
-        <button class="btn btn-sm btn-outline-danger gcon-job-cancel-btn"
-            data-job-id="${escapeHtml(job.job_id)}">
-            <i class="bi bi-x-circle me-1"></i>
-            Cancel
-        </button>
-    `;
-}
-
-function bindJobActionButtons() {
-
-    document.querySelectorAll(".gcon-job-cancel-btn").forEach(btn => {
-
-        btn.addEventListener("click", async () => {
-
-            const jobId = btn.dataset.jobId;
-
-            if (!confirm(`Cancel running job ${jobId}?`)) {
-                return;
-            }
-
-            btn.disabled = true;
-
-            try {
-
-                await fetchJson(
-                    `/jobs/${encodeURIComponent(jobId)}/cancel`,
-                    {
-                        method: "POST",
-                    }
-                );
-
-                await refreshDashboard();
-
-            } catch (err) {
-
-                console.error("Failed to cancel job:", err);
-
-                showToast(err.message || "Failed to cancel job.", true);
-
-                btn.disabled = false;
-
-            }
-
-        });
-
-    });
-
-}
-
 
 let jobsPageLimit = 50; // grows by 50 each "Load more" click, resets on filter change
 
+// Fetches the full job list for loadControlCenter()'s Promise.all(),
+// whose return value populates the "Select running job…" dropdown in
+// the Operations Panel (see populateOperationsSelectors()). No longer
+// renders its own table: templates/panels/jobs.html was removed once
+// the Executions tab replaced it as the real, live job browser --
+// this fetch-and-return half is a genuine, separate dependency of
+// loadControlCenter() and stayed after that cleanup.
 async function loadJobs() {
-
-    const body = document.getElementById("jobs-body");
-    const statusFilter = document.getElementById("jobs-status-filter");
-    const status = statusFilter ? statusFilter.value : "";
 
     try {
 
         const qs = new URLSearchParams();
-        if (status) qs.set("status", status);
         qs.set("limit", jobsPageLimit);
         const jobs = await fetchJson(`/jobs?${qs.toString()}`);
-
-        if (!body) {
-            return jobs;
-        }
-
-        if (jobs.length === 0) {
-
-            body.innerHTML =
-                `<tr><td colspan="7" class="text-center text-secondary">No jobs${status ? ` with status "${escapeHtml(status)}"` : ""}.</td></tr>`;
-
-        } else {
-
-            let rows = "";
-
-            for (const job of jobs) {
-
-                rows += `
-                    <tr>
-                        <td>${escapeHtml(job.job_id)}</td>
-                        <td>${statusBadge(job.status)}</td>
-                        <td>${escapeHtml(job.node_id || "-")}</td>
-                        <td>${escapeHtml(job.artifacts)}</td>
-                        <td>${escapeHtml(job.created_at || "-")}</td>
-                        <td>${escapeHtml(job.completed_at || "-")}</td>
-                        <td>${jobActionCell(job)}</td>
-                    </tr>
-                `;
-
-            }
-
-            body.innerHTML = rows;
-
-            bindJobActionButtons();
-
-        }
-
-        // Fewer rows than we asked for means we've reached the end;
-        // hide "Load more" instead of offering a click that changes
-        // nothing (and would otherwise look broken).
-        const loadMoreBtn = document.getElementById("jobs-load-more-btn");
-        if (loadMoreBtn) {
-            loadMoreBtn.style.display = jobs.length < jobsPageLimit ? "none" : "inline-block";
-        }
-
         return jobs;
 
     } catch (err) {
@@ -630,6 +477,31 @@ async function loadEvents() {
     } catch (err) {
         console.error("Failed to load events:", err);
         setConnectionStatus(false);
+    }
+}
+
+let eventsTabData = [];
+
+async function loadEventsTab() {
+    try {
+        eventsTabData = await fetchJson("/events");
+        renderFeed("events-tab-feed", eventsTabData);
+    } catch (err) {
+        console.error("Failed to load events tab:", err);
+    }
+}
+
+function setupEventsTab() {
+    const search = document.getElementById("events-search");
+    if (search) {
+        search.addEventListener("input", () => {
+            const q = search.value.toLowerCase();
+            const filtered = !q ? eventsTabData : eventsTabData.filter(e =>
+                (e.message || "").toLowerCase().includes(q) ||
+                (e.timestamp || "").toLowerCase().includes(q)
+            );
+            renderFeed("events-tab-feed", filtered);
+        });
     }
 }
 
@@ -697,6 +569,59 @@ function renderGlobalStatus(status) {
         coordEl.textContent = status.coordinator_id;
         coordEl.title = status.coordinator_id;
     }
+
+    // System Services panel (Control Center) — same live data as the
+    // navbar strip above, shown with full status words instead of a dot-only pill.
+    const svc = (key, healthy, onLabel, offLabel) => {
+        const dot = document.getElementById(`svc-dot-${key}`);
+        const val = document.getElementById(`svc-val-${key}`);
+        if (dot) {
+            dot.classList.remove("ok", "warn", "bad");
+            dot.classList.add(healthy ? "ok" : "bad");
+        }
+        if (val) {
+            val.classList.remove("ok", "warn", "bad");
+            val.classList.add(healthy ? "ok" : "bad");
+            val.textContent = healthy ? onLabel : offLabel;
+        }
+    };
+    svc("coordinator", status.coordinator_online, "Online", "Offline");
+    svc("scheduler", status.scheduler_running, "Running", "Paused");
+    svc("receipts", status.receipt_engine_online, "Online", "Offline");
+    svc("storage", status.storage_online, "Healthy", "Unhealthy");
+
+    const hbAge = status.heartbeat_age_seconds;
+    const hbDot = document.getElementById("svc-dot-heartbeat");
+    const hbVal = document.getElementById("svc-val-heartbeat");
+    if (hbDot) {
+        hbDot.classList.remove("ok", "warn", "bad");
+        hbDot.classList.add(hbAge === null || hbAge === undefined ? "warn" : hbAge < 30 ? "ok" : hbAge < 120 ? "warn" : "bad");
+    }
+    if (hbVal) hbVal.textContent = formatAge(hbAge);
+}
+
+function renderExecutionsByCompany(companies) {
+    const list = document.getElementById("executions-by-company-list");
+    if (!list) return;
+    companies = companies || [];
+
+    if (companies.length === 0) {
+        list.innerHTML = `<div class="text-muted small px-1 py-2">No organizations yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = companies.slice(0, 6).map(c => `
+        <div class="gcon-company-compact-row gcon-panel-link" data-tab="cluster">
+            <span class="gcon-company-compact-name text-truncate">${escapeHtml(c.name)}</span>
+            <span class="gcon-company-compact-stats">
+                <span class="stat running"><span class="n">${c.jobs.running}</span><span class="l">Running</span></span>
+                <span class="stat completed"><span class="n">${c.jobs.completed}</span><span class="l">Done</span></span>
+                <span class="stat failed"><span class="n">${c.jobs.failed}</span><span class="l">Failed</span></span>
+            </span>
+        </div>
+    `).join("");
+
+    bindPanelLinks();
 }
 
 function renderCriticalAlerts(alerts) {
@@ -720,7 +645,7 @@ function renderCriticalAlerts(alerts) {
         return;
     }
 
-    body.innerHTML = alerts.map(a => `
+    body.innerHTML = `<div class="gcon-alerts-grid">` + alerts.map(a => `
         <div class="gcon-alert-item ${escapeHtml(a.severity)}">
             <i class="bi bi-exclamation-triangle-fill gcon-alert-icon"></i>
             <div>
@@ -728,7 +653,7 @@ function renderCriticalAlerts(alerts) {
                 <div class="gcon-alert-message">${escapeHtml(a.message)}</div>
             </div>
         </div>
-    `).join("");
+    `).join("") + `</div>`;
 }
 
 function renderNodeSummary(summary) {
@@ -761,24 +686,17 @@ function renderNodeSummary(summary) {
 function renderReceiptsSummary(summary) {
     if (!summary) return;
     const total = summary.total || 0;
-    const pct = (n) => total ? (n / total * 100).toFixed(1) : 0;
+    const verifiedPct = total ? (summary.verified / total * 100).toFixed(1) : 0;
 
     setText("receipt-summary-total", total);
+    setText("receipt-summary-verified", summary.verified);
+    setText("receipt-summary-unverified", summary.unverified);
+    setText("receipt-summary-rate", `${verifiedPct}%`);
 
-    const bar = document.getElementById("receipt-summary-bar");
-    if (bar) {
-        bar.innerHTML = `
-            <div class="seg" style="width:${pct(summary.verified)}%; background: var(--success);"></div>
-            <div class="seg" style="width:${pct(summary.unverified)}%; background: var(--danger);"></div>
-        `;
-    }
-
-    const legend = document.getElementById("receipt-summary-legend");
-    if (legend) {
-        legend.innerHTML = `
-            <span class="item"><span class="swatch" style="background:var(--success);"></span>Verified ${summary.verified}</span>
-            <span class="item"><span class="swatch" style="background:var(--danger);"></span>Unverified ${summary.unverified}</span>
-        `;
+    const donut = document.getElementById("receipt-donut");
+    if (donut) {
+        donut.style.background =
+            `conic-gradient(var(--success) 0 ${verifiedPct}%, var(--danger) ${verifiedPct}% 100%)`;
     }
 }
 
@@ -840,6 +758,18 @@ function renderHomeDashboard(data) {
     renderReceiptsSummary(data.receipts_summary);
     renderStorageSummary(data.storage_summary);
     renderExecutionTimeline(data.execution_timeline);
+    if (data.companies) {
+        renderExecutionsByCompany(data.companies);
+        renderCompaniesTable(data.companies);
+        companiesData = data.companies;
+    }
+    if (data.trust) setText("metric-trust-score", data.trust.trust_score);
+    if (data.metrics) {
+        setText("metric-total-nodes", data.metrics.total_nodes);
+        setText("metric-running-jobs", data.metrics.running_jobs);
+        setText("metric-completed-jobs", data.metrics.completed_jobs);
+        setText("metric-failed-jobs", data.metrics.failed_jobs);
+    }
 }
 
 // ---------------------------------------------------------------
@@ -946,6 +876,14 @@ function bindPanelLinks() {
     document.querySelectorAll(".gcon-panel-link[data-tab]").forEach(link => {
         link.addEventListener("click", (e) => {
             e.preventDefault();
+
+            if (link.dataset.tab === "explorer" && link.dataset.explorerDefault) {
+                const tabLink = document.querySelector(
+                    `#tab-nav a[data-tab="explorer"][data-explorer-default="${link.dataset.explorerDefault}"]`
+                );
+                if (tabLink) { tabLink.click(); return; }
+            }
+
             const tabLink = document.querySelector(`#tab-nav a[data-tab="${link.dataset.tab}"]`);
             if (tabLink) tabLink.click();
         });
@@ -1062,15 +1000,16 @@ function setupOperationsPanel() {
 
     const bind = (id, handler) => {
 
-        const btn = document.getElementById(id);
+        const ids = Array.isArray(id) ? id : [id];
 
-        if (btn) {
-
-            btn.addEventListener("click", () =>
-                handler().catch(() => {})
-            );
-
-        }
+        ids.forEach(elId => {
+            const btn = document.getElementById(elId);
+            if (btn) {
+                btn.addEventListener("click", () =>
+                    handler().catch(() => {})
+                );
+            }
+        });
 
     };
 
@@ -1093,7 +1032,7 @@ function setupOperationsPanel() {
     );
 
     bind(
-        "op-refresh-cluster-btn",
+        ["op-refresh-cluster-btn", "op-refresh-cluster-btn-inline"],
         () => opCall(
             "/cluster",
             {},
@@ -1256,6 +1195,23 @@ function setupOperationsPanel() {
             { method: "POST" },
             "Failed jobs re-queued."
         )
+    );
+
+    bind(
+        "op-clear-failed-btn",
+        async () => {
+
+            if (!confirm("Permanently drop every currently failed job? This cannot be undone.")) {
+                return;
+            }
+
+            await opCall(
+                "/jobs/clear-failed",
+                { method: "POST" },
+                "Failed jobs cleared."
+            );
+
+        }
     );
 
     bind(
@@ -1721,14 +1677,38 @@ async function openReceiptDetail(receiptId) {
 // ---------------------------------------------------------------
 
 let executionsData = [];
+let companiesData = [];
+let execStatusFilter = "";
+let execCompanyFilter = "";
+let execSearchQuery = "";
+let execPage = 1;
+const EXEC_PAGE_SIZE = 25;
 
-function filterExecutionsData(query) {
-    if (!query) return executionsData;
-    const q = query.toLowerCase();
-    return executionsData.filter(j =>
-        (j.job_id || "").toLowerCase().includes(q) ||
-        (j.node_id || "").toLowerCase().includes(q)
-    );
+function filterExecutionsData() {
+    let rows = executionsData;
+
+    if (execStatusFilter) {
+        rows = rows.filter(j => j.status === execStatusFilter);
+    }
+    if (execCompanyFilter) {
+        rows = rows.filter(j => j.org_id === execCompanyFilter);
+    }
+    if (execSearchQuery) {
+        const q = execSearchQuery.toLowerCase();
+        rows = rows.filter(j =>
+            (j.job_id || "").toLowerCase().includes(q) ||
+            (j.node_id || "").toLowerCase().includes(q)
+        );
+    }
+    return rows;
+}
+
+function formatDuration(seconds) {
+    if (seconds === undefined || seconds === null) return "--";
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return `${m}m ${s}s`;
 }
 
 function buildLifecycleStepper(job) {
@@ -1764,47 +1744,57 @@ function buildLifecycleStepper(job) {
     `;
 }
 
-function renderExecutionCards(jobs) {
-    const list = document.getElementById("executions-list");
-    if (!list) return;
+function renderExecutionsTable() {
+    const tbody = document.getElementById("executions-tbody");
+    if (!tbody) return;
 
-    if (jobs.length === 0) {
-        list.innerHTML = `<div class="text-secondary text-center py-4">No executions submitted yet.</div>`;
-        return;
+    const filtered = filterExecutionsData();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / EXEC_PAGE_SIZE));
+    execPage = Math.min(execPage, totalPages);
+    const start = (execPage - 1) * EXEC_PAGE_SIZE;
+    const pageRows = filtered.slice(start, start + EXEC_PAGE_SIZE);
+
+    if (pageRows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-secondary text-center py-4">No executions match this filter.</td></tr>`;
+    } else {
+        tbody.innerHTML = pageRows.map(job => `
+            <tr class="gcon-exec-row" data-job-id="${escapeHtml(job.job_id)}" style="cursor:pointer;">
+                <td class="mono small">${escapeHtml(job.job_id)}</td>
+                <td>${statusBadge(job.status)}</td>
+                <td>${escapeHtml(job.node_id || "unassigned")}</td>
+                <td class="text-secondary small">${escapeHtml(job.created_at || "-")}</td>
+                <td class="text-secondary small">${formatDuration(job.runtime_seconds)}</td>
+            </tr>
+        `).join("");
+
+        tbody.querySelectorAll(".gcon-exec-row").forEach(row => {
+            row.addEventListener("click", () => openExecutionDetail(row.dataset.jobId));
+        });
     }
 
-    list.innerHTML = jobs.map(job => `
-        <div class="gcon-exec-card" data-job-id="${escapeHtml(job.job_id)}">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <span class="gcon-receipt-id" title="${escapeHtml(job.job_id)}">${escapeHtml(job.job_id)}</span>
-                <span class="text-secondary small">${escapeHtml(job.node_id || "unassigned")} &middot; ${escapeHtml(job.created_at || "-")}</span>
-            </div>
-            ${buildLifecycleStepper(job)}
-        </div>
-    `).join("");
+    const rangeStart = filtered.length === 0 ? 0 : start + 1;
+    const rangeEnd = Math.min(start + EXEC_PAGE_SIZE, filtered.length);
+    setText("executions-page-info", `${rangeStart}-${rangeEnd} of ${filtered.length}`);
 
-    list.querySelectorAll(".gcon-exec-card").forEach(card => {
-        card.addEventListener("click", () => openExecutionDetail(card.dataset.jobId));
-    });
+    const prevBtn = document.getElementById("executions-prev-page");
+    const nextBtn = document.getElementById("executions-next-page");
+    if (prevBtn) prevBtn.disabled = execPage <= 1;
+    if (nextBtn) nextBtn.disabled = execPage >= totalPages;
 }
 
 function renderExecutionSummaryTiles(jobs) {
-    const running = jobs.filter(j => j.status === "running").length;
-    const completed = jobs.filter(j => j.status === "completed").length;
-    const failed = jobs.filter(j => j.status === "failed" || j.status === "cancelled").length;
     setText("exec-tab-total", jobs.length);
-    setText("exec-tab-running", running);
-    setText("exec-tab-completed", completed);
-    setText("exec-tab-failed", failed);
+    setText("exec-tab-queued", jobs.filter(j => j.status === "pending").length);
+    setText("exec-tab-running", jobs.filter(j => j.status === "running").length);
+    setText("exec-tab-completed", jobs.filter(j => j.status === "completed").length);
+    setText("exec-tab-failed", jobs.filter(j => j.status === "failed").length);
 }
 
 async function loadExecutionsTab() {
     try {
         executionsData = await fetchJson("/jobs");
         renderExecutionSummaryTiles(executionsData);
-
-        const search = document.getElementById("executions-search");
-        renderExecutionCards(filterExecutionsData(search ? search.value : ""));
+        renderExecutionsTable();
     } catch (err) {
         console.error("Failed to load executions:", err);
         setConnectionStatus(false);
@@ -1814,8 +1804,37 @@ async function loadExecutionsTab() {
 function setupExecutionsTab() {
     const search = document.getElementById("executions-search");
     if (search) {
-        search.addEventListener("input", () => renderExecutionCards(filterExecutionsData(search.value)));
+        search.addEventListener("input", () => {
+            execSearchQuery = search.value;
+            execPage = 1;
+            renderExecutionsTable();
+        });
     }
+
+    const companyFilter = document.getElementById("executions-company-filter");
+    if (companyFilter) {
+        companyFilter.addEventListener("change", () => {
+            execCompanyFilter = companyFilter.value;
+            execPage = 1;
+            renderExecutionsTable();
+        });
+    }
+
+    document.querySelectorAll("#executions-status-filter button").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll("#executions-status-filter button").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            execStatusFilter = btn.dataset.status;
+            execPage = 1;
+            renderExecutionsTable();
+        });
+    });
+
+    const prevBtn = document.getElementById("executions-prev-page");
+    if (prevBtn) prevBtn.addEventListener("click", () => { execPage -= 1; renderExecutionsTable(); });
+
+    const nextBtn = document.getElementById("executions-next-page");
+    if (nextBtn) nextBtn.addEventListener("click", () => { execPage += 1; renderExecutionsTable(); });
 }
 
 async function openExecutionDetail(jobId) {
@@ -1915,12 +1934,12 @@ async function openExecutionDetail(jobId) {
 // ---------------------------------------------------------------
 
 const EXPLORER_COLUMNS = {
-    nodes: ["node_id", "status", "running_jobs", "cpu", "memory", "last_seen"],
+    nodes: ["node_id", "address", "status", "running_jobs", "cpu", "memory", "last_seen"],
     artifacts: ["artifact_id", "filename", "sha256", "size", "uploaded_at"],
 };
 
 const EXPLORER_HEADERS = {
-    nodes: ["Node ID", "Status", "Running Jobs", "CPU", "Memory", "Last Seen"],
+    nodes: ["Node ID", "Address", "Status", "Running Jobs", "CPU", "Memory", "Last Seen"],
     artifacts: ["Artifact ID", "Filename", "SHA-256", "Size (bytes)", "Uploaded"],
 };
 
@@ -2080,10 +2099,62 @@ async function loadMonitoring() {
 
         setText("sm-avg-cpu", `${metrics.avg_cpu}%`);
         setText("sm-avg-memory", `${metrics.avg_memory}%`);
+        setText("sm-queued", metrics.queued_jobs);
         setText("sm-running", metrics.running_jobs);
         setText("sm-event-count", metrics.event_count);
         setText("sm-uptime", formatUptime(metrics.uptime_seconds));
-        setText("sm-connection", "Live");
+
+        const connBadge = document.getElementById("sm-connection");
+        if (connBadge) {
+            connBadge.textContent = "Live";
+            connBadge.classList.remove("bg-danger");
+            connBadge.classList.add("bg-success");
+        }
+
+        const nodeHealth = document.getElementById("sm-node-health");
+        if (nodeHealth) {
+            const ns = metrics.node_summary || {};
+            nodeHealth.innerHTML = `
+                <div class="gcon-service-list">
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Idle</span><span class="gcon-service-value">${ns.idle ?? 0}</span></div>
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Busy</span><span class="gcon-service-value">${ns.busy ?? 0}</span></div>
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot warn"></span>Draining</span><span class="gcon-service-value muted">${ns.draining ?? 0}</span></div>
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot bad"></span>Offline</span><span class="gcon-service-value bad">${ns.offline ?? 0}</span></div>
+                </div>
+            `;
+        }
+
+        const storageHealth = document.getElementById("sm-storage-health");
+        if (storageHealth) {
+            const pct = metrics.disk_remaining_pct;
+            storageHealth.innerHTML = `
+                <div class="gcon-summary-widget">
+                    <div class="gcon-summary-headline">
+                        <span class="value">${pct === null || pct === undefined ? "--" : pct + "%"}</span>
+                        <span class="label">disk free</span>
+                    </div>
+                    <div class="gcon-summary-bar">
+                        <div class="seg" style="width:${pct === null || pct === undefined ? 0 : (100 - pct)}%; background: var(--info);"></div>
+                    </div>
+                    <div class="gcon-summary-legend">
+                        <span class="item"><span class="swatch" style="background:var(--info);"></span>${metrics.artifact_count ?? 0} artifact(s)</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        const servicesHealth = document.getElementById("sm-services-health");
+        if (servicesHealth) {
+            const svc = (healthy, onLabel, offLabel) =>
+                `<span class="gcon-service-value ${healthy ? "ok" : "bad"}">${healthy ? onLabel : offLabel}</span>`;
+            servicesHealth.innerHTML = `
+                <div class="gcon-service-list">
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ${metrics.coordinator_online ? "ok" : "bad"}"></span>Coordinator</span>${svc(metrics.coordinator_online, "Online", "Offline")}</div>
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ${metrics.scheduler_running ? "ok" : "bad"}"></span>Scheduler</span>${svc(metrics.scheduler_running, "Running", "Paused")}</div>
+                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot"></span>Heartbeat</span><span class="gcon-service-value muted">${formatAge(metrics.heartbeat_age_seconds)}</span></div>
+                </div>
+            `;
+        }
 
         renderFeed(
             "monitoring-activity-feed",
@@ -2096,7 +2167,12 @@ async function loadMonitoring() {
             err
         );
         setConnectionStatus(false);
-        setText("sm-connection", "Down");
+        const connBadge = document.getElementById("sm-connection");
+        if (connBadge) {
+            connBadge.textContent = "Down";
+            connBadge.classList.remove("bg-success");
+            connBadge.classList.add("bg-danger");
+        }
     }
 }
 
@@ -2162,6 +2238,24 @@ async function loadAnalytics() {
             "analytics-timeline",
             analytics.timeline
         );
+
+        const companiesTbody = document.getElementById("analytics-companies-tbody");
+        if (companiesTbody) {
+            const companies = analytics.companies || [];
+            companiesTbody.innerHTML = companies.length === 0
+                ? `<tr><td colspan="7" class="text-secondary text-center py-4">No organizations yet.</td></tr>`
+                : companies.map(c => `
+                    <tr>
+                        <td>${escapeHtml(c.name)}</td>
+                        <td>${c.nodes_online}/${c.nodes_total}</td>
+                        <td>${c.jobs.running}</td>
+                        <td>${c.jobs.completed}</td>
+                        <td>${c.jobs.failed}</td>
+                        <td class="text-secondary small">${formatDuration(c.usage.compute_seconds)}</td>
+                        <td class="text-secondary small">${(c.usage.llm_input_tokens + c.usage.llm_output_tokens).toLocaleString()}</td>
+                    </tr>
+                `).join("");
+        }
 
     } catch (err) {
         console.error(
@@ -2280,35 +2374,13 @@ function updateClock() {
 }
 
 function setupControls() {
-    const refreshBtn = document.getElementById("refresh-now-btn");
-    if (refreshBtn) refreshBtn.addEventListener("click", refreshDashboard);
-
-    const jobsStatusFilter = document.getElementById("jobs-status-filter");
-    if (jobsStatusFilter) {
-        jobsStatusFilter.addEventListener("change", () => {
-            jobsPageLimit = 50; // reset paging when the filter changes
-            loadJobs();
-        });
-    }
-
-    const jobsLoadMoreBtn = document.getElementById("jobs-load-more-btn");
-    if (jobsLoadMoreBtn) {
-        jobsLoadMoreBtn.addEventListener("click", () => {
-            jobsPageLimit += 50;
-            loadJobs();
-        });
-    }
-
-    const pauseBtn = document.getElementById("pause-btn");
-    if (pauseBtn) {
-        pauseBtn.addEventListener("click", () => {
-            isPaused = !isPaused;
-            pauseBtn.innerHTML = isPaused
-                ? '<i class="bi bi-play-fill"></i>'
-                : '<i class="bi bi-pause-fill"></i>';
-            pauseBtn.title = isPaused ? "Resume live updates" : "Pause live updates";
-        });
-    }
+    // refresh-now-btn and pause-btn were removed from the navbar --
+    // the dashboard already auto-refreshes on multiple independent
+    // timers (refreshDashboard, loadHealthBadge, refreshNotifBadge)
+    // plus the live websocket push, so a manual refresh control was
+    // redundant, and pause only ever silenced one of several
+    // channels anyway (see the isPaused check in connectLiveSocket's
+    // onmessage), which made it misleading about what "paused" meant.
 
     ["cc-scale-up-btn", "admin-scale-up-btn"].forEach(id => {
         const btn = document.getElementById(id);
@@ -2319,6 +2391,17 @@ function setupControls() {
         if (btn) btn.addEventListener("click", () => triggerScale("down"));
   
     });
+
+    const rediscoverBtn = document.getElementById("admin-rediscover-nodes-btn");
+    if (rediscoverBtn) {
+        rediscoverBtn.addEventListener("click", () =>
+            opCall(
+                "/admin/rediscover-nodes",
+                { method: "POST" },
+                "Rediscovery triggered — heartbeat freshness re-checked across every node."
+            ).catch(() => {})
+        );
+    }
 
     setupOperationsPanel();
 
@@ -2458,14 +2541,18 @@ function renderUsersTable() {
     let html = "";
     for (const u of rows) {
         const isLocked = lockedUserIds.has(u.user_id);
+        const jobsSubmitted = u.stats ? u.stats.jobs_submitted : 0;
         html += `
             <tr data-user-id="${escapeHtml(u.user_id)}">
-                <td><span class="gcon-avatar">${escapeHtml(u.avatar_initials)}</span></td>
-                <td class="gcon-row-link" data-open-user="${escapeHtml(u.user_id)}">${escapeHtml(u.name)}</td>
+                <td class="gcon-row-link" data-open-user="${escapeHtml(u.user_id)}">
+                    <span class="gcon-avatar">${escapeHtml(u.avatar_initials)}</span>
+                    ${escapeHtml(u.name)}
+                </td>
                 <td>${escapeHtml(u.email)}</td>
                 <td>${escapeHtml(u.role)}</td>
                 <td>${statusBadge(u.status)}${isLocked ? ' <span class="badge bg-danger">Locked</span>' : ""}${!u.has_password ? ' <span class="badge bg-warning text-dark">No Password</span>' : ""}</td>
                 <td>${escapeHtml(new Date(u.last_active).toLocaleString())}</td>
+                <td>${escapeHtml(jobsSubmitted)}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-light user-view-btn" data-user-id="${escapeHtml(u.user_id)}">View</button>
                     <button class="btn btn-sm btn-outline-light user-reset-pw-btn" data-user-id="${escapeHtml(u.user_id)}" data-user-name="${escapeHtml(u.name)}">Reset Password</button>
@@ -2624,6 +2711,16 @@ async function openUserDrawer(userId) {
         orgs = await fetchJson("/management/organizations");
     } catch (err) { /* non-fatal */ }
 
+    // Fallback matches rbac.py's ROLES at the time this was written, but
+    // that's exactly the problem this fetch avoids: a role added, renamed,
+    // or removed in rbac.py used to silently drift out of sync with this
+    // hardcoded list until someone thought to update it here too. Only
+    // falls back to the literal list if the fetch itself fails.
+    let roles = ["Owner", "Administrator", "Operator", "Developer", "Viewer"];
+    try {
+        roles = await fetchJson("/management/roles");
+    } catch (err) { /* non-fatal */ }
+
     const permissions = ROLE_PERMISSIONS_CACHE[user.role] || [];
 
     const body = document.getElementById("drawer-body");
@@ -2658,7 +2755,6 @@ async function openUserDrawer(userId) {
                 <div class="col-6"><small class="text-secondary">Member Since</small><div class="fw-bold">${new Date(user.created_at).toLocaleDateString()}</div></div>
                 <div class="col-6"><small class="text-secondary">Last Active</small><div class="fw-bold">${new Date(user.last_active).toLocaleString()}</div></div>
             </div>
-            <p class="text-secondary small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Usage figures are illustrative demo data — GCON does not yet attribute real jobs to individual users.</p>
         </div>
 
         <div id="ud-jobs" class="ud-pane d-none">
@@ -2706,7 +2802,7 @@ async function openUserDrawer(userId) {
             <div class="mb-3">
                 <label class="form-label">Role</label>
                 <select class="form-select" id="ud-role-select">
-                    ${["Owner", "Administrator", "Operator", "Developer", "Viewer"].map(r => `<option value="${r}" ${r === user.role ? "selected" : ""}>${r}</option>`).join("")}
+                    ${roles.map(r => `<option value="${r}" ${r === user.role ? "selected" : ""}>${r}</option>`).join("")}
                 </select>
             </div>
             <div class="mb-3">
@@ -3454,6 +3550,13 @@ function updateNotifBadge(unreadBySeverity) {
     const unreadEntries = notificationsData.filter(n => !n.read);
     const unread = unreadEntries.length;
     const badge = document.getElementById("notif-count-badge");
+    const sidebarBadge = document.getElementById("sidebar-notif-count-badge");
+
+    if (sidebarBadge) {
+        sidebarBadge.textContent = unread > 9 ? "9+" : (unread || "");
+        sidebarBadge.classList.toggle("d-none", unread === 0);
+    }
+
     if (!badge) return;
 
     badge.textContent = unread > 9 ? "9+" : unread;
@@ -3583,6 +3686,156 @@ function renderSearchResults(data) {
 }
 
 // ---------------------------------------------------------------
+// Company drill-in (Overview + Usage, from the real org usage
+// rollup already cached in companiesData -- no extra fetch, and
+// no per-company Workers/Receipts sub-view here since neither
+// receipts nor the Explorer table currently expose enough to build
+// a real one beyond what "View Executions"/"View Workers" already
+// jump to.)
+// ---------------------------------------------------------------
+
+function openCompanyDetail(orgId) {
+    const company = companiesData.find(c => c.org_id === orgId);
+    if (!company) return;
+
+    setText("drawer-title", "Company");
+    const body = document.getElementById("drawer-body");
+
+    const hasUsage = company.usage.jobs_reporting_usage > 0;
+
+    body.innerHTML = `
+        <div class="gcon-panel mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>${escapeHtml(company.name)}</strong>
+                <span class="badge bg-secondary">${escapeHtml(company.plan || "-")}</span>
+            </div>
+            ${receiptDetailRow("Nodes online", `${company.nodes_online} / ${company.nodes_total}`)}
+            ${receiptDetailRow("Running", company.jobs.running)}
+            ${receiptDetailRow("Completed", company.jobs.completed)}
+            ${receiptDetailRow("Failed", company.jobs.failed)}
+            ${receiptDetailRow("Pending", company.jobs.pending)}
+            ${receiptDetailRow("Cancelled", company.jobs.cancelled)}
+        </div>
+
+        <div class="gcon-panel mb-3">
+            <strong class="d-block mb-2">Usage</strong>
+            ${receiptDetailRow("Compute time", formatDuration(company.usage.compute_seconds))}
+            ${hasUsage
+                ? receiptDetailRow("LLM tokens (in / out)", `${company.usage.llm_input_tokens.toLocaleString()} / ${company.usage.llm_output_tokens.toLocaleString()}`)
+                : `<div class="text-secondary small">No job on this account has reported LLM token usage yet.</div>`
+            }
+        </div>
+
+        <button class="btn btn-sm btn-outline-light w-100 mb-2" id="company-view-executions-btn">
+            <i class="bi bi-play-circle me-1"></i>View Executions
+        </button>
+        <button class="btn btn-sm btn-outline-light w-100" id="company-view-workers-btn">
+            <i class="bi bi-hdd-network me-1"></i>View Workers
+        </button>
+    `;
+
+    const execBtn = document.getElementById("company-view-executions-btn");
+    if (execBtn) {
+        execBtn.addEventListener("click", () => {
+            closeDrawer();
+            const tabLink = document.querySelector('#tab-nav a[data-tab="executions"]');
+            if (tabLink) tabLink.click();
+            const filter = document.getElementById("executions-company-filter");
+            if (filter) {
+                filter.value = orgId;
+                execCompanyFilter = orgId;
+                execPage = 1;
+                renderExecutionsTable();
+            }
+        });
+    }
+
+    const workersBtn = document.getElementById("company-view-workers-btn");
+    if (workersBtn) {
+        workersBtn.addEventListener("click", () => {
+            closeDrawer();
+            const tabLink = document.querySelector('#tab-nav a[data-tab="explorer"][data-explorer-default="nodes"]');
+            if (tabLink) tabLink.click();
+            const search = document.getElementById("explorer-search");
+            if (search) {
+                search.value = orgId;
+                search.dispatchEvent(new Event("input"));
+            }
+        });
+    }
+
+    openDrawer();
+}
+
+function renderCompaniesTable(companies) {
+    const body = document.getElementById("companies-body");
+    if (!body) return;
+    companies = companies || [];
+
+    if (companies.length === 0) {
+        body.innerHTML = `
+            <div class="text-muted small px-2 py-3">
+                No organizations yet. Add one from Management &rarr; Organizations.
+            </div>`;
+        return;
+    }
+
+    const rows = companies.map(c => {
+        const dot = c.nodes_online > 0
+            ? `<span class="badge bg-success me-1" title="${c.nodes_online} node(s) online">&nbsp;</span>`
+            : `<span class="badge bg-secondary me-1" title="No nodes online">&nbsp;</span>`;
+        const compute = (c.usage.compute_seconds / 60).toFixed(1);
+        const tokens = c.usage.jobs_reporting_usage > 0
+            ? `${c.usage.llm_input_tokens.toLocaleString()} / ${c.usage.llm_output_tokens.toLocaleString()}`
+            : `<span class="text-muted" title="No job on this account has reported LLM token usage yet -- see docs/API.md's usage-report convention (GCON_USAGE_REPORT_PATH)">&mdash;</span>`;
+        return `
+            <tr class="gcon-company-row" data-org-id="${escapeHtml(c.org_id)}" style="cursor:pointer;">
+                <td>${dot}${escapeHtml(c.name)} <span class="text-muted small">${escapeHtml(c.plan || "")}</span></td>
+                <td class="text-center">${c.nodes_online}/${c.nodes_total}</td>
+                <td class="text-center">${c.jobs.pending}</td>
+                <td class="text-center">${c.jobs.running}</td>
+                <td class="text-center text-success">${c.jobs.completed}</td>
+                <td class="text-center text-danger">${c.jobs.failed}</td>
+                <td class="text-center text-muted">${c.jobs.cancelled}</td>
+                <td class="text-end">${compute} min</td>
+                <td class="text-end">${tokens}</td>
+            </tr>`;
+    }).join("");
+
+    body.innerHTML = `
+        <table class="table table-sm gcon-table" id="companies-table">
+            <thead>
+                <tr>
+                    <th>Company</th>
+                    <th class="text-center">Nodes</th>
+                    <th class="text-center">Pending</th>
+                    <th class="text-center">Running</th>
+                    <th class="text-center">Completed</th>
+                    <th class="text-center">Failed</th>
+                    <th class="text-center">Cancelled</th>
+                    <th class="text-end">Compute</th>
+                    <th class="text-end">LLM tokens (in / out)</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+
+    // Rows were just rebuilt from scratch, so their click listeners
+    // (attached by setupCompaniesTable() at boot, to the old,
+    // server-rendered rows) are gone along with them -- same pattern
+    // every other periodically-refreshed table in this dashboard
+    // follows (see renderUsersTable(), renderExecutionsTable()):
+    // re-bind after every re-render, not just once at load.
+    setupCompaniesTable();
+}
+
+function setupCompaniesTable() {
+    document.querySelectorAll(".gcon-company-row").forEach(row => {
+        row.addEventListener("click", () => openCompanyDetail(row.dataset.orgId));
+    });
+}
+
+// ---------------------------------------------------------------
 // Detail drawer (shared)
 // ---------------------------------------------------------------
 
@@ -3691,6 +3944,58 @@ function setupAuthMenu() {
 
 
 // ---------------------------------------------------------------
+// Theme toggle (Light / Dark — background is always white or
+// black per the design spec; the choice persists locally)
+// ---------------------------------------------------------------
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute("data-bs-theme", theme);
+    const lightBtn = document.getElementById("theme-toggle-light");
+    const darkBtn = document.getElementById("theme-toggle-dark");
+    if (lightBtn) lightBtn.classList.toggle("active", theme === "light");
+    if (darkBtn) darkBtn.classList.toggle("active", theme === "dark");
+}
+
+function setupThemeToggle() {
+    const stored = localStorage.getItem("gcon-theme");
+    if (stored === "light" || stored === "dark") applyTheme(stored);
+
+    const lightBtn = document.getElementById("theme-toggle-light");
+    const darkBtn = document.getElementById("theme-toggle-dark");
+
+    if (lightBtn) {
+        lightBtn.addEventListener("click", () => {
+            applyTheme("light");
+            localStorage.setItem("gcon-theme", "light");
+        });
+    }
+    if (darkBtn) {
+        darkBtn.addEventListener("click", () => {
+            applyTheme("dark");
+            localStorage.setItem("gcon-theme", "dark");
+        });
+    }
+}
+
+// ---------------------------------------------------------------
+// Sidebar collapse
+// ---------------------------------------------------------------
+
+function setupSidebarCollapse() {
+    const btn = document.getElementById("sidebar-collapse-btn");
+    const sidebar = document.querySelector(".gcon-sidebar");
+    if (!btn || !sidebar) return;
+
+    const stored = localStorage.getItem("gcon-sidebar-collapsed") === "1";
+    if (stored) sidebar.classList.add("gcon-sidebar-collapsed");
+
+    btn.addEventListener("click", () => {
+        const collapsed = sidebar.classList.toggle("gcon-sidebar-collapsed");
+        localStorage.setItem("gcon-sidebar-collapsed", collapsed ? "1" : "0");
+    });
+}
+
+// ---------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------
 
@@ -3707,7 +4012,11 @@ setupAuthMenu();
 setupReceiptsTab();
 setupExecutionsTab();
 setupNotifications();
+setupEventsTab();
+setupCompaniesTable();
 bindPanelLinks();
+setupThemeToggle();
+setupSidebarCollapse();
 
 bootstrapHomeDashboard();
 loadCurrentUser();

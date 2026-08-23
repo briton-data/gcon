@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 class NodeOut(BaseModel):
     node_id: str
     status: str
+    address: Optional[str] = None
     cpu: object = Field(description="CPU utilization percentage, or 'N/A'")
     memory: object = Field(description="Memory utilization percentage, or 'N/A'")
     running_jobs: int
