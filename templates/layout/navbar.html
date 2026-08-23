@@ -2,10 +2,10 @@
 
     <div class="container-fluid">
 
-        <a class="navbar-brand fw-bold text-white" href="#">
-            <i class="bi bi-diagram-3-fill me-2"></i>
-            GCON
-        </a>
+        <!-- Brand/logo removed here per request -- the sidebar's own
+             nav already establishes context, and a repeated brand mark
+             in the navbar added visual weight without adding function. -->
+
 
         <button
             class="navbar-toggler"
@@ -29,47 +29,49 @@
 
             <div class="ms-auto d-flex align-items-center gap-3 position-relative flex-wrap py-1">
 
-                <div class="gcon-status-strip" id="global-status-strip">
+                <div class="gcon-status-strip d-none d-xl-flex" id="global-status-strip">
                     <span class="gcon-status-pill" id="status-pill-coordinator" title="Coordinator">
                         <span class="dot"></span>Coordinator
                     </span>
                     <span class="gcon-status-pill" id="status-pill-scheduler" title="Scheduler">
                         <span class="dot"></span>Scheduler
                     </span>
+                    <span class="gcon-status-pill" id="status-pill-receipts" title="Receipt Service">
+                        <span class="dot"></span>Receipts
+                    </span>
                     <span class="gcon-status-pill" id="status-pill-storage" title="Storage">
                         <span class="dot"></span>Storage
-                    </span>
-                    <span class="gcon-status-pill" id="status-pill-receipts" title="Receipt Engine">
-                        <span class="dot"></span>Receipts
                     </span>
                     <span class="gcon-status-pill" id="status-pill-heartbeat" title="Time since the last node heartbeat">
                         <span class="dot"></span>Heartbeat --
                     </span>
                 </div>
 
-                <div class="position-relative">
+                <div class="position-relative d-none d-lg-block">
                     <input type="text" id="global-search" class="form-control form-control-sm"
-                           placeholder="🔍 Search users, jobs, nodes..." style="width:230px;">
+                           placeholder="🔍 Search executions, receipts, nodes…" style="width:220px;"
+                           autocomplete="off" name="gcon-global-search" spellcheck="false">
                     <div id="global-search-results" class="gcon-search-results d-none"></div>
                 </div>
 
-                <button id="refresh-now-btn" class="btn btn-sm btn-outline-light" title="Refresh now">
-                    <i class="bi bi-arrow-clockwise"></i>
-                </button>
-
-                <button id="pause-btn" class="btn btn-sm btn-outline-light" title="Pause live updates">
-                    <i class="bi bi-pause-fill"></i>
-                </button>
-
-                <span id="cluster-health-badge" class="badge bg-secondary">
-                    ● Connecting...
+                <span id="cluster-health-badge" class="gcon-degraded-badge">
+                    Connecting…
                 </span>
 
-                <span id="conn-status" class="badge bg-secondary">
+                <div class="gcon-theme-toggle" id="theme-toggle" role="group" aria-label="Theme">
+                    <button type="button" id="theme-toggle-light" title="Light mode" class="active">
+                        <i class="bi bi-sun"></i>
+                    </button>
+                    <button type="button" id="theme-toggle-dark" title="Dark mode">
+                        <i class="bi bi-moon-stars"></i>
+                    </button>
+                </div>
+
+                <span id="conn-status" class="badge bg-secondary d-none">
                     ● WS Connecting...
                 </span>
 
-                <span id="clock" class="text-light">
+                <span id="clock" class="text-secondary small d-none d-lg-inline">
                     --:--:--
                 </span>
 

@@ -142,8 +142,8 @@ class WebServer:
             return self.presentation.get_cluster_state()    
             
         @self.app.get("/nodes")
-        def nodes(org_id: str | None = None, user=Depends(self.current_user)):
-            return self.presentation.get_nodes(org_id=org_id)
+        def nodes(user=Depends(self.current_user)):
+            return self.presentation.get_nodes()
         
         @self.app.get("/jobs")
         def jobs(
@@ -317,7 +317,9 @@ class WebServer:
 
         @self.app.get("/analytics")
         def analytics(user=Depends(self.require_permission("Access analytics"))):
-            return self.presentation.get_analytics()
+            data = self.presentation.get_analytics()
+            data["companies"] = self.management.get_org_usage_summary()
+            return data
 
         # ---- Administration ----
 
@@ -378,6 +380,7 @@ class WebServer:
                         "events": self.presentation.get_events(),
                         "health": health,
                         "trust": trust,
+                        "metrics": self.presentation.get_dashboard_metrics(),
                         "hero": self.presentation.get_hero_status(health, trust),
                         "system_metrics": self.presentation.get_system_metrics(),
                         "global_status": self.presentation.get_global_status(health),
@@ -386,6 +389,7 @@ class WebServer:
                         "storage_summary": self.presentation.get_storage_summary(health),
                         "critical_alerts": self.presentation.get_critical_alerts(health),
                         "execution_timeline": self.presentation.get_execution_timeline(),
+                        "companies": self.management.get_org_usage_summary(),
                         "notif_unread_by_severity": self.management.get_unread_notification_count_by_severity(),
                     }
                     await websocket.send_json(jsonable_encoder(payload))

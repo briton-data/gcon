@@ -2,6 +2,7 @@ import time
 import threading
 import socket
 import uuid
+import itertools
 from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
@@ -77,6 +78,34 @@ class GCONCoordinator:
         # (or a snapshot taken under it) races with those inserts and
         # raises "dictionary changed size during iteration".
         self.receipts_lock = threading.RLock()
+        # Cache of job_id -> already-computed validate_proof() result.
+        # A receipt's proof is immutable once stored (receive_receipt
+        # only ever stores a brand-new receipt for a job_id, never
+        # mutates one in place), so re-running the real HMAC check on
+        # the same unchanged receipt every single time get_receipts()
+        # is called -- previously every 3s, forever, via
+        # health_check_loop -- was pure repeated work that only ever
+        # grew with cumulative history, not with load. Guarded by
+        # receipts_lock alongside self.receipts; invalidated in
+        # receive_receipt() so a genuinely new/overwritten receipt for
+        # a job_id is still verified fresh, exactly as before.
+        self._receipt_verified_cache = {}
+        # FIFO of job_ids whose receipt has arrived (or been
+        # overwritten) but not yet been through validate_proof(). Lets
+        # health_check_loop's periodic tick verify only what's new
+        # since the last tick (see _drain_pending_receipt_verifications)
+        # instead of re-scanning all of self.receipts every 3s to find
+        # out what isn't cached yet -- that scan was itself O(total
+        # receipts) even after the cache eliminated the crypto cost.
+        self._pending_receipt_ids = deque()
+        # Running totals mirroring _receipt_verified_cache's contents,
+        # kept in lockstep by every code path that writes to that
+        # cache (get_receipts() and _drain_pending_receipt_verifications).
+        # Lets compute_trust() read a verification rate in O(1) on the
+        # health tick instead of rebuilding/summing the full receipt
+        # list every call.
+        self._verified_receipt_count = 0
+        self._unverified_receipt_count = 0
         self.artifact_registry = ArtifactRegistry() 
         self.storage_manager = StorageManager()
         self.workflow_engine = WorkflowEngine(self)
@@ -160,6 +189,53 @@ class GCONCoordinator:
         except Exception as e:
             print(f"[RESTORE] Failed to restore jobs from control plane: {e!r}")
 
+        # Reconcile jobs that were still in flight (dispatched but not
+        # yet marked completed/failed) when this coordinator last
+        # stopped, whether cleanly or via a crash. Nothing else will
+        # ever revisit them: dispatch only happens synchronously inside
+        # submit_job(), there is no background loop that re-scans
+        # "pending" jobs, and recover_jobs() -- the only code path that
+        # un-sticks a "running" job -- is only ever triggered by a live
+        # node-disconnect event, which these jobs can never generate
+        # since their node_id was intentionally nulled out just above
+        # (we have no way to know which node, if any, was still working
+        # on them). Left alone they would sit in self.jobs forever
+        # showing a stale "pending"/"running" status that no longer
+        # reflects reality, invisible to any recovery path. Mark them
+        # failed instead -- both in memory and back in the control
+        # plane -- so they show up as needing resubmission rather than
+        # silently never finishing.
+        interrupted_statuses = {"pending", "running"}
+        reconciled = 0
+        for job_id, job in self.jobs.items():
+            if job["status"] not in interrupted_statuses:
+                continue
+            job["status"] = "failed"
+            job["completed_at"] = datetime.now(UTC).isoformat()
+            job["result"] = {
+                "error": (
+                    "Job was still in flight when the coordinator was "
+                    "last restarted and was not resumed; it will need "
+                    "to be resubmitted."
+                )
+            }
+            reconciled += 1
+            if self.control_plane is not None:
+                try:
+                    self.control_plane.jobs.set_status(
+                        job_id, "failed", result=job["result"], completed=True,
+                    )
+                except Exception as e:
+                    print(
+                        f"[RESTORE] Failed to persist reconciled status "
+                        f"for job {job_id}: {e!r}"
+                    )
+        if reconciled:
+            print(
+                f"[RESTORE] Marked {reconciled} in-flight job(s) as "
+                "failed after coordinator restart (interrupted, not resumed)."
+            )
+
         try:
             for receipt in self.control_plane.receipts.list_all():
                 # `payload` is exactly the receipt dict the issuing side
@@ -172,6 +248,17 @@ class GCONCoordinator:
                 if job_id is None:
                     continue
                 self.receipts[job_id] = payload
+                # Queue it so its verification result (and contribution
+                # to the running verified/unverified totals used by
+                # compute_trust) gets computed the first time anything
+                # asks -- the health tick's next drain, or a
+                # get_receipts() call, whichever comes first -- instead
+                # of silently sitting uncounted until some caller
+                # happens to touch it. Safe without receipts_lock here:
+                # this runs before scheduler_thread/health_check_thread
+                # are started, so nothing else is touching self.receipts
+                # yet.
+                self._pending_receipt_ids.append(job_id)
         except Exception as e:
             print(f"[RESTORE] Failed to restore receipts from control plane: {e!r}")
 
@@ -383,6 +470,20 @@ class GCONCoordinator:
 
         with self.receipts_lock:
             self.receipts[job_id] = receipt
+            # A fresh/overwritten receipt invalidates any cached
+            # verification result from a previous receipt that used
+            # to live at this job_id -- see _receipt_verified_cache --
+            # and its contribution to the running totals, since those
+            # totals must stay in lockstep with the cache's contents.
+            had_cached = self._receipt_verified_cache.pop(job_id, None)
+            if had_cached is True:
+                self._verified_receipt_count -= 1
+            elif had_cached is False:
+                self._unverified_receipt_count -= 1
+            # Queue it for verification -- picked up either by the next
+            # health-tick drain or by the next get_receipts() call,
+            # whichever comes first.
+            self._pending_receipt_ids.append(job_id)
 
         print(f"Receipt received for job '{job_id}'.")
         
@@ -426,7 +527,20 @@ class GCONCoordinator:
         newly failed/regained verification).
         """
         health = self.health_service.compute()
-        trust = self.health_service.compute_trust()
+        # Verify only what's arrived since the last tick instead of
+        # rebuilding the full receipts list every 3s -- see
+        # _drain_pending_receipt_verifications. get_receipts() (full
+        # list, still O(total receipts)) stays reserved for the
+        # dashboard/API callers that actually need every receipt
+        # rendered, which run at human/request cadence, not a fixed
+        # timer that only gets tighter as history grows.
+        newly_verified = self._drain_pending_receipt_verifications()
+        with self.receipts_lock:
+            verified_count = self._verified_receipt_count
+            total_count = verified_count + self._unverified_receipt_count
+        trust = self.health_service.compute_trust(
+            verified_count=verified_count, total_count=total_count
+        )
 
         self._trust_history.append({
             "timestamp": trust["computed_at"],
@@ -454,22 +568,29 @@ class GCONCoordinator:
                     ))
             self._last_health_state = state
 
-        for receipt in self.get_receipts():
-            receipt_id = receipt["receipt_id"]
-            if not receipt["verified"]:
+        # Each receipt is verified exactly once, ever (see
+        # _receipt_verified_cache), so a receipt_id can only ever
+        # appear here on the single tick it was first verified --
+        # equivalent to the old "re-check every receipt every tick"
+        # loop in outcome (the FAILED/RECOVERED events still only fire
+        # once per transition), just without redundantly re-examining
+        # every already-known receipt on every subsequent tick.
+        for job_id, receipt, is_valid in newly_verified:
+            receipt_id = receipt.get("receipt_id", job_id)
+            if not is_valid:
                 if receipt_id not in self._known_unverified_receipt_ids:
                     self._known_unverified_receipt_ids.add(receipt_id)
                     self.event_bus.publish(Event(
                         event_type=EventType.RECEIPT_VERIFICATION_FAILED,
                         source="Verifier",
-                        payload={"receipt_id": receipt_id, "job_id": receipt["job_id"]},
+                        payload={"receipt_id": receipt_id, "job_id": job_id},
                     ))
             elif receipt_id in self._known_unverified_receipt_ids:
                 self._known_unverified_receipt_ids.discard(receipt_id)
                 self.event_bus.publish(Event(
                     event_type=EventType.RECEIPT_VERIFICATION_RECOVERED,
                     source="Verifier",
-                    payload={"receipt_id": receipt_id, "job_id": receipt["job_id"]},
+                    payload={"receipt_id": receipt_id, "job_id": receipt.get("job_id", job_id)},
                 ))
 
     def get_trust_score(self):
@@ -1345,6 +1466,7 @@ class GCONCoordinator:
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
+                "address": info.get("address"),
                 "cpu": info.get("cpu", "N/A"),
                 "memory": info.get("memory", "N/A"),
                 "running_jobs": info.get("running_jobs", 0),
@@ -1381,13 +1503,40 @@ class GCONCoordinator:
         what's currently failed or pending.
         """
         jobs = []
+        has_filter = created_by is not None or org_id is not None or status is not None
 
-        with self.jobs_lock:
-            jobs_snapshot = list(self.jobs.items())
         # Newest first: self.jobs is insertion-ordered (oldest first),
         # which buried exactly the jobs someone checking the dashboard
         # cares most about -- the ones that just ran -- at the bottom.
-        for job_id, job in reversed(jobs_snapshot):
+        if limit is not None and not has_filter:
+            # Fast path: with no filter, the answer is exactly "the
+            # last `limit` jobs in insertion order" -- no need to copy
+            # every job in history into a new list first just to read
+            # the most recent handful off the end of it. islice over
+            # reversed(dict.items()) walks the dict directly and stops
+            # after `limit`, so this is O(limit), not O(total jobs).
+            # Still done under jobs_lock (not released early) because
+            # taking only part of a live iterator over self.jobs while
+            # another thread concurrently inserts (submit_job) would
+            # raise "dictionary changed size during iteration" -- same
+            # hazard the full-copy path below guards against, just
+            # bounded to a slice instead of a whole-dict copy.
+            with self.jobs_lock:
+                jobs_snapshot = list(
+                    itertools.islice(reversed(self.jobs.items()), limit)
+                )
+        else:
+            # Filtered and/or unlimited: still need to search the full
+            # history to guarantee every matching job is found, so
+            # there's no way to bound this to less than O(total jobs)
+            # without an index on status/created_by/org_id -- that's a
+            # real design decision (what to index, memory cost of
+            # maintaining it), not something to invent silently here.
+            with self.jobs_lock:
+                jobs_snapshot = list(self.jobs.items())
+            jobs_snapshot = list(reversed(jobs_snapshot))
+
+        for job_id, job in jobs_snapshot:
             if created_by is not None and job.get("created_by") != created_by:
                 continue
             if org_id is not None and job.get("org_id") != org_id:
@@ -1457,23 +1606,132 @@ class GCONCoordinator:
             "jobs": collector.collect_job_metrics(),
         }
         
+    def _commit_receipt_verification(self, job_id, receipt, is_valid):
+        """
+        Record a freshly-computed validate_proof() result for job_id
+        into _receipt_verified_cache and keep the running
+        _verified_receipt_count/_unverified_receipt_count totals in
+        lockstep with it. Shared by get_receipts() and
+        _drain_pending_receipt_verifications(), since both can end up
+        being the first to verify a given job_id.
+
+        `receipt` is the exact receipt object this is_valid result was
+        computed for. The identity check against self.receipts[job_id]
+        happens under the same lock acquisition as the cache write --
+        not as a separate check beforehand -- so a receive_receipt()
+        overwrite landing in the gap between "we finished verifying"
+        and "we're about to cache the result" can't still get its
+        stale result committed under the new receipt's job_id: this
+        becomes a no-op instead, and the re-queued job_id (see
+        receive_receipt) gets verified fresh on the next call.
+
+        Returns True if this call actually committed the result,
+        False if it was skipped -- either because another concurrent
+        caller already had (a receipt's verification result is
+        deterministic given its immutable proof, so it's safe to just
+        skip rather than recompute or double-count), or because the
+        receipt was superseded before we could commit.
+        """
+        with self.receipts_lock:
+            if job_id in self._receipt_verified_cache:
+                return False
+            if self.receipts.get(job_id) is not receipt:
+                return False
+            self._receipt_verified_cache[job_id] = is_valid
+            if is_valid:
+                self._verified_receipt_count += 1
+            else:
+                self._unverified_receipt_count += 1
+            return True
+
+    def _drain_pending_receipt_verifications(self):
+        """
+        Verify only the receipts that have arrived (or been
+        overwritten) since the last drain, instead of rescanning all
+        of self.receipts to work out what isn't cached yet -- that
+        scan was itself O(total receipts) even after
+        _receipt_verified_cache eliminated the repeated HMAC cost, so
+        health_check_loop's 3-second tick would still fall further and
+        further behind as cumulative history grew. This is what that
+        tick calls now, so its per-tick cost is O(receipts since the
+        last tick), not O(receipts ever recorded).
+
+        Returns the list of (job_id, receipt, is_valid) newly verified
+        by this call, for health_check_loop's event-publishing.
+        """
+        with self.receipts_lock:
+            pending = list(self._pending_receipt_ids)
+            self._pending_receipt_ids.clear()
+            receipts_by_id = {
+                job_id: self.receipts.get(job_id) for job_id in pending
+                if job_id not in self._receipt_verified_cache
+            }
+
+        newly_verified = []
+        for job_id, receipt in receipts_by_id.items():
+            if receipt is None:
+                # Removed or reassigned again since we queued it; a
+                # later receive_receipt() call already re-queued it,
+                # so it'll be picked up on the next drain.
+                continue
+            if self.receipts.get(job_id) is not receipt:
+                # Cheap early skip: already stale by the time we got
+                # here, no need to spend a validate_proof() call on a
+                # receipt we're not going to be able to commit anyway
+                # (the authoritative check is in
+                # _commit_receipt_verification below).
+                continue
+            is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
+            if self._commit_receipt_verification(job_id, receipt, is_valid):
+                newly_verified.append((job_id, receipt, is_valid))
+
+        return newly_verified
+
     def get_receipts(self):
         """
         Return a dashboard-friendly summary of all receipts.
 
-        `verified` is computed live against the real signed proof via
-        the verifier's HMAC check (the same check `verify_all_receipts`
-        uses) rather than trusting a stored flag, so it can never go
-        stale.
+        `verified` is the real signed-proof HMAC check (the same check
+        `verify_all_receipts` uses), computed once per receipt and
+        cached in _receipt_verified_cache rather than re-run on every
+        call -- a receipt's proof cannot change after it's stored (see
+        receive_receipt), so re-verifying an unchanged receipt again
+        is wasted work, not extra safety. The cache is invalidated
+        whenever a job_id's receipt is actually replaced, so a
+        genuinely new proof is still verified fresh. This call is
+        still O(total receipts) to build the snapshot/result list, but
+        no longer does an HMAC check per receipt on every call --
+        previously the dominant cost at scale, since this is invoked
+        every 3s by health_check_loop regardless of how much of the
+        receipt history is actually new.
         """
         receipts = []
 
+        # Two lock acquisitions total for this whole call -- not one
+        # per receipt. Taking the lock inside the per-item loop below
+        # (an earlier version of this fix did exactly that) trades the
+        # HMAC cost for ~N RLock acquire/release pairs instead, which
+        # profiled as the new dominant cost at scale: a plain dict
+        # snapshot copy is cheap enough to just take once up front.
         with self.receipts_lock:
             receipts_snapshot = list(self.receipts.items())
+            cache_snapshot = dict(self._receipt_verified_cache)
+
+        new_results = {}
+        for job_id, receipt in receipts_snapshot:
+            if job_id in cache_snapshot:
+                continue
+            is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
+            new_results[job_id] = (receipt, is_valid)
+
+        for job_id, (receipt, is_valid) in new_results.items():
+            self._commit_receipt_verification(job_id, receipt, is_valid)
 
         for job_id, receipt in receipts_snapshot:
 
-            is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
+            is_valid = cache_snapshot.get(job_id)
+            if is_valid is None:
+                is_valid = new_results[job_id][1]
 
             receipts.append({
                 # self.receipts is keyed by job_id (see receive_receipt),

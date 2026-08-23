@@ -1,0 +1,31 @@
+<div class="gcon-panel h-100">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Executions by Company</h5>
+        <a href="#" class="gcon-panel-link" data-tab="cluster">View all &rarr;</a>
+    </div>
+
+    <div class="gcon-panel-body" id="executions-by-company-body" style="min-height:auto;">
+
+        {% if not dashboard.companies %}
+        <div class="text-muted small px-1 py-2">
+            No organizations yet.
+        </div>
+        {% else %}
+        <div id="executions-by-company-list">
+            {% for company in dashboard.companies[:6] %}
+            <div class="gcon-company-compact-row gcon-panel-link" data-tab="cluster">
+                <span class="gcon-company-compact-name text-truncate">{{ company.name }}</span>
+                <span class="gcon-company-compact-stats">
+                    <span class="stat running"><span class="n">{{ company.jobs.running }}</span><span class="l">Running</span></span>
+                    <span class="stat completed"><span class="n">{{ company.jobs.completed }}</span><span class="l">Done</span></span>
+                    <span class="stat failed"><span class="n">{{ company.jobs.failed }}</span><span class="l">Failed</span></span>
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+    </div>
+
+</div>

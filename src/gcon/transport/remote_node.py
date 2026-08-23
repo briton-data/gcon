@@ -12,11 +12,19 @@ from datetime import datetime, UTC
 
 
 class RemoteNodeProxy:
-    def __init__(self, node_id, transport, org_id=None):
+    def __init__(self, node_id, transport, org_id=None, address=None):
         self.node_id = node_id
         self.transport = transport
-        self.org_id = org_id
         self.status = "idle"
+        # Which company this (dedicated) node belongs to, if any --
+        # read by NodeRegistry.register() into the live registry
+        # entry, same as GCONNode.org_id.
+        self.org_id = org_id
+        # The node's real remote IP, as seen by the gRPC server at
+        # registration time (see grpc_transport._peer_address) -- not
+        # self-reported, so it can't be spoofed by the connecting
+        # agent. Also read by NodeRegistry.register().
+        self.address = address
 
     def execute_job(self, job_id, command, timeout=None):
         self.status = "busy"

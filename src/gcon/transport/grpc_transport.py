@@ -70,6 +70,40 @@ def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
     return value.decode("utf-8") if isinstance(value, bytes) else value
 
 
+def _peer_address(context: grpc.ServicerContext) -> Optional[str]:
+    """Extract just the remote IP (no "ipv4:"/"ipv6:" scheme prefix,
+    no port) from context.peer(), which gRPC formats as
+    "ipv4:203.0.113.5:54321" or "ipv6:[2001:db8::1]:54321". This is
+    the real TCP peer address of whoever dialed in -- the same trust
+    boundary as request.client.host in web_server.py's
+    _client_ip_from_request, and for the same reason: a connecting
+    node cannot spoof its own source address the way it could a
+    self-reported "hostname" or "address" field in the request body.
+    Returns None if context.peer() is missing or in an unexpected
+    format, rather than guessing.
+    """
+    peer = context.peer()
+    if not peer:
+        return None
+
+    if peer.startswith("ipv6:"):
+        # "ipv6:[2001:db8::1]:54321" -> "2001:db8::1"
+        rest = peer[len("ipv6:"):]
+        if rest.startswith("[") and "]" in rest:
+            return rest[1:rest.index("]")]
+        return rest
+
+    if peer.startswith("ipv4:"):
+        # "ipv4:203.0.113.5:54321" -> "203.0.113.5"
+        rest = peer[len("ipv4:"):]
+        return rest.rsplit(":", 1)[0] if ":" in rest else rest
+
+    # Unix socket or another scheme gRPC may report locally
+    # ("unix:/tmp/gcon.sock") -- not a routable address, so don't
+    # try to parse a host/port out of it.
+    return None
+
+
 class _PendingResult:
     def __init__(self):
         self.event = threading.Event()
@@ -183,7 +217,11 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         )
         
         if self.on_node_registered:
-            self.on_node_registered(request.node_id, capabilities, org_id=org_id)
+            self.on_node_registered(
+                request.node_id, capabilities,
+                org_id=org_id,
+                address=_peer_address(context),
+            )
         
         logger.info("Node '%s' registered from %s", request.node_id, context.peer())
         return pb.RegisterResponse(
@@ -386,7 +424,7 @@ class GrpcTransport(Transport):
         control_plane: Optional[ControlPlane] = None,
         config: Optional[TransportConfig] = None,
         on_heartbeat: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-        on_node_registered: Optional[Callable[[str, Any], None]] = None,
+        on_node_registered: Optional[Callable[..., None]] = None,
         on_node_disconnected: Optional[Callable[[str], None]] = None,
     ):
         self.control_plane = control_plane or ControlPlane()
