@@ -288,6 +288,7 @@ function loadActiveTab() {
     else if (currentTab === "monitoring") loadMonitoring();
     else if (currentTab === "analytics") loadAnalytics();
     else if (currentTab === "events") loadEventsTab();
+    else if (currentTab === "workflows") loadWorkflowsTab();
     else if (currentTab === "storage") loadControlCenter();
     else if (currentTab === "admin") loadAdmin();
     else if (currentTab === "users") loadUsersTab();
@@ -488,6 +489,52 @@ async function loadEventsTab() {
         renderFeed("events-tab-feed", eventsTabData);
     } catch (err) {
         console.error("Failed to load events tab:", err);
+    }
+}
+
+// ---------------------------------------------------------------
+// Workflows
+// ---------------------------------------------------------------
+
+async function loadWorkflowsTab() {
+    const tbody = document.getElementById("workflows-table-body");
+    const emptyState = document.getElementById("workflows-empty");
+    const table = document.getElementById("workflows-table");
+    if (!tbody) return;
+
+    try {
+        const workflows = await fetchJson("/workflows");
+
+        if (!workflows.length) {
+            table.classList.add("d-none");
+            emptyState.classList.remove("d-none");
+            return;
+        }
+        table.classList.remove("d-none");
+        emptyState.classList.add("d-none");
+
+        tbody.innerHTML = workflows.map(wf => {
+            const statusBadge = {
+                COMPLETED: "bg-success",
+                FAILED: "bg-danger",
+                RUNNING: "bg-primary",
+            }[wf.status] || "bg-secondary";
+
+            return `<tr>
+                <td><code>${escapeHtml(wf.workflow_id)}</code></td>
+                <td><span class="badge ${statusBadge}">${escapeHtml(wf.status)}</span></td>
+                <td>${wf.pending_jobs}</td>
+                <td>${wf.ready_jobs}</td>
+                <td>${wf.running_jobs}</td>
+                <td>${wf.completed_jobs}</td>
+                <td>${wf.failed_jobs}</td>
+                <td>${wf.blocked_jobs}</td>
+                <td class="text-secondary small">${escapeHtml(wf.created_at || "--")}</td>
+            </tr>`;
+        }).join("");
+    } catch (err) {
+        console.error("Failed to load workflows tab:", err);
+        tbody.innerHTML = `<tr><td colspan="9" class="text-danger text-center py-4">Failed to load workflows.</td></tr>`;
     }
 }
 

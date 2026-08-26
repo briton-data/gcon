@@ -1,3 +1,5 @@
+from datetime import datetime, UTC
+
 from .workflow import Workflow
 from .dag import DAG
 from .workflow_state import WorkflowState
@@ -70,8 +72,14 @@ class WorkflowEngine:
         for job in dag.roots():
             state.mark_ready(job.job_id)
 
-    # Update workflow status
-        state.status = "READY"
+    # Update workflow status and actually dispatch the root jobs --
+    # marking them "ready" above is bookkeeping only; without this
+    # call nothing ever runs (submit_workflow() previously returned a
+    # READY-looking state whose jobs were never submitted to the
+    # coordinator at all).
+        state.status = "RUNNING"
+        state.started_at = datetime.now(UTC)
+        self.schedule_ready_jobs(workflow, state)
         
     def schedule_ready_jobs(
         self,
@@ -85,14 +93,14 @@ class WorkflowEngine:
 
             job = workflow.get_job(job_id)
 
-        self.coordinator.submit_job(
-    job_id=job.job_id,
-    command=job.command,
-    created_by=workflow.created_by,
-    workflow_id=workflow.workflow_id,
-)
+            self.coordinator.submit_job(
+                job_id=job.job_id,
+                command=job.command,
+                created_by=workflow.created_by,
+                workflow_id=workflow.workflow_id,
+            )
 
-        state.mark_running(job.job_id)
+            state.mark_running(job.job_id)
             
     def process_completed_job(
         self,
@@ -111,7 +119,11 @@ class WorkflowEngine:
         self.update_ready_jobs(dag, state)
 
     # Schedule newly ready jobs
-        
+        self.schedule_ready_jobs(workflow, state)
+
+        if state.workflow_completed():
+            state.status = "COMPLETED"
+            state.completed_at = datetime.now(UTC)
         
     def process_failed_job(
         self,
@@ -129,7 +141,8 @@ class WorkflowEngine:
             state.mark_blocked(child.job_id)
 
         state.status = "FAILED"
-        
+        state.completed_at = datetime.now(UTC)
+
     def update_ready_jobs(
         self,
         dag: DAG,
@@ -144,7 +157,14 @@ class WorkflowEngine:
 
         for job in ready_jobs:
 
-            if job.job_id not in state.ready_jobs:
+            # Only PENDING jobs can newly become ready. dag.ready_jobs()
+            # only excludes already-completed jobs, so without this
+            # check a job that's already RUNNING (dispatched by an
+            # earlier call here, dependencies satisfied) would still
+            # show up every time this runs -- and get incorrectly
+            # moved back into ready_jobs and re-submitted as a
+            # duplicate the next time a sibling job completes.
+            if job.job_id in state.pending_jobs:
                 state.mark_ready(job.job_id)
                 
     def execute(
@@ -152,19 +172,19 @@ class WorkflowEngine:
         workflow: Workflow
 ):
         """
-        Execute a workflow.
+        Submit a workflow and return its initial state.
+
+        Dispatch of the workflow's jobs (both the initial root jobs
+        and every subsequent layer as earlier jobs complete) now
+        happens automatically -- driven by submit_workflow() and the
+        coordinator's job-completion callback into
+        process_completed_job()/process_failed_job(), not by polling
+        here. This method is a thin, synchronous convenience alias for
+        submit_workflow() and does not itself wait for completion;
+        check workflow_completed() on the returned state, or poll
+        get_workflows(), to observe progress.
         """
-        state = self.submit_workflow(workflow)
-
-        while not state.workflow_completed():
-
-            self.schedule_ready_jobs(
-                workflow,
-                state
-        )
-        # Wait for coordinator callbacks
-            break
-        return state
+        return self.submit_workflow(workflow)
     
     def is_complete(
         self,

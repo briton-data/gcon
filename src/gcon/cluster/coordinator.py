@@ -716,6 +716,41 @@ class GCONCoordinator:
 
         return dashboard
     
+    def _advance_workflow(self, job_id, job, success):
+        """
+        If `job` belongs to a workflow, tell the workflow engine it
+        finished so the DAG actually advances -- dispatching newly-
+        unblocked dependents on success, or blocking them on failure.
+
+        Without this call, workflow_engine.process_completed_job()/
+        process_failed_job() are never invoked by anything: a
+        workflow's jobs would each run exactly once (its initial root
+        jobs) and nothing downstream in the DAG would ever be
+        submitted, silently stalling every workflow after its first
+        layer. Best-effort: workflow bookkeeping must never prevent
+        the job itself from being recorded as completed/failed above,
+        so any failure here is caught and logged rather than raised.
+        """
+        workflow_id = job.get("workflow_id")
+        if not workflow_id:
+            return
+
+        try:
+            engine = self.workflow_engine
+            workflow = engine.workflows.get(workflow_id)
+            dag = engine.dags.get(workflow_id)
+            state = engine.states.get(workflow_id)
+            if workflow is None or dag is None or state is None:
+                return
+
+            if success:
+                engine.process_completed_job(workflow, dag, state, job_id)
+            else:
+                engine.process_failed_job(dag, state, job_id)
+        except Exception as e:
+            print(f"[WARN] workflow advancement failed for job "
+                  f"'{job_id}' (workflow '{workflow_id}'): {e}")
+
     def _run_job(self, node, job_id):
         """
         Execute a job in a background thread.
@@ -753,6 +788,32 @@ class GCONCoordinator:
             # "running" and the node "busy" forever.
             print(f"[ERROR] _run_job failed for '{job_id}' on "
                   f"'{node.node_id}': {e}")
+
+            # Best-effort: tell the node to stop the job before freeing
+            # it back to idle. Without this, a dispatch that failed
+            # from the *coordinator's* side (timeout, bad response,
+            # etc.) while the agent is genuinely still alive and
+            # working leaves that subprocess running orphaned on the
+            # node -- which the scheduler can now immediately hand a
+            # second job to, since nothing here ever told it to stop.
+            # At scale, dispatch timeouts are a certainty, not an edge
+            # case, so this isn't a rare double-booking: it's a
+            # standing resource-contention risk that gets worse the
+            # longer a busy cluster runs. cancel_job() itself never
+            # blocks long (it either fails fast on an unreachable node
+            # or fires a one-way message on the stream -- see
+            # grpc_transport.py), and any failure here must not stop
+            # this method from still freeing the node/failing the job
+            # below, since a node the agent genuinely can't reach isn't
+            # made worse by a cancel it'll never receive.
+            try:
+                self.communication.cancel_job(node.node_id, job_id)
+            except Exception as cancel_error:
+                print(f"[WARN] best-effort cancel_job failed for "
+                      f"'{job_id}' on '{node.node_id}' (proceeding "
+                      f"anyway): {cancel_error}")
+
+            self._advance_workflow(job_id, job, success=False)
 
             with self.jobs_lock:
                 cancelled = job.get("cancel_requested", False)
@@ -844,6 +905,7 @@ class GCONCoordinator:
                     },
                 )
             )
+            self._advance_workflow(job_id, job, success=True)
         else:
             cancelled = job.get("cancel_requested", False)
             self.event_bus.publish(
@@ -857,6 +919,7 @@ class GCONCoordinator:
                     },
                 )
             )
+            self._advance_workflow(job_id, job, success=False)
           
     
     def scheduler_loop(self):
@@ -1124,6 +1187,28 @@ class GCONCoordinator:
             source="Coordinator", payload={"cleared_job_ids": cleared},
         ))
         print(f"[QUEUE] Cleared {len(cleared)} pending job(s).")
+        return cleared
+
+    def clear_failed_jobs(self):
+        """
+        Permanently drop every currently failed job (as opposed to
+        retry_failed_jobs, which re-queues them for another attempt).
+        Jobs in any other status are unaffected.
+        """
+        cleared = []
+
+        with self.jobs_lock:
+            for job_id, job in self.jobs.items():
+                if job["status"] == "failed":
+                    cleared.append(job_id)
+            for job_id in cleared:
+                del self.jobs[job_id]
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="FAILED_JOBS_CLEARED",
+            source="Coordinator", payload={"cleared_job_ids": cleared},
+        ))
+        print(f"[QUEUE] Cleared {len(cleared)} failed job(s).")
         return cleared
 
     def retry_failed_jobs(self):
