@@ -165,6 +165,12 @@ class WebServer:
         def events(user=Depends(self.current_user)):
             return self.presentation.get_events()
 
+        # ---- Workflows ----
+
+        @self.app.get("/workflows")
+        def workflows(user=Depends(self.current_user)):
+            return self.presentation.get_workflows()
+
         # ---- Cluster Visualization ----
 
         @self.app.get("/topology")

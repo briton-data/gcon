@@ -664,9 +664,35 @@
             <!-- ================================================= -->
             <div class="gcon-tab d-none" id="tab-workflows">
 
-                {% with icon="bi-diagram-2", title="Workflows", body="Workflow / DAG orchestration isn't wired up in the GCON backend yet. Once the workflow engine is exposed here, this page will show the workflow list, DAG view, and run history." %}
-                {% include "panels/coming_soon.html" %}
-                {% endwith %}
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Workflows</h5>
+                        <span class="text-secondary small">Workflow / DAG orchestration</span>
+                    </div>
+                    <div class="gcon-panel-body p-0">
+                        <div id="workflows-empty" class="text-secondary text-center py-5 d-none">
+                            No workflows submitted yet. Submit one via <code>POST /api/v1/workflows</code>.
+                        </div>
+                        <table class="table gcon-table mb-0" id="workflows-table">
+                            <thead>
+                                <tr>
+                                    <th>Workflow</th>
+                                    <th>Status</th>
+                                    <th>Pending</th>
+                                    <th>Ready</th>
+                                    <th>Running</th>
+                                    <th>Completed</th>
+                                    <th>Failed</th>
+                                    <th>Blocked</th>
+                                    <th>Created</th>
+                                </tr>
+                            </thead>
+                            <tbody id="workflows-table-body">
+                                <tr><td colspan="9" class="text-secondary text-center py-4">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
 
             </div>
 

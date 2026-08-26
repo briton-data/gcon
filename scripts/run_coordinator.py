@@ -76,6 +76,26 @@ def main():
             "status": payload["status"],
             "timestamp": datetime.now(UTC),
         })
+        # payload already carries the agent's real, live cpu_percent/
+        # memory_percent/running_jobs (see grpc_transport.py's
+        # heartbeat envelope handling) -- this used to be discarded
+        # here, silently, which meant every node's cpu/memory in the
+        # registry sat at 0.0 forever except a one-shot update right
+        # after that node finished a job. The scheduler's
+        # cpu*0.5 + memory*0.3 + running_jobs*20 scoring was, in
+        # effect, always scoring every idle node at ~0 -- load-aware
+        # selection wasn't actually functioning. update_node_resources
+        # deliberately never writes status (see its docstring), so
+        # this can't race the atomic claim_best_idle_node() busy-flag
+        # the way writing status here would.
+        coordinator.receive_resource_report({
+            "node_id": node_id,
+            "cpu": payload["cpu_percent"],
+            "memory": payload["memory_percent"],
+            "running_jobs": payload["running_jobs"],
+            "status": payload["status"],
+            "timestamp": payload["timestamp"],
+        })
 
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
         proxy = RemoteNodeProxy(node_id, transport, org_id=org_id, address=address)
