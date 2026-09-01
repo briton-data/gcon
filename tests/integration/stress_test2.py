@@ -645,12 +645,6 @@ class TestStorageManagerConcurrency:
 # =======================================================================
 
 class TestPolicyEngine:
-    @pytest.mark.xfail(reason="tests/support/policy.py PolicyEngine.check_runtime() references "
-                               "self.max_runtime, which does not exist (the value lives at "
-                               "self.policy['max_runtime']) — an over-limit receipt raises "
-                               "AttributeError instead of returning the intended (False, message) "
-                               "tuple, which in turn breaks evaluate()'s all-checks-run-and-report "
-                               "contract for every other check in the same receipt")
     def test_over_limit_runtime_reports_failure_instead_of_crashing(self):
         from tests.support.policy import PolicyEngine
 
@@ -670,11 +664,6 @@ class TestPolicyEngine:
         assert passed is False
         assert "exceeds" in message
 
-    @pytest.mark.xfail(reason="same root cause as test_over_limit_runtime_reports_failure_instead_of_crashing "
-                               "above, reached through evaluate() — the method real callers actually use — "
-                               "so a single over-runtime receipt currently crashes the ENTIRE trust "
-                               "evaluation (CPU/memory/GPU checks never run) instead of reporting one "
-                               "failed check among several")
     def test_evaluate_over_limit_runtime_does_not_abort_remaining_checks(self):
         """
         Same underlying defect, exercised through evaluate() — the
