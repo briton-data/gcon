@@ -141,11 +141,18 @@ class NodeRegistry:
         with self._lock:
             return dict(self.nodes)
 
-    def claim_best_idle_node(self, score_fn):
+    def claim_best_idle_node(self, score_fn, filter_fn=None):
         """
         Atomically select the best available idle node (lowest
         score_fn(info) wins) and mark it busy, in one locked
         operation.
+
+        `filter_fn(info)`, if given, is applied before scoring: a
+        candidate node is only eligible if `filter_fn(info)` returns
+        True (e.g. "resourced" jobs use this to exclude nodes whose
+        reported capabilities don't satisfy the job's `requires`).
+        With no filter, every idle/non-draining node is eligible, same
+        as before this parameter existed.
 
         This closes a real race (AUDIT_REPORT.md 2.3 / audit finding
         C-1): Scheduler.select_node() used to just scan for an idle
@@ -171,6 +178,8 @@ class NodeRegistry:
             lowest_score = float("inf")
             for info in self.nodes.values():
                 if info["status"] != "idle" or info.get("draining"):
+                    continue
+                if filter_fn is not None and not filter_fn(info):
                     continue
                 score = score_fn(info)
                 if score < lowest_score:

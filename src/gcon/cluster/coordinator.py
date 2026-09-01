@@ -3,6 +3,7 @@ import threading
 import socket
 import uuid
 import itertools
+import os
 from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
@@ -10,9 +11,13 @@ from datetime import datetime, UTC
 from .registry import NodeRegistry
 from .scheduler import Scheduler
 from .communication import CommunicationManager
+from gcon.cluster.autoscaler import AutoScaler
+from gcon.transport.local_transport import LocalTransport
 
 from gcon.execution.verifier import ExecutionVerifier
 from gcon.execution.artifact_registry import ArtifactRegistry
+from gcon.execution.policy_engine import PolicyEngine
+from gcon.execution.staking import StakeLedger
 from gcon.storage.storage_manager import StorageManager
 from gcon.events.event import Event
 from gcon.events.event_types import EventType
@@ -22,6 +27,12 @@ from gcon.monitoring.health_service import HealthService
 from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
 from gcon.transport.config import TransportConfig
+
+class NotLeaderError(RuntimeError):
+    """Raised by a standby coordinator (see gcon.cluster.leader_election)
+    when asked to do something only the active leader may do."""
+    pass
+
 
 class GCONCoordinator:
     """
@@ -59,7 +70,7 @@ class GCONCoordinator:
         # themselves by reconnecting and calling register_agent().
         self.nodes = {}
 
-        self.scheduler = Scheduler(self.registry)
+        self.scheduler = Scheduler(self.registry, control_plane)
         self.communication = CommunicationManager(transport=transport)
         self.agents = {}
         self.event_bus = EventBus()
@@ -106,11 +117,48 @@ class GCONCoordinator:
         # list every call.
         self._verified_receipt_count = 0
         self._unverified_receipt_count = 0
+        # Per-replica receipt trail for verify-tagged jobs (see
+        # gcon.execution.replication and _run_replicated_job). Every
+        # replica keeps its own independently-signed receipt here,
+        # keyed by job_id -> list of receipts (one per node that
+        # actually completed), so which specific node produced which
+        # specific signed result is never collapsed into a single
+        # record. self.receipts (job_id -> one receipt) still also
+        # gets one canonical entry per verify-tagged job -- the first
+        # replica to complete -- purely so every existing consumer of
+        # self.receipts (get_receipts/get_receipt_detail/health-check
+        # verification cache/dashboard) keeps working unchanged for
+        # verify-tagged jobs too; those consumers surfacing the full
+        # replica list is follow-up work, not done here.
+        self.replica_receipts = {}
+        self.replica_receipts_lock = threading.RLock()
         self.artifact_registry = ArtifactRegistry() 
         self.storage_manager = StorageManager()
         self.workflow_engine = WorkflowEngine(self)
         self.health_service = HealthService(self)
         self.verifier = ExecutionVerifier()
+        # policy.json (or GCON_POLICY_FILE) at the repo root -- this
+        # file already existed and looked authoritative, but nothing
+        # ever loaded it at runtime until now (see PolicyEngine's
+        # docstring for the full history). Missing/malformed file
+        # falls back to PolicyEngine's built-in defaults, same as
+        # before.
+        self.policy_engine = PolicyEngine(
+            policy_file=os.environ.get("GCON_POLICY_FILE", "policy.json")
+        )
+        # self.jobs/self.receipts are unbounded in-memory dicts -- every
+        # job ever submitted stayed in memory for the coordinator's
+        # entire lifetime, which is a real problem at the job volumes
+        # this project is aiming for (10k-15M+ jobs). See
+        # _evict_completed_if_over_capacity for what gets evicted, when,
+        # and the honest fidelity limits of falling back to the DB for
+        # an evicted job (jobs are only partially durable today -- see
+        # that method's docstring). Defaults chosen to keep a generous
+        # recent-history window for the dashboard while still bounding
+        # memory for a long-running coordinator; override via env for a
+        # specific deployment's real memory budget.
+        self._max_jobs_in_memory = int(os.environ.get("GCON_MAX_JOBS_IN_MEMORY", "5000"))
+        self._max_receipts_in_memory = int(os.environ.get("GCON_MAX_RECEIPTS_IN_MEMORY", "5000"))
         self.scheduler_paused = False
 
         # Bounded, in-memory trust-score time series, sampled every
@@ -138,6 +186,34 @@ class GCONCoordinator:
         # LocalTransport path) pass none and simply run with no
         # persisted history, exactly as before.
         self.control_plane = control_plane
+        # Bonded-stake ledger (see gcon.execution.staking). Requires a
+        # real control-plane DB to persist balances against, same
+        # restriction as the receipt/job durability above -- a
+        # local-only coordinator with no control_plane simply has no
+        # staking (gating is off by default anyway; see StakeLedger).
+        self.stake_ledger = StakeLedger(control_plane) if control_plane is not None else None
+        # Outbound webhook delivery (see gcon.transport.webhooks).
+        # Same control_plane-required guard as everything else durable
+        # here -- _dispatch_webhook() already no-ops without one, this
+        # just means there's also no background sender thread to run.
+        self.webhook_dispatcher = None
+        if control_plane is not None:
+            from gcon.transport.webhooks import WebhookDispatcher
+            self.webhook_dispatcher = WebhookDispatcher(control_plane, event_bus=self.event_bus)
+            self.webhook_dispatcher.start()
+        # HA leader election (see gcon.cluster.leader_election) is set
+        # up by run_coordinator.py, not here -- unlike webhooks/staking
+        # it needs an operator-chosen coordinator identity + whether
+        # this process should even participate, which __init__ doesn't
+        # take as arguments. None here just means "not running as part
+        # of an HA cluster" (the default/back-compat case).
+        self.leader_elector = None
+        # DB-level retention sweep state (see _maybe_sweep_retention).
+        # Lazily constructs RetentionPolicy on first tick rather than
+        # here so env vars set after coordinator construction (common
+        # in tests) are still picked up.
+        self._retention_policy = None
+        self._last_retention_sweep = 0.0
         self.restore_from_persistence()
 
         self.scheduler_thread = threading.Thread(
@@ -151,7 +227,38 @@ class GCONCoordinator:
                 daemon=True
         )
         self.health_check_thread.start()
-        
+
+        # AutoScaler is owned here, not by PresentationLayer, so the
+        # dashboard's manual scale_up/scale_down buttons and this
+        # loop's automatic decisions share one instance -- and
+        # therefore one `scaled_nodes` bookkeeping list. Two separate
+        # AutoScaler(coordinator) instances (previously: one built
+        # fresh inside PresentationLayer.__init__, none anywhere else)
+        # would each track their own idea of "which nodes did I
+        # create", so a manual scale-down could never remove a node
+        # the automatic loop had created, and vice versa -- see
+        # gcon.cluster.autoscaler's AutoScaler for the bookkeeping
+        # this shares.
+        self.autoscaler = AutoScaler(self)
+
+        # Opt-in: GCON_AUTOSCALE_ENABLED=1 (default off). Automatically
+        # creating/destroying cluster nodes is a real behavior change
+        # that every existing caller of GCONCoordinator() -- most
+        # tests included -- should not suddenly get for free just by
+        # constructing a coordinator. GCON_AUTOSCALE_INTERVAL_SECONDS
+        # (default 5.0) controls how often check_scale() runs; slower
+        # than health_check_loop's 3s on purpose, since scaling
+        # decisions should react to a sustained gap between pending
+        # jobs and idle nodes, not every single momentary blip.
+        self.autoscale_enabled = os.environ.get("GCON_AUTOSCALE_ENABLED", "0") in ("1", "true", "True")
+        self.autoscale_thread = None
+        if self.autoscale_enabled:
+            self.autoscale_thread = threading.Thread(
+                target=self.autoscale_loop,
+                daemon=True,
+            )
+            self.autoscale_thread.start()
+
         print("GCON Coordinator initialized.")
 
     def restore_from_persistence(self):
@@ -173,7 +280,30 @@ class GCONCoordinator:
             return
 
         try:
-            for job in self.control_plane.jobs.list_all():
+            # Bounded, not list_all(): a coordinator that's been
+            # running for months could otherwise have to load every
+            # job it's ever seen just to restart. Non-terminal jobs
+            # (pending/running) are loaded in full regardless -- they
+            # need reconciliation below no matter how many there are
+            # -- then topped up with the most recent terminal jobs, up
+            # to the same cap in-memory eviction already uses
+            # (_max_jobs_in_memory), so restore never hands the
+            # in-memory store more than it would keep after its first
+            # eviction pass anyway. See gcon.persistence.retention for
+            # the complementary DB-side purge that keeps the
+            # underlying table itself from growing unbounded.
+            non_terminal = self.control_plane.jobs.list_non_terminal()
+            recent_terminal = self.control_plane.jobs.list_recent_terminal(
+                self._max_jobs_in_memory
+            )
+            # self.jobs is insertion-ordered oldest-first (get_jobs's
+            # fast path relies on that to reverse it into newest-first
+            # cheaply) -- recent_terminal comes back newest-first from
+            # the DB, so re-sort the combined set back to ascending
+            # submitted_at before inserting, rather than inserting in
+            # DESC order and silently breaking that invariant.
+            combined = sorted(non_terminal + recent_terminal, key=lambda j: j["submitted_at"])
+            for job in combined:
                 self.jobs[job["job_id"]] = {
                     "command": job["command"],
                     "node_id": None,
@@ -237,7 +367,13 @@ class GCONCoordinator:
             )
 
         try:
-            for receipt in self.control_plane.receipts.list_all():
+            # Bounded, same reasoning as jobs above -- see
+            # ReceiptRepository.list_recent's docstring for why
+            # receipts (unlike jobs) have no non-terminal subset that
+            # must be loaded in full.
+            for receipt in self.control_plane.receipts.list_recent(
+                self._max_receipts_in_memory
+            ):
                 # `payload` is exactly the receipt dict the issuing side
                 # (ExecutionVerifier.create_receipt locally, or
                 # ReceiptGenerator.generate on a remote agent) built --
@@ -293,6 +429,32 @@ class GCONCoordinator:
         self.registry.register(node)
         self.communication.register_node(node)
 
+        # For gRPC-connected agents, grpc_transport.py's Register() RPC
+        # handler already writes this node's row to control_plane.nodes
+        # (with the real transport endpoint, TLS auth fingerprint, etc.)
+        # BEFORE this method ever runs. But this method is also called
+        # directly for LocalTransport/manually-constructed nodes (see
+        # GCONNode, and this coordinator's own tests), which have no
+        # equivalent RPC handler to do that write -- so with a real
+        # control_plane attached, jobs run on such a node could never
+        # actually persist a receipt at all: receipts.job_id/node_id
+        # are FK columns, and the INSERT would fail every single time
+        # with no row for this node_id to reference (this exact gap is
+        # what surfaced the receipts.upload() IntegrityError-swallowing
+        # bug fixed alongside this one -- that bug is what let this one
+        # stay invisible). upsert() is idempotent, so this is a safe
+        # no-op for a node already registered via the real gRPC path.
+        if self.control_plane is not None:
+            try:
+                self.control_plane.nodes.upsert(
+                    node_id=node.node_id,
+                    hostname=node.node_id,
+                    status=node.status,
+                    org_id=getattr(node, "org_id", None),
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to persist node registration for '{node.node_id}': {e!r}")
+
         print(f"Node '{node.node_id}' registered successfully.")
         self.event_bus.publish(
             Event(
@@ -306,7 +468,11 @@ class GCONCoordinator:
     )
 )
     
-    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None, org_id=None):
+    def submit_job(
+        self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
+        org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
+        callback_url=None, verify=None,
+    ):
         """
         Submit a new job to the coordinator.
 
@@ -321,12 +487,82 @@ class GCONCoordinator:
         org-scoped API access -- normally derived from `created_by`'s
         organization (see api_v1.py's submit_job route), left None for
         jobs with no company association.
+
+        `kind` is one of "command" (default -- today's plain,
+        unstructured behavior), "resourced" (adds `requires`, matched
+        against node capabilities at scheduling time so the job never
+        lands on a node that can't run it), or "staged" (adds
+        `stages`, a per-checkpoint progress-reporting contract -- see
+        GCONAgent.execute_job's stage_report_path). GCON still never
+        interprets what a job's command actually does; these only
+        change scheduling (`requires`) and what proof looks like
+        (`stages`), never how the command itself runs.
+
+        `dataset_artifacts` are IDs of artifacts already registered
+        with this coordinator (not filepaths, unlike `artifacts`) that
+        this job declares as its input data. Their content hashes get
+        folded into the job's receipt input_hash at completion (see
+        _run_job), so which exact data version fed a run becomes part
+        of the tamper-evident record.
+
+        `callback_url`, if given, is POSTed a signed JSON payload when
+        this job reaches a terminal state (completed/failed/
+        cancelled) -- see gcon.transport.webhooks -- so the submitter
+        doesn't have to poll. Independent of, and in addition to, any
+        standing org-level webhook subscription for the same org_id.
+
+        `verify`, if given, e.g. {"replicas": 2, "tolerance": 0.02},
+        dispatches this job to N independently-selected idle nodes
+        instead of one, and compares their results for agreement --
+        see gcon.execution.replication and _run_replicated_job. This
+        is orthogonal to `kind`/`requires`/`stages`: a "resourced" or
+        "staged" job can also ask for replication. None (default)
+        means today's single-node dispatch, completely unchanged.
+        Independent of HMAC signing -- each replica still gets its
+        own normal signed receipt; `verify` only adds a derived
+        agreement annotation on top, it never replaces or weakens the
+        per-node signature.
+
+        Raises NotLeaderError if this coordinator is running as part
+        of an HA cluster (leader_elector set -- see
+        gcon.cluster.leader_election) and is currently a standby, not
+        the leader. A standby's job_queue is never drained (see
+        scheduler_loop's HA gating), so silently accepting a
+        submission here would durably persist the job but leave it
+        pending forever -- rejecting it immediately, loudly, lets the
+        caller retry against the actual leader instead.
         """
+        if self.leader_elector is not None and not self.leader_elector.is_leader:
+            raise NotLeaderError(
+                "This coordinator is a standby, not the current leader; "
+                "resubmit to the active coordinator."
+            )
         if artifacts is None:
              artifacts = []
-             
-            
-        
+
+        if kind not in ("command", "resourced", "staged"):
+            raise ValueError(
+                f"Unknown job kind '{kind}' -- must be one of "
+                "'command', 'resourced', 'staged'."
+            )
+
+        if verify is not None:
+            replicas = verify.get("replicas", 2)
+            if not isinstance(replicas, int) or replicas < 2:
+                raise ValueError(
+                    f"verify.replicas must be an int >= 2 (got {replicas!r}) "
+                    "-- replication needs at least 2 independent nodes to "
+                    "compare against each other."
+                )
+
+        dataset_artifacts = dataset_artifacts or []
+        for artifact_id in dataset_artifacts:
+            if self.artifact_registry.get_artifact(artifact_id) is None:
+                raise ValueError(
+                    f"dataset_artifacts references unknown artifact "
+                    f"'{artifact_id}' -- register it first."
+                )
+
         with self.jobs_lock:
             if job_id in self.jobs:
                 raise ValueError(f"Job '{job_id}' already exists.")
@@ -348,6 +584,12 @@ class GCONCoordinator:
                 "created_by": created_by,
                 "workflow_id": workflow_id,
                 "org_id": org_id,
+                "kind": kind,
+                "requires": requires,
+                "stages": stages,
+                "dataset_artifacts": dataset_artifacts,
+                "callback_url": callback_url,
+                "verify": verify,
     }
         self.queue_job(job_id)
 
@@ -366,6 +608,11 @@ class GCONCoordinator:
                     job_id, command, workflow_id=workflow_id,
                     created_by=created_by, org_id=org_id,
                 )
+                if callback_url:
+                    self.control_plane.db.execute(
+                        "UPDATE jobs SET callback_url = ? WHERE job_id = ?",
+                        (callback_url, job_id),
+                    )
             except Exception as e:
                 print(f"[PERSIST] Failed to persist job '{job_id}': {e!r}")
 
@@ -408,9 +655,20 @@ class GCONCoordinator:
     )
             return
 
-        node = self.scheduler.select_node()
+        verify_cfg = job.get("verify")
+        if verify_cfg:
+            self._assign_replicated_job(job_id, job, verify_cfg)
+            return
+
+        node = self.scheduler.select_node(requires=job.get("requires"))
 
         if node is None:
+            if job.get("requires"):
+                raise RuntimeError(
+                    f"No available node satisfies job '{job_id}'s requirements "
+                    f"({job['requires']}) -- either none are idle right now, or "
+                    "none have matching reported capabilities."
+                )
             raise RuntimeError("No available nodes to execute the job.")
 
     # Mark node and job as busy/running. select_node() worked from a
@@ -458,8 +716,127 @@ class GCONCoordinator:
 )
         thread.start()
         return 
-    
-    
+
+    def _assign_replicated_job(self, job_id, job, verify_cfg):
+        """
+        Claim N independent idle nodes for a verify-tagged job and
+        dispatch _run_replicated_job on them, instead of the single
+        node + _run_job path assign_job normally takes.
+
+        Each scheduler.select_node() call is independently atomic
+        (see NodeRegistry.claim_best_idle_node) -- calling it N times
+        in a row can never claim the same node twice, since a node
+        this call just claimed is marked busy before the lock is
+        released and so is no longer idle for the next call. If fewer
+        than N nodes are available, every node already claimed in
+        this attempt is released back to idle before raising, so a
+        failed replicated dispatch never leaves nodes stranded busy
+        with nothing actually running on them.
+        """
+        replicas = verify_cfg.get("replicas", 2)
+        nodes = []
+
+        for _ in range(replicas):
+            node = self.scheduler.select_node(requires=job.get("requires"))
+            if node is None:
+                for claimed in nodes:
+                    claimed.status = "idle"
+                    try:
+                        self.registry.heartbeat(
+                            claimed.node_id, "idle", claimed.heartbeat()["timestamp"]
+                        )
+                    except ValueError:
+                        pass
+                raise RuntimeError(
+                    f"Only {len(nodes)}/{replicas} nodes available to satisfy "
+                    f"job '{job_id}'s verification replica count "
+                    f"(requires={job.get('requires')})."
+                )
+            nodes.append(node)
+
+        for node in nodes:
+            node.status = "busy"
+            try:
+                self.registry.heartbeat(
+                    node.node_id, "busy", node.heartbeat()["timestamp"]
+                )
+            except ValueError:
+                # This node was deregistered in the window between being
+                # claimed and this heartbeat call -- release every other
+                # claimed node the same way a failed initial claim does
+                # above, then let assign_job's caller retry, same
+                # recoverable-condition contract as the single-node path.
+                for other in nodes:
+                    if other is node:
+                        continue
+                    other.status = "idle"
+                    try:
+                        self.registry.heartbeat(
+                            other.node_id, "idle", other.heartbeat()["timestamp"]
+                        )
+                    except ValueError:
+                        pass
+                raise RuntimeError(
+                    f"Node '{node.node_id}' was deregistered before it could "
+                    f"be assigned as a replica for job '{job_id}'."
+                )
+
+        job["status"] = "running"
+        # node_id holds the first replica for backward compatibility with
+        # every existing job-detail consumer that expects a single node_id;
+        # replica_node_ids is the real, complete list.
+        job["node_id"] = nodes[0].node_id
+        job["replica_node_ids"] = [n.node_id for n in nodes]
+
+        thread = threading.Thread(
+            target=self._run_replicated_job,
+            args=(nodes, job_id),
+            daemon=True,
+        )
+
+        self.event_bus.publish(
+            Event(
+                timestamp=datetime.now(UTC),
+                event_type="JOB_STARTED",
+                source="Scheduler",
+                payload={
+                    "job_id": job_id,
+                    "node_id": nodes[0].node_id,
+                    "replica_node_ids": job["replica_node_ids"],
+                },
+            )
+        )
+        thread.start()
+
+    def _attested_node_id(self, node_id):
+        """
+        The mTLS-authenticated identity the control plane has on file
+        for `node_id`, if any -- see grpc_transport.py's Register
+        handler (only ever sets this after verifying the connecting
+        certificate's Common Name matches the claimed node_id) and
+        NodeRepository.upsert's auth_fingerprint COALESCE handling
+        (preserves it across later registration calls that don't pass
+        one, e.g. register_agent's own post-Register upsert).
+
+        Returns None -- not an error -- when there's no control_plane
+        at all, when this node_id has no row yet, or when it connected
+        over a transport with no cryptographic identity (e.g.
+        LocalTransport, used for in-process/dev/test nodes). Passing
+        None through to create_receipt()/generate_execution_proof()
+        means "nothing to attest," not "attested and empty" -- see
+        their docstrings.
+        """
+        if self.control_plane is None:
+            return None
+        try:
+            info = self.control_plane.nodes.get(node_id)
+        except Exception as e:
+            print(f"[WARN] Could not look up auth_fingerprint for '{node_id}': {e!r}")
+            return None
+        if info is None:
+            return None
+        return info.get("auth_fingerprint")
+
     def receive_receipt(self, job_id, receipt):
         """
         Store a receipt for a completed job.
@@ -486,7 +863,34 @@ class GCONCoordinator:
             self._pending_receipt_ids.append(job_id)
 
         print(f"Receipt received for job '{job_id}'.")
-        
+
+    def receive_replica_receipt(self, job_id, receipt, is_primary):
+        """
+        Store one replica's independently-signed receipt in the
+        per-replica trail (self.replica_receipts), for a verify-tagged
+        job. Called once per node that completed, from
+        _run_replicated_job -- unlike receive_receipt (which always
+        overwrites the single job_id -> receipt slot), this appends,
+        so every replica's own signed record survives even though
+        they all share the same job_id.
+
+        `is_primary` additionally routes this same receipt through
+        receive_receipt() -- storing it in self.receipts too -- so
+        every existing consumer of self.receipts (get_receipts,
+        get_receipt_detail, the health-check verification cache, the
+        dashboard) keeps working for verify-tagged jobs without
+        modification, seeing the first replica's receipt as if it
+        were an ordinary single-node job. The complete replica list
+        lives only in self.replica_receipts for now; surfacing all N
+        receipts in the dashboard/API is follow-up work, not done
+        here.
+        """
+        with self.replica_receipts_lock:
+            self.replica_receipts.setdefault(job_id, []).append(receipt)
+
+        if is_primary:
+            self.receive_receipt(job_id, receipt)
+
     def get_job_status(self, job_id):
         """
         Get the current status of a job.
@@ -518,6 +922,38 @@ class GCONCoordinator:
             self.recover_jobs(node_id)
 
         self._sample_health_and_trust()
+        self._maybe_sweep_retention()
+
+    def _maybe_sweep_retention(self):
+        """
+        Runs the DB-level retention purge (see gcon.persistence
+        .retention) at most once every GCON_RETENTION_SWEEP_INTERVAL_
+        SECONDS (default 300 = 5 min) -- check_cluster_health ticks
+        every 3s, and there is no reason to re-run a DELETE-heavy
+        sweep that often. A no-op with no control_plane, or when
+        no retention policy is actually configured (RetentionPolicy
+        .enabled is False by default -- see its docstring for why
+        this stays opt-in).
+        """
+        if self.control_plane is None:
+            return
+        interval = float(os.environ.get("GCON_RETENTION_SWEEP_INTERVAL_SECONDS", "300"))
+        now = time.monotonic()
+        if now - self._last_retention_sweep < interval:
+            return
+        self._last_retention_sweep = now
+
+        if self._retention_policy is None:
+            from gcon.persistence.retention import RetentionPolicy
+            self._retention_policy = RetentionPolicy()
+        if not self._retention_policy.enabled:
+            return
+        try:
+            removed = self._retention_policy.sweep(self.control_plane)
+            if any(removed.values()):
+                print(f"[RETENTION] Purged: {removed}")
+        except Exception as e:
+            print(f"[RETENTION] Sweep failed: {e!r}")
 
     def _sample_health_and_trust(self):
         """
@@ -585,6 +1021,30 @@ class GCONCoordinator:
                         source="Verifier",
                         payload={"receipt_id": receipt_id, "job_id": job_id},
                     ))
+                    # Slash the node that produced this receipt -- see
+                    # gcon.execution.staking module docstring for why
+                    # this specific trigger (a bad/missing HMAC
+                    # signature) and not ordinary job failure. A no-op
+                    # if this coordinator has no control_plane, or the
+                    # node has nothing bonded.
+                    if self.stake_ledger is not None:
+                        node_id = receipt.get("agent_id")
+                        if node_id:
+                            slashed = self.stake_ledger.slash_for_failed_verification(
+                                node_id, job_id=job_id, receipt_id=receipt_id,
+                            )
+                            if slashed is not None:
+                                self.event_bus.publish(Event(
+                                    event_type=EventType.NODE_STAKE_SLASHED,
+                                    source="StakeLedger",
+                                    payload={
+                                        "node_id": node_id,
+                                        "amount": slashed["slashed_total"],
+                                        "reason": "failed_receipt_verification",
+                                        "job_id": job_id,
+                                        "receipt_id": receipt_id,
+                                    },
+                                ))
             elif receipt_id in self._known_unverified_receipt_ids:
                 self._known_unverified_receipt_ids.discard(receipt_id)
                 self.event_bus.publish(Event(
@@ -773,11 +1233,20 @@ class GCONCoordinator:
 
         job = self.jobs[job_id]
 
+        # Only "staged" jobs need anything communicated to the agent
+        # itself -- "resourced"'s `requires` was already consumed by
+        # the scheduler back in assign_job(), before this node was
+        # even chosen, so it has no reason to travel any further.
+        dispatch_metadata = None
+        if job.get("kind") == "staged":
+            dispatch_metadata = {"kind": "staged", "stages": job.get("stages")}
+
         try:
             response = self.communication.send_job(
                 node.node_id,
                 job_id,
-                job["command"]
+                job["command"],
+                metadata=dispatch_metadata,
             )
 
             result = response["result"]
@@ -820,6 +1289,8 @@ class GCONCoordinator:
                 job["status"] = "cancelled" if cancelled else "failed"
                 job["completed_at"] = datetime.now(UTC).isoformat()
                 job["result"] = {"status": "error", "message": str(e)}
+            self._persist_job_status(job_id, job)
+            self._dispatch_webhook(job_id, job, "JOB_FAILED" if job["status"] == "failed" else "JOB_CANCELLED")
 
             node.status = "idle"
             self.registry.heartbeat(
@@ -840,6 +1311,7 @@ class GCONCoordinator:
                     },
                 )
             )
+            self._evict_completed_if_over_capacity()
             return
 
         node.status = "idle"
@@ -873,17 +1345,69 @@ class GCONCoordinator:
 
             job["result"] = result
 
+        self._persist_job_status(job_id, job)
+        self._dispatch_webhook(job_id, job, "JOB_COMPLETED" if job["status"] == "completed"
+                                else ("JOB_CANCELLED" if job["status"] == "cancelled" else "JOB_FAILED"))
+
         if result["status"] == "success":
             # Generate a real, cryptographically signed receipt for
             # this execution using the coordinator's shared verifier
             # instance (so later verification uses the same key).
             try:
-                input_hash = self.verifier.hash_data(job["command"])
+                # dataset_artifacts (declared at submission -- IDs of
+                # artifacts already registered with this coordinator,
+                # see submit_job) get folded into input_hash alongside
+                # the command itself, so which exact data version fed
+                # this run is part of the tamper-evident record, not
+                # just the command string. Falls back to hashing the
+                # command alone (today's behavior, byte-identical)
+                # when a job declares none.
+                dataset_artifacts = job.get("dataset_artifacts") or []
+                if dataset_artifacts:
+                    dataset_hashes = []
+                    for artifact_id in dataset_artifacts:
+                        artifact = self.artifact_registry.get_artifact(artifact_id)
+                        if artifact:
+                            dataset_hashes.append(artifact.sha256)
+                    input_hash = self.verifier.hash_data({
+                        "command": job["command"],
+                        "dataset_artifacts": dataset_hashes,
+                    })
+                else:
+                    input_hash = self.verifier.hash_data(job["command"])
                 output_hash = self.verifier.hash_data(result.get("stdout", ""))
                 receipt = self.verifier.create_receipt(
-                    job_id, node.node_id, result, input_hash, output_hash
+                    job_id, node.node_id, result, input_hash, output_hash,
+                    attested_node_id=self._attested_node_id(node.node_id),
                 )
                 self.receive_receipt(job_id, receipt)
+
+                # Persist this coordinator-signed receipt so it survives
+                # a restart. Before this fix, nothing here ever reached
+                # the control-plane DB -- the only receipt that did was
+                # the separate, incompatible one agent_daemon.py used to
+                # upload independently (Ed25519, signature nested one
+                # level differently than this HMAC scheme expects), so
+                # restore_from_persistence() had only the unverifiable
+                # copy to reload after every restart. That agent-side
+                # upload has been removed (see agent_daemon.py) now that
+                # the coordinator's own signed receipt -- the one
+                # verify_all_receipts()/validate_proof() actually
+                # check -- is the one being saved here.
+                if self.control_plane is not None:
+                    try:
+                        self.control_plane.receipts.upload(
+                            job_id=job_id,
+                            payload=receipt,
+                            receipt_hash=self.verifier.hash_data(receipt),
+                            node_id=node.node_id,
+                            signature=receipt["proof"]["signature"],
+                        )
+                    except Exception as persist_error:
+                        print(
+                            f"[WARN] Failed to persist receipt for "
+                            f"'{job_id}': {persist_error!r}"
+                        )
 
                 self.event_bus.publish(Event(
                     timestamp=datetime.now(UTC),
@@ -891,6 +1415,32 @@ class GCONCoordinator:
                     source="Coordinator",
                     payload={"job_id": job_id, "node_id": node.node_id},
                 ))
+
+                # Evaluate the now-signed receipt against policy.json
+                # (max runtime/CPU/memory, GPU requirement). This is
+                # necessarily after-the-fact -- runtime_seconds etc.
+                # only exist once the job has already finished -- so a
+                # violation can't reject or stop the job (it's already
+                # over); it's a trust signal attached to the receipt,
+                # surfaced in the dashboard (get_receipt_detail) and,
+                # on failure, published as a real notification the
+                # same way offline nodes and failed jobs already are.
+                policy_report = self.policy_engine.evaluate(receipt)
+                job["policy_report"] = policy_report
+                if not policy_report["trusted"]:
+                    failed_checks = [
+                        c["message"] for c in policy_report["checks"] if not c["passed"]
+                    ]
+                    self.event_bus.publish(Event(
+                        timestamp=datetime.now(UTC),
+                        event_type="POLICY_VIOLATION",
+                        source="Coordinator",
+                        payload={
+                            "job_id": job_id,
+                            "node_id": node.node_id,
+                            "failed_checks": failed_checks,
+                        },
+                    ))
             except Exception as e:
                 print(f"[WARN] Receipt generation failed for '{job_id}': {e}")
 
@@ -920,8 +1470,458 @@ class GCONCoordinator:
                 )
             )
             self._advance_workflow(job_id, job, success=False)
-          
-    
+
+        self._evict_completed_if_over_capacity()
+
+    def _run_replicated_job(self, nodes, job_id):
+        """
+        Execute a verify-tagged job on all `nodes` in parallel and
+        compare their results for agreement (see
+        gcon.execution.replication). Each node's own dispatch/failure
+        handling mirrors _run_job's single-node path exactly (same
+        best-effort cancel_job on error, same node-freed-to-idle
+        guarantee) -- the only difference is that failure of one
+        replica does not by itself fail the job; the job only fails
+        if too few replicas succeed to produce a usable result.
+
+        Every successful replica gets its own independently
+        HMAC-signed receipt via self.verifier (untouched, unmodified
+        -- see replication.py's module docstring for why). The
+        agreement result across replicas is attached as a receipt-level
+        "execution_proof" field, outside the signed "proof" dict.
+        """
+        job = self.jobs[job_id]
+
+        dispatch_metadata = None
+        if job.get("kind") == "staged":
+            dispatch_metadata = {"kind": "staged", "stages": job.get("stages")}
+
+        results_lock = threading.Lock()
+        successes = []  # list of (node, result) for nodes that completed
+        failures = []   # list of (node, exception) for nodes that errored
+
+        def run_one(node):
+            try:
+                response = self.communication.send_job(
+                    node.node_id,
+                    job_id,
+                    job["command"],
+                    metadata=dispatch_metadata,
+                )
+                result = response["result"]
+            except Exception as e:
+                print(f"[ERROR] _run_replicated_job failed for '{job_id}' on "
+                      f"'{node.node_id}': {e}")
+                try:
+                    self.communication.cancel_job(node.node_id, job_id)
+                except Exception as cancel_error:
+                    print(f"[WARN] best-effort cancel_job failed for "
+                          f"'{job_id}' on '{node.node_id}' (proceeding "
+                          f"anyway): {cancel_error}")
+
+                node.status = "idle"
+                try:
+                    self.registry.heartbeat(
+                        node.node_id, "idle", node.heartbeat()["timestamp"]
+                    )
+                except ValueError:
+                    pass
+
+                with results_lock:
+                    failures.append((node, e))
+                return
+
+            node.status = "idle"
+            self.registry.heartbeat(
+                node.node_id, "idle", node.heartbeat()["timestamp"]
+            )
+            heartbeat = node.heartbeat()
+            self.receive_heartbeat(heartbeat)
+            resources = node.report_resources()
+            self.receive_resource_report(resources)
+
+            with results_lock:
+                successes.append((node, result))
+
+        threads = [threading.Thread(target=run_one, args=(node,), daemon=True) for node in nodes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        with self.jobs_lock:
+            job["replica_failures"] = [
+                {"node_id": n.node_id, "error": str(e)} for n, e in failures
+            ]
+
+        # No replica produced a result at all -- fail the job exactly the
+        # way the single-node path fails on a dispatch error. Every node
+        # has already been freed to idle in run_one above.
+        successful_results = [r for _, r in successes if r.get("status") == "success"]
+        if not successful_results:
+            self._advance_workflow(job_id, job, success=False)
+            with self.jobs_lock:
+                cancelled = job.get("cancel_requested", False)
+                job["status"] = "cancelled" if cancelled else "failed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                job["result"] = {
+                    "status": "error",
+                    "message": f"All {len(nodes)} replicas failed or errored.",
+                }
+            self._persist_job_status(job_id, job)
+            self._dispatch_webhook(job_id, job, "JOB_FAILED" if job["status"] == "failed" else "JOB_CANCELLED")
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC),
+                event_type="JOB_CANCELLED" if cancelled else "JOB_FAILED",
+                source="Coordinator",
+                payload={"job_id": job_id, "replica_node_ids": [n.node_id for n in nodes]},
+            ))
+            self._evict_completed_if_over_capacity()
+            return
+
+        # Primary result: the first replica to complete successfully.
+        # Kept as job["node_id"]/job["result"] for every existing
+        # consumer that expects a single node/result per job.
+        primary_node, primary_result = successes[0]
+        for n, r in successes:
+            if r.get("status") == "success":
+                primary_node, primary_result = n, r
+                break
+
+        with self.jobs_lock:
+            job["node_id"] = primary_node.node_id
+            job["status"] = "completed"
+            job["completed_at"] = datetime.now(UTC).isoformat()
+            job["result"] = primary_result
+
+        self._persist_job_status(job_id, job)
+        self._dispatch_webhook(job_id, job, "JOB_COMPLETED")
+
+        # Build one input_hash for the whole group -- every replica ran
+        # the same command against the same declared inputs, so this is
+        # computed once, exactly like the single-node path in _run_job.
+        try:
+            dataset_artifacts = job.get("dataset_artifacts") or []
+            if dataset_artifacts:
+                dataset_hashes = []
+                for artifact_id in dataset_artifacts:
+                    artifact = self.artifact_registry.get_artifact(artifact_id)
+                    if artifact:
+                        dataset_hashes.append(artifact.sha256)
+                input_hash = self.verifier.hash_data({
+                    "command": job["command"],
+                    "dataset_artifacts": dataset_hashes,
+                })
+            else:
+                input_hash = self.verifier.hash_data(job["command"])
+
+            # Per-successful-node output_hash + comparison inputs.
+            comparable = []
+            per_node_output_hash = {}
+            for node, result in successes:
+                if result.get("status") != "success":
+                    continue
+                output_hash = self.verifier.hash_data(result.get("stdout", ""))
+                per_node_output_hash[node.node_id] = output_hash
+                comparable.append({
+                    "output_hash": output_hash,
+                    "metrics": result.get("metrics", {}),
+                })
+
+            from gcon.execution.replication import compare_results, build_execution_proof
+            verify_cfg = job.get("verify") or {}
+            tolerance = verify_cfg.get("tolerance", 0.02)
+            comparison = compare_results(comparable, tolerance=tolerance)
+            witnesses = [node.node_id for node, r in successes if r.get("status") == "success"]
+            execution_proof = build_execution_proof(
+                witnesses=witnesses,
+                comparison=comparison,
+                replica_group_id=job_id,
+            )
+
+            first_success_seen = False
+            for node, result in successes:
+                if result.get("status") != "success":
+                    continue
+                output_hash = per_node_output_hash[node.node_id]
+                try:
+                    receipt = self.verifier.create_receipt(
+                        job_id, node.node_id, result, input_hash, output_hash,
+                        attested_node_id=self._attested_node_id(node.node_id),
+                    )
+                except ValueError as mismatch_error:
+                    # create_receipt refuses to sign when the claimed
+                    # node_id disagrees with the mTLS-authenticated
+                    # identity on file -- a real, expected-under-attack
+                    # outcome, not a bug. Scoped to just this node: the
+                    # other replicas in this group are unaffected and
+                    # still get their own receipts.
+                    print(
+                        f"[WARN] Refused receipt for job '{job_id}' replica "
+                        f"'{node.node_id}': {mismatch_error}"
+                    )
+                    self.event_bus.publish(Event(
+                        timestamp=datetime.now(UTC),
+                        event_type="POLICY_VIOLATION",
+                        source="Coordinator",
+                        payload={
+                            "job_id": job_id,
+                            "node_id": node.node_id,
+                            "failed_checks": [str(mismatch_error)],
+                        },
+                    ))
+                    continue
+                # Sibling to "proof", not inside it -- see replication.py's
+                # module docstring for why this is deliberately unsigned.
+                receipt["execution_proof"] = execution_proof
+
+                # Policy is evaluated per-replica (each node's own
+                # reported metrics can differ -- e.g. one ran hotter or
+                # slower than another even in agreement) and attached
+                # directly to that replica's own receipt, the same way
+                # execution_proof is: a receipt-level field describing
+                # that specific node's run, not a single job-wide verdict.
+                policy_report = self.policy_engine.evaluate(receipt)
+                receipt["policy_report"] = policy_report
+
+                is_primary = not first_success_seen
+                first_success_seen = True
+                self.receive_replica_receipt(job_id, receipt, is_primary=is_primary)
+                if is_primary:
+                    # Keep job["policy_report"] pointing at the primary
+                    # replica's own evaluation, so every existing
+                    # consumer that reads it off the job dict (rather
+                    # than the receipt) still sees a real, non-fabricated
+                    # result for verify-tagged jobs too.
+                    job["policy_report"] = policy_report
+
+                if not policy_report["trusted"]:
+                    failed_checks = [
+                        c["message"] for c in policy_report["checks"] if not c["passed"]
+                    ]
+                    self.event_bus.publish(Event(
+                        timestamp=datetime.now(UTC),
+                        event_type="POLICY_VIOLATION",
+                        source="Coordinator",
+                        payload={
+                            "job_id": job_id,
+                            "node_id": node.node_id,
+                            "failed_checks": failed_checks,
+                        },
+                    ))
+
+                # Confirmed safe (receipts.py's ReceiptRepository dedupes
+                # on receipt_hash, not job_id -- each replica's receipt
+                # has a distinct node_id/signature, so a distinct hash;
+                # multiple replicas persisting under the same job_id is
+                # exactly what list_for_job() and the UNIQUE(receipt_hash)
+                # idempotency guarantee were already built to support).
+                if self.control_plane is not None:
+                    try:
+                        self.control_plane.receipts.upload(
+                            job_id=job_id,
+                            payload=receipt,
+                            receipt_hash=self.verifier.hash_data(receipt),
+                            node_id=node.node_id,
+                            signature=receipt["proof"]["signature"],
+                        )
+                    except Exception as persist_error:
+                        print(
+                            f"[WARN] Failed to persist replica receipt for "
+                            f"'{job_id}' node '{node.node_id}': {persist_error!r}"
+                        )
+
+                self.event_bus.publish(Event(
+                    timestamp=datetime.now(UTC),
+                    event_type="RECEIPT_GENERATED",
+                    source="Coordinator",
+                    payload={
+                        "job_id": job_id,
+                        "node_id": node.node_id,
+                        "replica_group_id": job_id,
+                    },
+                ))
+
+            if not comparison["agree"]:
+                self.event_bus.publish(Event(
+                    timestamp=datetime.now(UTC),
+                    event_type="EXECUTION_DISPUTED",
+                    source="Coordinator",
+                    payload={
+                        "job_id": job_id,
+                        "witnesses": witnesses,
+                        "mismatches": comparison["mismatches"],
+                    },
+                ))
+        except Exception as e:
+            print(f"[WARN] Replicated receipt generation failed for '{job_id}': {e}")
+
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC),
+            event_type="JOB_COMPLETED",
+            source="Coordinator",
+            payload={"job_id": job_id, "node_id": primary_node.node_id},
+        ))
+        self._advance_workflow(job_id, job, success=True)
+        self._evict_completed_if_over_capacity()
+
+    def _dispatch_webhook(self, job_id, job, event_type):
+        """Enqueues (never blocks on) a webhook delivery for this
+        job's terminal state -- see gcon.transport.webhooks. A no-op
+        without a control_plane, same guard as _persist_job_status.
+        `job` (self.jobs[job_id]) has no "job_id" key of its own (it's
+        keyed by job_id in the dict, not self-describing), so job_id
+        is passed in explicitly rather than read off `job`."""
+        if self.control_plane is None:
+            return
+        try:
+            from gcon.transport.webhooks import dispatch_job_event
+            job_for_webhook = dict(job)
+            job_for_webhook["job_id"] = job_id
+            dispatch_job_event(self.control_plane, job_for_webhook, event_type)
+        except Exception as e:
+            print(f"[WARN] Failed to enqueue webhook for job '{job_id}': {e!r}")
+
+    def _persist_job_status(self, job_id, job):
+        """
+        Write this job's terminal status back to the control-plane DB.
+
+        Real, separate gap found while testing _evict_completed_if_
+        over_capacity's DB fallback: control_plane.jobs.set_status()
+        was previously called ONLY from restore_from_persistence's
+        restart-reconciliation path -- never on a job's NORMAL
+        completion. So the durable jobs table showed every job stuck
+        at "pending" (whatever ensure_exists first wrote) forever,
+        regardless of what actually happened, until/unless that
+        coordinator process happened to restart. An evicted job's
+        _load_job_from_control_plane() fallback was therefore silently
+        wrong -- not merely reduced-fidelity (the known, documented
+        gap on kind/requires/stages/etc.) but reporting a stale status
+        a completed job never actually had. Called from both of
+        _run_job's terminal exits (success/failure and the earlier
+        dispatch-exception branch).
+        """
+        if self.control_plane is None:
+            return
+        try:
+            self.control_plane.jobs.set_status(
+                job_id, job["status"], result=job.get("result"), completed=True,
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to persist status for job '{job_id}': {e!r}")
+
+    def _evict_completed_if_over_capacity(self):
+        """
+        Bound self.jobs/self.receipts' in-memory size. Called after
+        every job reaches a terminal state (_run_job's every exit
+        path). Only ever evicts jobs already in a terminal state
+        (completed/failed/cancelled) -- a pending/running job is never
+        touched no matter how old, since nothing else re-discovers an
+        in-flight job once it's gone from here. Receipts are always
+        eligible: a receipt only exists once its job is already done.
+        Evicts oldest-first (dict insertion order) in one trim per
+        call down to the configured cap, rather than one-in-one-out.
+
+        Fidelity note, read before assuming an evicted entry is fully
+        gone: receipts are safe to evict with no data loss -- the
+        identical payload is already durably persisted (_run_job's
+        control_plane.receipts.upload call, from the earlier
+        signature-verification fix) and get_receipt_detail() falls
+        back to the DB for a receipt_id it can't find in memory. Jobs
+        are a narrower story: the durable jobs table only ever
+        captures command/status/completed_at/result/created_by/
+        workflow_id/org_id (see restore_from_persistence, which has
+        had exactly this gap since before this fix, on every
+        coordinator restart) -- NOT kind/requires/stages/
+        dataset_artifacts/policy_report. So an evicted job's
+        get_execution_detail() falls back to that same narrower shape
+        restore_from_persistence already produces today -- this fix
+        does not make that fidelity any worse, it just makes the same
+        existing gap reachable via a cap instead of only via a
+        restart. Fully preserving those fields across eviction would
+        need the jobs table schema extended first (new columns, a
+        migration) -- deliberately out of scope for what was asked as
+        a memory-growth fix, not something to bundle in silently.
+        """
+        with self.jobs_lock:
+            overflow = len(self.jobs) - self._max_jobs_in_memory
+            if overflow > 0:
+                terminal = [
+                    jid for jid, j in self.jobs.items()
+                    if j.get("status") in ("completed", "failed", "cancelled")
+                ]
+                for jid in terminal[:overflow]:
+                    del self.jobs[jid]
+
+        with self.receipts_lock:
+            overflow = len(self.receipts) - self._max_receipts_in_memory
+            if overflow > 0:
+                for jid in list(self.receipts.keys())[:overflow]:
+                    del self.receipts[jid]
+
+    def _load_job_from_control_plane(self, job_id):
+        """
+        Cold-path fallback for a job evicted from self.jobs (see
+        _evict_completed_if_over_capacity) or from before this
+        coordinator's current process started. Returns the same
+        reduced shape restore_from_persistence() already reconstructs
+        on every restart -- command/status/completed_at/result/
+        created_by/workflow_id/org_id only, NOT kind/requires/stages/
+        dataset_artifacts/policy_report/artifacts (empty list). This
+        is an existing, pre-dating-this-fix fidelity gap, not a new
+        one -- see _evict_completed_if_over_capacity's docstring.
+        Returns None if there's no control_plane, or no row for this
+        job_id.
+        """
+        if self.control_plane is None:
+            return None
+        try:
+            row = self.control_plane.jobs.get(job_id)
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return {
+            "command": row["command"],
+            "node_id": None,
+            "status": row["status"],
+            "artifacts": [],
+            "created_at": row["submitted_at"],
+            "completed_at": row.get("completed_at"),
+            "result": row.get("result"),
+            "created_by": row.get("created_by"),
+            "workflow_id": row.get("workflow_id"),
+            "org_id": row.get("org_id"),
+        }
+
+    def _load_receipt_from_control_plane(self, job_id=None, receipt_id=None):
+        """
+        Cold-path fallback for a receipt evicted from self.receipts
+        (see _evict_completed_if_over_capacity), or from before this
+        coordinator's current process started. Unlike jobs, this is
+        the FULL, byte-identical receipt payload -- no fidelity loss
+        -- since receipts are already completely, durably persisted
+        (see _run_job's control_plane.receipts.upload call). Look up
+        by exactly one of job_id (fast: list_for_job is indexed) or
+        receipt_id (a full-table scan through each row's parsed
+        payload -- there is no receipt_id index in the DB -- so this
+        is deliberately only reached as a fallback for a cache miss,
+        never on the hot path). Returns None if there's no
+        control_plane, or nothing matches.
+        """
+        if self.control_plane is None:
+            return None
+        try:
+            if job_id is not None:
+                rows = self.control_plane.receipts.list_for_job(job_id)
+                return rows[-1]["payload"] if rows else None
+            for row in self.control_plane.receipts.list_all():
+                if row["payload"].get("receipt_id") == receipt_id:
+                    return row["payload"]
+        except Exception:
+            return None
+        return None
+
     def scheduler_loop(self):
         """
         Continuously assign waiting jobs to idle nodes.
@@ -947,6 +1947,20 @@ class GCONCoordinator:
 
             if self.scheduler_paused:
                 self._shutdown_event.wait(0.2)
+                continue
+
+            # HA gating: a standby coordinator (leader_elector set but
+            # not currently leader) must never dispatch -- two
+            # coordinators both assigning jobs off the same queue
+            # against the same node pool is exactly the double-
+            # dispatch race the atomic claim_best_idle_node() fix
+            # closed for a single coordinator; it does nothing to
+            # protect against a second *process* doing it. See
+            # gcon.cluster.leader_election's module docstring. A
+            # coordinator with no leader_elector (the default,
+            # single-coordinator case) is unaffected -- always "leader".
+            if self.leader_elector is not None and not self.leader_elector.is_leader:
+                self._shutdown_event.wait(0.5)
                 continue
 
             if self.job_queue.empty():
@@ -1007,6 +2021,55 @@ class GCONCoordinator:
             except Exception as e:
                 print(f"[HEALTH] Health check loop error: {e}")
 
+    def autoscale_loop(self):
+        """
+        Periodically compare pending job count against idle node
+        count (see AutoScaler.check_scale) and scale the cluster up
+        or down accordingly. Only started when GCON_AUTOSCALE_ENABLED
+        is set -- see __init__.
+
+        AutoScaler.scale_up() deliberately raises RuntimeError under
+        any transport other than LocalTransport (see its own
+        docstring): a coordinator process cannot fabricate a live
+        network connection to a node that doesn't exist yet, and this
+        codebase does not implement a real cloud/container
+        provisioner. That's a permanent, structural fact about the
+        current transport for the coordinator's whole lifetime, not a
+        transient failure -- so rather than calling check_scale()
+        every tick and catching (and re-logging) the same
+        "unsupported" error forever, that capability is checked once,
+        up front. If it can't actually scale anything, this logs once
+        and returns without ever entering the polling loop: the
+        manual scale_up/scale_down admin endpoints still work exactly
+        as before (they raise the same clear, attributable error
+        rather than silently no-op'ing), this just means the
+        *automatic* path has nothing useful to do under this
+        transport.
+        """
+        if not isinstance(self.communication.transport, LocalTransport):
+            print(
+                "[AUTOSCALER] GCON_AUTOSCALE_ENABLED is set, but this "
+                "coordinator's transport does not support automatic node "
+                "provisioning (see AutoScaler.scale_up's docstring) -- the "
+                "automatic scaling loop will not run. Manual scale_up/"
+                "scale_down via the dashboard/admin API are unaffected."
+            )
+            return
+
+        interval = float(os.environ.get("GCON_AUTOSCALE_INTERVAL_SECONDS", "5.0"))
+        while not self._shutdown_event.is_set():
+            if self._shutdown_event.wait(interval):
+                break
+            try:
+                self.autoscaler.check_scale()
+            except Exception as e:
+                # Mirrors health_check_loop's forgiving pattern, not
+                # scheduler_loop's deliberate re-raise: an autoscaling
+                # hiccup isn't a cluster-health signal the way a
+                # scheduler_thread death is, so it shouldn't be able to
+                # kill this thread over a transient issue.
+                print(f"[AUTOSCALER] Autoscale loop error: {e}")
+
     def queue_job(self, job_id):
         """Add a job to the pending queue."""
         self.job_queue.put(job_id)   
@@ -1064,7 +2127,8 @@ class GCONCoordinator:
     def shutdown(self, timeout=5.0):
         """
         Stop this coordinator's background daemon threads
-        (scheduler_loop, health_check_loop) cleanly.
+        (scheduler_loop, health_check_loop, autoscale_loop if
+        enabled) cleanly.
 
         Without this there was no way to stop them short of process
         exit, so every constructed coordinator (e.g. one per test)
@@ -1077,6 +2141,12 @@ class GCONCoordinator:
         self._shutdown_event.set()
         self.scheduler_thread.join(timeout=timeout)
         self.health_check_thread.join(timeout=timeout)
+        if self.autoscale_thread is not None:
+            self.autoscale_thread.join(timeout=timeout)
+        if self.webhook_dispatcher is not None:
+            self.webhook_dispatcher.stop()
+        if getattr(self, "leader_elector", None) is not None:
+            self.leader_elector.stop()
         print("[COORDINATOR] Shutdown complete.")
 
     # ------------------------------------------------------------
@@ -1194,6 +2264,18 @@ class GCONCoordinator:
         Permanently drop every currently failed job (as opposed to
         retry_failed_jobs, which re-queues them for another attempt).
         Jobs in any other status are unaffected.
+
+        This now deletes from BOTH the in-memory job set and (when a
+        control_plane is attached) the durable jobs table. It used to
+        only do the former -- which meant it could only ever clear
+        whatever happened to still be resident in the bounded
+        in-memory set at that moment, silently leaving anything
+        beyond that bound (or already evicted from memory) untouched
+        in the DB, where restore_from_persistence() would reload it
+        right back on the next coordinator restart. "Clear Failed"
+        deleting 200 of 900 failed jobs and having the rest reappear
+        after a restart was that bug, not a capacity limit working as
+        intended.
         """
         cleared = []
 
@@ -1204,11 +2286,22 @@ class GCONCoordinator:
             for job_id in cleared:
                 del self.jobs[job_id]
 
+        deleted_from_db = 0
+        if self.control_plane is not None:
+            try:
+                deleted_from_db = self.control_plane.jobs.delete_by_status("failed")
+            except Exception as e:
+                print(f"[WARN] Failed to durably delete failed jobs from control plane: {e!r}")
+
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="FAILED_JOBS_CLEARED",
-            source="Coordinator", payload={"cleared_job_ids": cleared},
+            source="Coordinator",
+            payload={"cleared_job_ids": cleared, "deleted_from_db": deleted_from_db},
         ))
-        print(f"[QUEUE] Cleared {len(cleared)} failed job(s).")
+        print(
+            f"[QUEUE] Cleared {len(cleared)} failed job(s) from memory, "
+            f"{deleted_from_db} from the durable store."
+        )
         return cleared
 
     def retry_failed_jobs(self):
@@ -1566,6 +2659,85 @@ class GCONCoordinator:
 
         return nodes
 
+    def get_jobs_page(self, status=None, search=None, org_id=None, limit=50, offset=0):
+        """
+        Real server-side pagination for the Executions tab -- distinct
+        from get_jobs() above, which only ever sees this coordinator's
+        bounded in-memory job set (see restore_from_persistence's
+        docstring for why that's bounded: unlimited history there
+        would defeat the whole point of that bound). This queries the
+        durable control-plane DB directly when one is attached, so
+        "page 40 of failed jobs from three days ago" works correctly
+        even though that job is long gone from memory.
+
+        Returns (items, total_count). Falls back to paginating over
+        the in-memory get_jobs() result only when there's no
+        control_plane at all (LocalTransport / most tests) -- still
+        correctly bounded to a single page's worth of dict work
+        either way, just scoped to whatever this process currently
+        holds instead of full history.
+        """
+        if self.control_plane is not None:
+            rows, total = self.control_plane.jobs.search_paginated(
+                status=status, search=search, org_id=org_id, limit=limit, offset=offset,
+            )
+            items = []
+            for row in rows:
+                # Enrich with what's only available in-memory (receipt
+                # id, live node assignment) when this job is still
+                # resident there; a job old enough to have been
+                # evicted from memory just gets these as None -- the
+                # full detail drawer (get_execution_detail) still has
+                # the DB-fallback path for that case.
+                live = self.jobs.get(row["job_id"])
+                receipt = self.receipts.get(row["job_id"]) if live else None
+                result = (live or {}).get("result") or {}
+                items.append({
+                    "job_id": row["job_id"],
+                    "status": row["status"],
+                    "node_id": (live or {}).get("node_id"),
+                    "created_at": row["submitted_at"],
+                    "completed_at": row.get("completed_at"),
+                    "receipt_id": receipt.get("receipt_id", row["job_id"]) if receipt else None,
+                    "created_by": row.get("created_by"),
+                    "workflow_id": row.get("workflow_id"),
+                    "org_id": row.get("org_id"),
+                    "runtime_seconds": result.get("runtime_seconds"),
+                })
+            return items, total
+
+        # No control_plane at all: fall back to slicing the in-memory
+        # get_jobs() result.
+        all_jobs = self.get_jobs(org_id=org_id, status=status)
+        if search:
+            needle = search.lower()
+            all_jobs = [
+                j for j in all_jobs
+                if needle in j["job_id"].lower()
+            ]
+        total = len(all_jobs)
+        return all_jobs[offset:offset + limit], total
+
+    def get_job_status_counts(self):
+        """Cheap grouped counts for the Executions tab's summary
+        tiles -- see JobRepository.count_by_status's docstring for why
+        this replaces computing them by filtering a fetched job list."""
+        if self.control_plane is not None:
+            counts = self.control_plane.jobs.count_by_status()
+        else:
+            counts = {}
+            with self.jobs_lock:
+                for job in self.jobs.values():
+                    counts[job["status"]] = counts.get(job["status"], 0) + 1
+        return {
+            "total": sum(counts.values()),
+            "queued": counts.get("pending", 0),
+            "running": counts.get("running", 0),
+            "completed": counts.get("completed", 0),
+            "failed": counts.get("failed", 0),
+            "cancelled": counts.get("cancelled", 0),
+        }
+
     def get_jobs(self, created_by=None, org_id=None, status=None, limit=None):
         """
         Return a dashboard summary about all jobs, newest first.
@@ -1727,7 +2899,23 @@ class GCONCoordinator:
                 self._verified_receipt_count += 1
             else:
                 self._unverified_receipt_count += 1
-            return True
+
+        # Persist outside the receipts_lock -- a DB write acquires
+        # ControlPlaneDatabase's own lock, and there's no need to hold
+        # both for its duration. Best-effort: a failure here doesn't
+        # invalidate the in-memory result just committed above (which
+        # is what every existing verified/unverified check in this
+        # process actually reads), it only means the DB's `verified`
+        # column -- used by search_paginated's WHERE verified=? filter
+        # and count_by_verified's summary tiles -- stays stale for
+        # this one receipt until the next successful write.
+        if self.control_plane is not None:
+            try:
+                self.control_plane.receipts.mark_verified_by_job_id(job_id, is_valid)
+            except Exception as e:
+                print(f"[WARN] Failed to persist verification result for '{job_id}': {e!r}")
+
+        return True
 
     def _drain_pending_receipt_verifications(self):
         """
@@ -1771,6 +2959,56 @@ class GCONCoordinator:
                 newly_verified.append((job_id, receipt, is_valid))
 
         return newly_verified
+
+    def get_receipts_page(self, verified=None, search=None, limit=50, offset=0):
+        """Real server-side pagination for the Receipts tab -- see
+        get_jobs_page's docstring, same reasoning. Returns (items,
+        total_count)."""
+        if self.control_plane is not None:
+            rows, total = self.control_plane.receipts.search_paginated(
+                verified=verified, search=search, limit=limit, offset=offset,
+            )
+            items = []
+            for row in rows:
+                payload = row.get("payload") or {}
+                items.append({
+                    "receipt_id": row["receipt_id"],
+                    "job_id": row["job_id"],
+                    "node_id": row.get("node_id"),
+                    "created_at": row.get("uploaded_at"),
+                    "verified": bool(row.get("verified")),
+                    "status": (self.jobs.get(row["job_id"]) or {}).get("status", "failed"),
+                })
+            return items, total
+
+        # No control_plane: fall back to slicing the in-memory
+        # get_receipts() result (already bounded by
+        # _max_receipts_in_memory, so still cheap even unfiltered).
+        all_receipts = self.get_receipts()
+        if verified is not None:
+            all_receipts = [r for r in all_receipts if bool(r.get("verified")) == verified]
+        if search:
+            needle = search.lower()
+            all_receipts = [
+                r for r in all_receipts
+                if needle in r.get("receipt_id", "").lower() or needle in r.get("job_id", "").lower()
+            ]
+        total = len(all_receipts)
+        return all_receipts[offset:offset + limit], total
+
+    def get_receipt_verification_counts(self):
+        """Cheap grouped counts for the Receipts tab's (and the
+        websocket bootstrap payload's) summary tiles -- see
+        ReceiptRepository.count_by_verified's docstring for why this
+        replaces PresentationLayer.get_receipts_summary's previous
+        approach of building the entire receipt list just to sum()
+        a boolean over it."""
+        if self.control_plane is not None:
+            return self.control_plane.receipts.count_by_verified()
+        with self.receipts_lock:
+            total = len(self.receipts)
+            verified = self._verified_receipt_count
+        return {"total": total, "verified": verified, "unverified": total - verified}
 
     def get_receipts(self):
         """
@@ -1871,6 +3109,9 @@ class GCONCoordinator:
                 break
 
         if receipt is None:
+            receipt = self._load_receipt_from_control_plane(receipt_id=receipt_id)
+
+        if receipt is None:
             return None
 
         proof = receipt.get("proof", {})
@@ -1878,9 +3119,51 @@ class GCONCoordinator:
 
         job_id = receipt.get("job_id")
         with self.jobs_lock:
-            job = self.jobs.get(job_id, {})
+            job = self.jobs.get(job_id)
+        if job is None:
+            job = self._load_job_from_control_plane(job_id) or {}
 
         artifacts = self._resolve_artifacts(job.get("artifacts", []))
+
+        # Real, human-readable proof of what actually ran -- e.g. a
+        # GPU job's own printed "device: Tesla T4" / measured gflops /
+        # loss values -- was being hashed into output_hash but never
+        # otherwise surfaced anywhere in the dashboard (same 8KB cap
+        # as get_jobs()'s "output" field, so one runaway job's stdout
+        # can't bloat this response).
+        job_result = job.get("result") or {}
+        stdout = job_result.get("stdout")
+        output = None
+        if stdout is not None:
+            output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
+
+        # For a verify-tagged job, every replica's own independently-
+        # signed receipt lives in self.replica_receipts (see
+        # _run_replicated_job/receive_replica_receipt) -- this receipt
+        # is only ever one of them (the primary, or whichever one this
+        # receipt_id resolves to). Surface the sibling list so the
+        # Receipt Inspector can show the full witness set, not just
+        # this one node's view of it.
+        with self.replica_receipts_lock:
+            replica_list = list(self.replica_receipts.get(job_id, []))
+        replicas_summary = None
+        if replica_list:
+            replicas_summary = [
+                {
+                    "receipt_id": r.get("receipt_id"),
+                    "node_id": r.get("agent_id"),
+                    "output_hash": r.get("output_hash"),
+                    "policy_trusted": (r.get("policy_report") or {}).get("trusted"),
+                }
+                for r in replica_list
+            ]
+
+        # Per-replica policy_report (attached directly to this receipt
+        # by _run_replicated_job) takes precedence over the job-level
+        # one, which for a verify-tagged job only ever reflects the
+        # primary replica -- a non-primary receipt has its own real
+        # evaluation and shouldn't silently show someone else's.
+        policy_report = receipt.get("policy_report", job.get("policy_report"))
 
         return {
             "receipt_id": receipt.get("receipt_id"),
@@ -1890,14 +3173,35 @@ class GCONCoordinator:
             "issued_at": receipt.get("issued_at"),
             "input_hash": receipt.get("input_hash"),
             "output_hash": receipt.get("output_hash"),
+            "output": output,
             "verified": is_valid,
             "verification_message": message,
+            "kind": job.get("kind", "command"),
+            "stages_expected": (job.get("stages") or {}).get("expected"),
+            # PolicyEngine.evaluate()'s report, or None if this receipt
+            # predates policy wiring / policy evaluation itself failed
+            # (see the [WARN] log -- deliberately not fabricated as
+            # trusted here).
+            "policy": policy_report,
+            # None for an ordinary single-node job. For a verify-tagged
+            # job, the comparison result across all replicas (see
+            # gcon.execution.replication) -- deliberately NOT part of
+            # the signed "proof" below; see replication.py's module
+            # docstring for why.
+            "execution_proof": receipt.get("execution_proof"),
+            "replicas": replicas_summary,
             "proof": {
                 "algorithm": "HMAC-SHA256",
                 "gpu": proof.get("gpu"),
                 "runtime_seconds": proof.get("runtime_seconds"),
                 "timestamp": proof.get("timestamp"),
                 "metrics": proof.get("metrics", {}),
+                # Present (possibly partial -- see GCONAgent.execute_job)
+                # only for "staged" jobs; already inside metrics (agent_
+                # daemon.py folds it in before upload) but pulled up to
+                # the top level here since it's proof content in its own
+                # right, not just another metric among cpu/memory/gpu.
+                "stages": proof.get("metrics", {}).get("stages", []),
                 "signature": proof.get("signature"),
             },
             "execution": {
@@ -1924,6 +3228,9 @@ class GCONCoordinator:
             job = self.jobs.get(job_id)
 
         if job is None:
+            job = self._load_job_from_control_plane(job_id)
+
+        if job is None:
             return None
 
         with self.receipts_lock:
@@ -1934,6 +3241,9 @@ class GCONCoordinator:
             if candidate.get("job_id") == job_id:
                 receipt = candidate
                 break
+
+        if receipt is None and self.control_plane is not None:
+            receipt = self._load_receipt_from_control_plane(job_id=job_id)
 
         verified = None
         verification_message = None
