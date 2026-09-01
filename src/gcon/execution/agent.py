@@ -179,6 +179,7 @@ class GCONAgent:
         job_script: str,
         timeout: Optional[int] = None,
         usage_report_path: Optional[str] = None,
+        stage_report_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a job script and monitor execution.
@@ -200,6 +201,23 @@ class GCONAgent:
                 convention (most won't -- it's opt-in) simply leaves
                 result["usage"] as None; this is never fabricated or
                 estimated.
+            stage_report_path: Same opt-in convention as
+                usage_report_path, for "staged" jobs (see
+                GCONCoordinator.submit_job's `kind`/`stages`). Exported
+                to the subprocess as GCON_STAGE_REPORT_PATH. Unlike the
+                usage report -- read once, after the process exits --
+                this path is polled by a background thread WHILE the
+                subprocess is still running: once per stage, the job's
+                own code is expected to append one JSON line (e.g.
+                {"stage": 3, "metrics": {"loss": 0.31}}) to this file.
+                Each newly-seen line is timestamped with THIS agent's
+                own wall clock at the moment it's observed -- not
+                whatever the job itself claims -- so a stage's proof
+                reflects when GCON actually saw it happen, not
+                something the job process could pad or backdate.
+                Returned as result["stages"]: always a list, empty if
+                the job never cooperates with the convention (most
+                won't -- it's opt-in, same rule as usage_report_path).
             
         Returns:
             Dict containing execution results and metrics
@@ -220,6 +238,25 @@ class GCONAgent:
                     os.remove(usage_report_path)
             except OSError:
                 pass
+
+        stage_observations: list = []
+        stage_thread = None
+        stage_stop = None
+        if stage_report_path:
+            job_env = job_env or dict(os.environ)
+            job_env["GCON_STAGE_REPORT_PATH"] = stage_report_path
+            try:
+                if os.path.exists(stage_report_path):
+                    os.remove(stage_report_path)
+            except OSError:
+                pass
+            stage_stop = threading.Event()
+            stage_thread = threading.Thread(
+                target=self._watch_stage_reports,
+                args=(stage_report_path, stage_observations, stage_stop),
+                daemon=True,
+            )
+            stage_thread.start()
 
         try:
             # Determine if it's a file or command
@@ -261,7 +298,8 @@ class GCONAgent:
             # Monitor execution
             stdout, stderr = self.process.communicate(timeout=timeout)
             self.end_time = time.time()
-            
+            self._stop_stage_watcher(stage_thread, stage_stop, stage_report_path)
+
             runtime = self.end_time - self.start_time
             final_metrics = self.collect_metrics(job_id)
             result = {
@@ -273,6 +311,10 @@ class GCONAgent:
                 "stderr": stderr,
                 "metrics": final_metrics.to_dict(),
                 "usage": self._read_usage_report(usage_report_path),
+                # Always a list -- possibly partial (see the timeout/
+                # error branches below) or empty (job never opted in
+                # or didn't report before failing), never fabricated.
+                "stages": stage_observations,
                 "timestamp": datetime.now(UTC).isoformat()
             }
             
@@ -285,6 +327,7 @@ class GCONAgent:
             logger.error(f"Job timeout after {timeout}s")
             self.process.kill()
             self.end_time = time.time()
+            self._stop_stage_watcher(stage_thread, stage_stop, stage_report_path)
             self.status = "idle"
             return {
                 "job_id": job_id,
@@ -292,15 +335,22 @@ class GCONAgent:
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": f"Execution timeout after {timeout}s",
                 "usage": self._read_usage_report(usage_report_path),
+                # Whatever stages were genuinely observed before the
+                # timeout killed the process -- real partial proof of
+                # how far a long-running (e.g. training) job actually
+                # got, not thrown away just because it didn't finish.
+                "stages": stage_observations,
                 "timestamp": datetime.now(UTC).isoformat()
             }
         except Exception as e:
             logger.error(f"Job execution failed: {e}")
             self.end_time = time.time()
+            self._stop_stage_watcher(stage_thread, stage_stop, stage_report_path)
             self.status = "idle"
             return {
                 "job_id": job_id,
                 "status": "error",
+                "stages": stage_observations,
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": str(e),
                 "usage": self._read_usage_report(usage_report_path),
@@ -331,7 +381,73 @@ class GCONAgent:
                 os.remove(usage_report_path)
             except OSError:
                 pass
-    
+
+    @staticmethod
+    def _watch_stage_reports(path: str, observed: list, stop_event: "threading.Event") -> None:
+        """
+        Background thread body for a "staged" job: while the
+        subprocess is still running, poll `path` (GCON_STAGE_REPORT_PATH)
+        for newly-appended JSON lines and record each one, stamped
+        with THIS agent's own wall clock at the moment it's observed --
+        not anything the job process itself claims -- so a stage's
+        proof reflects when GCON actually saw it happen. Malformed
+        lines are skipped rather than aborting the whole job. Opt-in
+        and best-effort, same rule as _read_usage_report: a job that
+        never writes to this path just produces an empty `observed`
+        list, never a fabricated one.
+
+        Structured as "poll, then check stop" rather than "check stop,
+        then poll" so that calling stop_event.set() is always followed
+        by one more poll before the thread exits -- otherwise a stage
+        written in the ~0.5s window right before the process exits
+        could be missed entirely.
+        """
+        lines_seen = 0
+        while True:
+            try:
+                if os.path.exists(path):
+                    with open(path, "r") as f:
+                        lines = f.readlines()
+                    for line in lines[lines_seen:]:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        observed.append({
+                            "stage": entry.get("stage"),
+                            "metrics": entry.get("metrics", {}),
+                            "observed_at": datetime.now(UTC).isoformat(),
+                        })
+                    lines_seen = len(lines)
+            except OSError:
+                pass
+            if stop_event.is_set():
+                break
+            stop_event.wait(0.5)
+
+    @staticmethod
+    def _stop_stage_watcher(
+        thread: Optional["threading.Thread"],
+        stop_event: Optional["threading.Event"],
+        stage_report_path: Optional[str],
+    ) -> None:
+        """Stop and join the stage-watcher thread (no-op if this
+        job wasn't "staged"), then remove the report file -- same
+        belt-and-braces cleanup as _read_usage_report, so a stale
+        file from this job never leaks into a future one on this
+        node."""
+        if thread is not None and stop_event is not None:
+            stop_event.set()
+            thread.join(timeout=5)
+        if stage_report_path:
+            try:
+                os.remove(stage_report_path)
+            except OSError:
+                pass
+
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get summary of collected metrics."""
         if not self.metrics:
