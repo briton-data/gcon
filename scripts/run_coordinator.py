@@ -25,6 +25,8 @@ full transport list):
     GCON_API_CORS_ORIGINS  comma-separated origins allowed to call /api/v1
                            from a browser (unset = no CORS, API-key-only
                            SDK/server clients are unaffected either way)
+    GCON_HA_LEASE_TTL_SECONDS  lease TTL for --ha leader election
+                           (default 10s; see gcon.cluster.leader_election)
 """
 
 import argparse
@@ -41,6 +43,7 @@ from gcon.transport.grpc_transport import GrpcTransport
 from gcon.transport.remote_node import RemoteNodeProxy
 from gcon.cluster.coordinator import GCONCoordinator
 from gcon.cluster.communication import CommunicationManager
+from gcon.cluster.leader_election import LeaderElector, default_holder_id
 from gcon.dashboard.presentation import PresentationLayer
 from gcon.dashboard.web_server import WebServer
 
@@ -54,6 +57,23 @@ def main():
                               "identity/session DB (default: $GCON_DATA_DIR or 'data'); "
                               "--db overrides just the control-plane path")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--ha", action="store_true",
+        help="run as one of several coordinators sharing --db, using lease-based "
+             "leader election (see gcon.cluster.leader_election) -- this process "
+             "blocks at startup until it acquires leadership before serving "
+             "anything, and exits if it ever loses the lease afterward (so a "
+             "process supervisor can restart it cleanly into standby mode). "
+             "Requires --db (or GCON_DATA_DIR) to point at a DB file every "
+             "participating coordinator process can actually reach.",
+    )
+    parser.add_argument(
+        "--coordinator-id", default=None,
+        help="stable identity for --ha leader election (default: "
+             "hostname:pid:random, regenerated every process start -- pass an "
+             "explicit value if you want a restarted process to be "
+             "recognizable in logs/lease history as \"the same\" coordinator)",
+    )
     args = parser.parse_args()
 
     if args.data_dir:
@@ -68,7 +88,40 @@ def main():
     control_plane = ControlPlane(path=args.db)
     config = TransportConfig.load(control_plane)
 
+    leader_elector = None
+    if args.ha:
+        holder_id = args.coordinator_id or default_holder_id()
+
+        def _on_lose_leadership():
+            # See gcon.cluster.leader_election's module docstring for
+            # why this exits rather than trying to keep running: a
+            # demoted process would otherwise keep its gRPC transport
+            # and web server up (nothing here tears those down), so a
+            # worker or dashboard request could still land on it even
+            # though scheduler_loop/submit_job now both correctly
+            # refuse to act on it -- confusing 503s forever instead of
+            # a clean restart into standby. os._exit (not sys.exit):
+            # this callback runs on the elector's own background
+            # thread, where sys.exit only unwinds that one thread.
+            logger.critical(
+                "'%s' lost leadership -- exiting so a process supervisor "
+                "can restart this into standby mode", holder_id,
+            )
+            os._exit(1)
+
+        leader_elector = LeaderElector(
+            control_plane, holder_id=holder_id, on_lose_leadership=_on_lose_leadership,
+        )
+        logger.info(
+            "--ha enabled as '%s': waiting to acquire coordinator leadership "
+            "(lease TTL %.0fs)...", holder_id, leader_elector.ttl_seconds,
+        )
+        leader_elector.run_until_leader()
+        logger.info("'%s' is now the active coordinator", holder_id)
+        leader_elector.start()
+
     coordinator = GCONCoordinator(transport=None, control_plane=control_plane)
+    coordinator.leader_elector = leader_elector
 
     def on_heartbeat(node_id, payload):
         coordinator.receive_heartbeat({
