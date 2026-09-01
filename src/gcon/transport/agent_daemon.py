@@ -21,9 +21,12 @@ dial out rather than the coordinator dialing in.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import queue
 import socket
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -253,8 +256,32 @@ class AgentDaemon:
 
     def _run_job(self, job_assign, outbound, session_token, stub) -> None:
         timeout = job_assign.timeout_seconds or None
+
+        # metadata_json currently only ever carries staged-job info
+        # ({"kind": "staged", "stages": {...}}) -- see JobAssign in
+        # gcon_transport.proto. "resourced" jobs' `requires` never
+        # reaches here at all: it's matched by the scheduler before a
+        # node is even chosen, so the agent has no need to know about
+        # it.
+        stage_report_path = None
+        if job_assign.metadata_json:
+            try:
+                job_metadata = json.loads(job_assign.metadata_json)
+            except ValueError:
+                job_metadata = {}
+            if job_metadata.get("kind") == "staged":
+                stage_report_path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"gcon-stages-{job_assign.job_id}.jsonl",
+                )
+
         try:
-            result = self.agent.execute_job(job_assign.job_id, job_assign.command, timeout=timeout)
+            result = self.agent.execute_job(
+                job_assign.job_id,
+                job_assign.command,
+                timeout=timeout,
+                stage_report_path=stage_report_path,
+            )
         except Exception as exc:  # the execution engine is untouched and may itself
             # raise rather than return an error dict for unexpected failures;
             # the transport layer must still report *something* back so the
@@ -273,12 +300,34 @@ class AgentDaemon:
 
         self._report_result(job_assign, result, outbound, session_token)
         self._stream_logs(job_assign, result, session_token, stub)
-        self._upload_receipt(job_assign, result, session_token, stub)
+        # _upload_receipt() intentionally not called here anymore.
+        # It independently built and uploaded a second, Ed25519-signed
+        # receipt (ReceiptGenerator.generate) for every job -- separate
+        # from, and incompatible with, the HMAC receipt the coordinator
+        # already creates and signs itself the moment _report_result()
+        # above lands (GCONCoordinator._run_job -> ExecutionVerifier.
+        # create_receipt). The coordinator's verifier could never check
+        # this one (different scheme, signature nested one level up
+        # from where validate_proof() looks), and because it was the
+        # only receipt ever persisted to the control-plane DB, it
+        # silently overwrote the correct in-memory receipt on every
+        # coordinator restart -- the cause of every receipt showing
+        # "Unverified" / "Proof missing signature" in the dashboard.
+        # _upload_receipt()/ReceiptGenerator are left in place (still
+        # covered by tests) in case a real per-agent asymmetric-signing
+        # design replaces the coordinator-side scheme later.
 
     def _report_result(self, job_assign, result, outbound, session_token) -> None:
         import json as _json
 
         metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        # Fold in stage checkpoints (staged jobs only -- see _run_job).
+        # No new proto field needed: metrics_json is already a generic
+        # JSON bag, so this rides along with gpu_name/cpu_percent/etc.
+        # without touching the wire schema.
+        if result.get("stages"):
+            metrics = dict(metrics)
+            metrics["stages"] = result["stages"]
         outbound.put(
             pb.AgentEnvelope(
                 node_id=self.node_id,

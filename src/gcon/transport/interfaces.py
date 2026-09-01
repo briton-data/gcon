@@ -62,12 +62,21 @@ class Transport(ABC):
         job_id: str,
         command: str,
         timeout: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Dispatch a job to `node_id` and block for its result (or
         raise on failure/timeout). Returns
         `{"status": "success", "result": {...}}` on success, matching
         the shape the coordinator has always received from
-        `CommunicationManager.send_job`."""
+        `CommunicationManager.send_job`.
+
+        `metadata` carries job-kind information the execution side
+        needs but that isn't part of `command` itself -- currently
+        just `{"kind": "staged", "stages": {"expected": N}}` for
+        staged jobs. `requires` (resourced jobs' capability
+        requirements) is deliberately NOT part of this: it's matched
+        by the scheduler before a node is even chosen, so it never
+        needs to travel with the dispatch."""
 
     @abstractmethod
     def cancel_job(self, node_id: str, job_id: str) -> bool:
