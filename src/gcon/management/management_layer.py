@@ -33,6 +33,16 @@ from gcon.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+
+def _mask_webhook_secret(secret):
+    """Same masking shape as api_keys.py's _mask -- kept as a
+    separate helper (not imported from there) since webhook secrets
+    are hex, not the gcon_-prefixed API key format, and don't share
+    that module's length assumptions."""
+    if not secret or len(secret) < 12:
+        return "*" * len(secret or "")
+    return f"{secret[:6]}{'*' * 24}{secret[-4:]}"
+
 # Bootstrap owner account, created once on first boot. Always set
 # GCON_OWNER_NAME / GCON_OWNER_EMAIL per deployment -- the fallbacks
 # below are deliberately generic placeholders, not a real identity,
@@ -160,6 +170,11 @@ class ManagementLayer:
             "receipt_verification_recovered",
             lambda p: f"Receipt {p.get('receipt_id')} for job {p.get('job_id')} is verified again",
         ),
+        "POLICY_VIOLATION": (
+            "policy_violation",
+            lambda p: f"Job {p.get('job_id')} violated policy: "
+            + "; ".join(p.get("failed_checks", [])),
+        ),
         "HEALTH_DEGRADED": (
             "health_degraded",
             lambda p: f"Cluster health degraded: {p.get('reason')}",
@@ -171,6 +186,24 @@ class ManagementLayer:
         "HEALTH_RECOVERED": (
             "health_recovered",
             lambda p: "Cluster health recovered to normal",
+        ),
+        "NODE_STAKE_SLASHED": (
+            "node_stake_slashed",
+            lambda p: f"Node {p.get('node_id')} was slashed {p.get('amount')} "
+            f"stake units ({p.get('reason')})",
+        ),
+        "WEBHOOK_DELIVERY_FAILED": (
+            "webhook_delivery_failed",
+            lambda p: f"Webhook delivery to {p.get('url')} failed after "
+            f"{p.get('attempt_count')} attempts: {p.get('error')}",
+        ),
+        "COORDINATOR_BECAME_LEADER": (
+            "coordinator_became_leader",
+            lambda p: f"This coordinator ({p.get('holder_id')}) became the active leader",
+        ),
+        "COORDINATOR_LOST_LEADERSHIP": (
+            "coordinator_lost_leadership",
+            lambda p: f"This coordinator ({p.get('holder_id')}) lost leadership, now standby",
         ),
     }
 
@@ -617,6 +650,274 @@ class ManagementLayer:
             })
 
         return summaries
+
+    # ------------------------------------------------------------------
+    # Key rotation (HMAC receipt-signing keys + mTLS certs) -- see
+    # gcon.execution.hmac_keyring / gcon.transport.tls_rotation for the
+    # actual mechanics; this is just the dashboard-facing surface over
+    # the coordinator's already-live verifier and cert directory.
+    # ------------------------------------------------------------------
+    def get_key_rotation_status(self):
+        """Never returns a raw secret -- HmacKeyring.list_keys() is
+        metadata-only by construction, and the mTLS side only ever
+        surfaces fingerprints."""
+        status = {"hmac": None, "mtls": None}
+        if self.coordinator is not None and getattr(self.coordinator, "verifier", None):
+            verifier = self.coordinator.verifier
+            keyring = getattr(verifier, "_keyring", None)
+            if keyring is not None:
+                status["hmac"] = {
+                    "current_key_id": keyring.current_key_id,
+                    "keys": keyring.list_keys(),
+                }
+        cert_dir = self._tls_cert_dir()
+        if cert_dir:
+            from gcon.transport import tls, tls_rotation
+            import os as _os
+            ca_cert_path = _os.path.join(cert_dir, tls.CA_CERT_FILE)
+            mtls = {"active_ca_fingerprint": None, "retired_cas": [], "revoked_certificates": []}
+            if _os.path.exists(ca_cert_path):
+                mtls["active_ca_fingerprint"] = tls.cert_fingerprint(ca_cert_path)
+            mtls["retired_cas"] = tls_rotation._load_manifest(cert_dir)["retired_cas"]
+            mtls["revoked_certificates"] = [
+                {"fingerprint": fp, **meta}
+                for fp, meta in tls_rotation._load_revocations(cert_dir).items()
+            ]
+            status["mtls"] = mtls
+        return status
+
+    def rotate_hmac_key(self):
+        if self.coordinator is None or not getattr(self.coordinator, "verifier", None):
+            raise ValueError("No coordinator/verifier available to rotate.")
+        new_key_id = self.coordinator.verifier.rotate_key()
+        self.audit_logger.log("Admin", "rotated HMAC signing key", new_key_id)
+        return self.get_key_rotation_status()
+
+    def rotate_mtls_ca(self):
+        cert_dir = self._tls_cert_dir()
+        if not cert_dir:
+            raise ValueError("No TLS cert directory configured to rotate.")
+        from gcon.transport import tls_rotation
+        hostname = self._tls_hostname()
+        new_fp = tls_rotation.rotate_ca(cert_dir, hostname=hostname)
+        self.audit_logger.log("Admin", "rotated mTLS cluster CA", new_fp[:16])
+        return self.get_key_rotation_status()
+
+    def revoke_node_certificate(self, node_id, reason=""):
+        cert_dir = self._tls_cert_dir()
+        if not cert_dir:
+            raise ValueError("No TLS cert directory configured.")
+        from gcon.transport import tls_rotation
+        fingerprint = tls_rotation.revoke_node_cert(cert_dir, node_id, reason=reason)
+        self.audit_logger.log("Admin", f"revoked mTLS certificate for node '{node_id}'", reason or "")
+        return {"node_id": node_id, "fingerprint": fingerprint}
+
+    def _tls_cert_dir(self):
+        if self.coordinator is None:
+            return None
+        control_plane = getattr(self.coordinator, "control_plane", None)
+        if control_plane is None:
+            return None
+        from gcon.transport.config import TransportConfig
+        try:
+            return TransportConfig.load(control_plane).tls_cert_dir
+        except Exception:
+            return None
+
+    def _tls_hostname(self):
+        cert_dir = self._tls_cert_dir()
+        if not cert_dir:
+            return "localhost"
+        control_plane = getattr(self.coordinator, "control_plane", None)
+        from gcon.transport.config import TransportConfig
+        try:
+            host = TransportConfig.load(control_plane).grpc_host
+            return host if host not in ("0.0.0.0", "") else "localhost"
+        except Exception:
+            return "localhost"
+
+    # ------------------------------------------------------------------
+    # Staking (see gcon.execution.staking / persistence.repositories
+    # .staking) -- bonded deposits per node, slashed on failed/
+    # fraudulent receipt verification. Read-only unless staking is
+    # actually enabled (GCON_STAKING_REQUIRED); bond/unbond are
+    # allowed regardless so an operator can build up stake ahead of
+    # turning enforcement on.
+    # ------------------------------------------------------------------
+    def get_node_stakes(self):
+        if self.coordinator is None or getattr(self.coordinator, "stake_ledger", None) is None:
+            return []
+        ledger = self.coordinator.stake_ledger
+        nodes_by_id = {}
+        if self.coordinator.control_plane is not None:
+            for n in self.coordinator.control_plane.nodes.list_all():
+                nodes_by_id[n["node_id"]] = n
+        out = []
+        for row in ledger.list_all():
+            node = nodes_by_id.get(row["node_id"], {})
+            out.append({
+                **row,
+                "hostname": node.get("hostname"),
+                "status": node.get("status"),
+                "meets_minimum": ledger.meets_minimum(row["node_id"]),
+            })
+        return out
+
+    def get_stake_events(self, node_id=None, limit=200):
+        if self.coordinator is None or getattr(self.coordinator, "stake_ledger", None) is None:
+            return []
+        return self.coordinator.stake_ledger.list_events(node_id=node_id, limit=limit)
+
+    def get_staking_config(self):
+        if self.coordinator is None or getattr(self.coordinator, "stake_ledger", None) is None:
+            return {"enabled": False, "min_stake_required": 0, "slash_fraction": 0,
+                    "unbonding_period_days": 0}
+        ledger = self.coordinator.stake_ledger
+        return {
+            "enabled": ledger.staking_required,
+            "min_stake_required": ledger.min_stake_required,
+            "slash_fraction": ledger.slash_fraction,
+            "unbonding_period_days": ledger.unbonding_period_days,
+        }
+
+    def bond_node_stake(self, node_id, amount):
+        if self.coordinator is None or getattr(self.coordinator, "stake_ledger", None) is None:
+            raise ValueError("Staking is not available on this coordinator.")
+        result = self.coordinator.stake_ledger.bond(node_id, int(amount))
+        self.audit_logger.log("Admin", f"bonded {amount} stake units for node '{node_id}'", "")
+        return result
+
+    def request_unbond_node_stake(self, node_id, amount):
+        if self.coordinator is None or getattr(self.coordinator, "stake_ledger", None) is None:
+            raise ValueError("Staking is not available on this coordinator.")
+        result = self.coordinator.stake_ledger.request_unbond(node_id, int(amount))
+        self.audit_logger.log("Admin", f"requested unbond of {amount} stake units for node '{node_id}'", "")
+        return result
+
+    # ------------------------------------------------------------------
+    # Billing (see gcon.billing.invoicing/pricing/providers) -- invoice
+    # generation from real usage-metering data. No real payment
+    # provider is wired (see providers.py's docstring); finalize_
+    # invoice_now uses whatever GCON_PAYMENT_PROVIDER resolves to,
+    # which is the mock provider unless an operator has configured
+    # something else.
+    # ------------------------------------------------------------------
+    def get_invoices(self, org_id=None, limit=100):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            return []
+        if org_id:
+            return self.coordinator.control_plane.invoices.list_for_org(org_id, limit=limit)
+        return self.coordinator.control_plane.invoices.list_all(limit=limit)
+
+    def get_pricing(self):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            from gcon.billing.pricing import load_pricing
+            return load_pricing(None).to_dict()
+        from gcon.billing.pricing import load_pricing
+        return load_pricing(self.coordinator.control_plane).to_dict()
+
+    def generate_invoice_now(self, org_id, period_start, period_end):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available to generate an invoice from.")
+        from gcon.billing.invoicing import generate_invoice
+        invoice = generate_invoice(self.coordinator.control_plane, org_id, period_start, period_end)
+        self.audit_logger.log("Admin", f"generated invoice for org '{org_id}'",
+                               f"{period_start} to {period_end}")
+        return invoice
+
+    def finalize_invoice_now(self, invoice_id):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        from gcon.billing.invoicing import finalize_invoice
+        invoice = finalize_invoice(self.coordinator.control_plane, invoice_id)
+        self.audit_logger.log("Admin", f"finalized invoice '{invoice_id}'", invoice.get("status", ""))
+        return invoice
+
+    # ------------------------------------------------------------------
+    # Webhooks (see gcon.transport.webhooks) -- standing org-level
+    # subscriptions and their delivery history. Per-job ad-hoc
+    # callback_url deliveries also land in webhook_deliveries but have
+    # no subscription to manage here; they show up in
+    # get_webhook_deliveries via job_id filtering instead.
+    # ------------------------------------------------------------------
+    def get_webhook_subscriptions(self, org_id=None):
+        """Secrets are masked here, same convention as
+        get_api_keys()/APIKey.to_dict -- only create_webhook_
+        subscription (the moment of creation) reveals the real
+        secret, since that's the one time the caller needs it to
+        configure their receiving endpoint's signature verification."""
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            subs = []
+        elif org_id:
+            subs = self.coordinator.control_plane.webhooks.list_for_org(org_id, active_only=False)
+        else:
+            # No org filter: aggregate across every org that has one.
+            # There's no list-all on the repository (subscriptions are
+            # always scoped to an org in the UI) -- callers that want a
+            # single org's subscriptions should pass org_id.
+            all_orgs = self.org_registry.list_organizations()
+            subs = []
+            for org in all_orgs:
+                subs.extend(self.coordinator.control_plane.webhooks.list_for_org(org.org_id, active_only=False))
+        for sub in subs:
+            sub["secret"] = _mask_webhook_secret(sub["secret"])
+        return subs
+
+    def create_webhook_subscription(self, org_id, url, event_types):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        sub = self.coordinator.control_plane.webhooks.create_subscription(org_id, url, event_types)
+        self.audit_logger.log("Admin", f"created webhook subscription for org '{org_id}'", url)
+        # Secret is only ever revealed at creation time -- see
+        # get_webhook_subscriptions's masking.
+        return sub
+
+    def deactivate_webhook_subscription(self, subscription_id):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        self.coordinator.control_plane.webhooks.deactivate(subscription_id)
+        self.audit_logger.log("Admin", "deactivated webhook subscription", subscription_id)
+
+    def get_webhook_deliveries(self, subscription_id=None, job_id=None, limit=50):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            return []
+        if job_id:
+            return self.coordinator.control_plane.webhooks.list_for_job(job_id)
+        now_iso = datetime.now(UTC).isoformat()
+        # due_deliveries surfaces pending/retrying; for a dashboard
+        # history view we want everything recent regardless of
+        # status, so query directly rather than reusing that method.
+        rows = self.coordinator.control_plane.db.query(
+            "SELECT * FROM webhook_deliveries "
+            + ("WHERE subscription_id = ? " if subscription_id else "")
+            + "ORDER BY created_at DESC LIMIT ?",
+            (subscription_id, limit) if subscription_id else (limit,),
+        )
+        import json as _json
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["payload"] = _json.loads(d.pop("payload_json"))
+            out.append(d)
+        return out
+
+    # ------------------------------------------------------------------
+    # HA / leader election status (see gcon.cluster.leader_election) --
+    # read-only: starting/stopping HA itself is a --ha flag on
+    # run_coordinator.py, not something toggled from the dashboard of
+    # a process that's already running one way or the other.
+    # ------------------------------------------------------------------
+    def get_ha_status(self):
+        elector = getattr(self.coordinator, "leader_elector", None) if self.coordinator else None
+        if elector is None:
+            return {"enabled": False}
+        lease = elector.control_plane.leases.read(elector.lease_name)
+        return {
+            "enabled": True,
+            "holder_id": elector.holder_id,
+            "is_leader": elector.is_leader,
+            "lease": lease,
+        }
 
     def update_organization(self, org_id, **fields):
         org = self.org_registry.update_organization(org_id, **fields)
