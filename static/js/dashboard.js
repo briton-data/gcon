@@ -113,6 +113,26 @@ async function fetchJson(url, options) {
     return response.json();
 }
 
+// Same as fetchJson, but also returns the Response's headers -- for
+// endpoints like the paginated /jobs and /receipts, which carry the
+// filtered total count in X-Total-Count rather than in the JSON body
+// (kept the body a plain array on purpose so existing bare-array
+// callers of these endpoints -- e.g. loadJobs() -- are unaffected;
+// see web_server.py's /jobs and /receipts route docstrings).
+async function fetchJsonWithHeaders(url, options) {
+    const response = await fetch(url, options);
+    if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Not authenticated");
+    }
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `${url} returned ${response.status}`);
+    }
+    setConnectionStatus(true);
+    return { data: await response.json(), headers: response.headers };
+}
+
 function setConnectionStatus(ok) {
     const el = document.getElementById("conn-status");
     if (!el) return;
@@ -168,6 +188,10 @@ const TAB_TITLES = {
     "organizations": "Organizations",
     "teams": "Teams",
     "api-keys": "API Keys",
+    "security": "Security & Keys",
+    "staking": "Staking",
+    "billing": "Billing",
+    "webhooks": "Webhooks",
     "permissions": "Permissions",
     "audit-logs": "Audit Logs",
     "notifications": "Notifications",
@@ -191,6 +215,10 @@ const TAB_SUBTITLES = {
     "organizations": "Organizations using this cluster",
     "teams": "Teams and membership",
     "api-keys": "API keys and scopes",
+    "security": "HMAC receipt-signing key and mTLS cluster CA rotation",
+    "staking": "Bonded node deposits, slashing history, and staking config",
+    "billing": "Usage-based invoices generated from real job metering",
+    "webhooks": "Outbound job-event notifications to external endpoints",
     "permissions": "Role permissions",
     "audit-logs": "Operator action history",
     "notifications": "Notifications",
@@ -205,7 +233,10 @@ const TAB_SUBTITLES = {
 // every authenticated role.
 const TAB_PERMISSIONS = {
     "analytics": "Access analytics",
+    "billing": "Access analytics",
     "admin": "Manage cluster",
+    "security": "Manage cluster",
+    "webhooks": "Manage cluster",
     "users": "Manage users",
     "organizations": "Manage users",
     "teams": "Manage users",
@@ -295,6 +326,10 @@ function loadActiveTab() {
     else if (currentTab === "organizations") loadOrganizationsTab();
     else if (currentTab === "teams") loadTeamsTab();
     else if (currentTab === "api-keys") loadApiKeysTab();
+    else if (currentTab === "security") loadSecurityTab();
+    else if (currentTab === "staking") loadStakingTab();
+    else if (currentTab === "billing") loadBillingTab();
+    else if (currentTab === "webhooks") loadWebhooksTab();
     else if (currentTab === "permissions") loadPermissionsTab();
     else if (currentTab === "audit-logs") loadAuditLogsTab();
     else if (currentTab === "notifications") loadNotificationsTab();
@@ -560,11 +595,43 @@ async function loadControlCenter() {
         loadJobs(),
         loadClusterHealth(),
         loadEvents(),
-        loadTopologyMini()
+        loadTopologyMini(),
+        loadHaStatus(),
     ]);
 
     populateOperationsSelectors(nodes, jobs);
 
+}
+
+// HA / leader-election status (see gcon.cluster.leader_election) --
+// fetched independently of the main global-status pipeline above
+// (renderClusterStatus/svc()) since most deployments don't run --ha
+// at all: the System Services row stays hidden unless this returns
+// enabled:true, rather than adding an always-present "N/A" row.
+async function loadHaStatus() {
+    const row = document.getElementById("svc-row-ha");
+    if (!row) return;
+    try {
+        const status = await fetchJson("/management/ha-status");
+        if (!status.enabled) {
+            row.classList.add("d-none");
+            return;
+        }
+        row.classList.remove("d-none");
+        const dot = document.getElementById("svc-dot-ha");
+        const val = document.getElementById("svc-val-ha");
+        dot.classList.remove("ok", "warn", "bad");
+        dot.classList.add(status.is_leader ? "ok" : "warn");
+        val.classList.remove("ok", "warn", "bad");
+        val.classList.add(status.is_leader ? "ok" : "warn");
+        val.textContent = status.is_leader ? "Leader (active)" : "Standby";
+        val.title = status.holder_id || "";
+    } catch (err) {
+        // 403 for a role without "View monitoring", or HA genuinely
+        // unavailable -- either way, just leave the row hidden rather
+        // than surfacing an error for an optional status row.
+        row.classList.add("d-none");
+    }
 }
 
 // ---------------------------------------------------------------
@@ -1525,77 +1592,120 @@ function attachTopologyHandlers(container, topo) {
 // artifacts that job produced.
 // ---------------------------------------------------------------
 
-let receiptsData = [];
+let receiptVerifiedFilter = "";
+let receiptSearchQuery = "";
+let receiptPage = 1;
+const RECEIPT_PAGE_SIZE = 24;
+let receiptTotalCount = 0;
 
-function filterReceiptsData(query) {
-    if (!query) return receiptsData;
-    const q = query.toLowerCase();
-    return receiptsData.filter(r =>
-        (r.receipt_id || "").toLowerCase().includes(q) ||
-        (r.job_id || "").toLowerCase().includes(q)
-    );
+function renderReceiptSummaryTiles(summary) {
+    setText("receipts-tab-total", summary.total);
+    setText("receipts-tab-verified", summary.verified);
+    setText("receipts-tab-unverified", summary.unverified);
 }
 
-function renderReceiptSummaryTiles(receipts) {
-    const verified = receipts.filter(r => r.verified).length;
-    setText("receipts-tab-total", receipts.length);
-    setText("receipts-tab-verified", verified);
-    setText("receipts-tab-unverified", receipts.length - verified);
-}
-
-function renderReceiptCards(receipts) {
+async function renderReceiptCards() {
     const grid = document.getElementById("receipts-grid");
     if (!grid) return;
 
-    if (receipts.length === 0) {
-        grid.innerHTML = `<div class="text-secondary text-center py-4">No receipts generated yet.</div>`;
+    const offset = (receiptPage - 1) * RECEIPT_PAGE_SIZE;
+    const qs = new URLSearchParams({ limit: RECEIPT_PAGE_SIZE, offset });
+    if (receiptVerifiedFilter) qs.set("verified", receiptVerifiedFilter);
+    if (receiptSearchQuery) qs.set("search", receiptSearchQuery);
+
+    let receipts = [];
+    try {
+        const { data, headers } = await fetchJsonWithHeaders(`/receipts?${qs.toString()}`);
+        receipts = data;
+        receiptTotalCount = parseInt(headers.get("X-Total-Count") || "0", 10);
+    } catch (err) {
+        console.error("Failed to load receipts page:", err);
+        setConnectionStatus(false);
+        grid.innerHTML = `<div class="text-secondary text-center py-4">Failed to load receipts.</div>`;
         return;
     }
 
-    grid.innerHTML = receipts.map(r => `
-        <div class="gcon-receipt-card" data-receipt-id="${escapeHtml(r.receipt_id)}">
-            <div class="d-flex justify-content-between align-items-start">
-                <span class="gcon-receipt-id" title="${escapeHtml(r.receipt_id)}">${escapeHtml(r.receipt_id)}</span>
-                <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
-                    <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
-                </span>
-            </div>
-            <div class="gcon-receipt-meta">
-                <span><i class="bi bi-braces me-1"></i>${escapeHtml(r.job_id || "-")}</span>
-                ${statusBadge(r.status)}
-            </div>
-            <div class="gcon-receipt-meta text-secondary small">
-                <i class="bi bi-clock-history me-1"></i>${escapeHtml(r.created_at || "-")}
-            </div>
-            <button class="btn btn-sm btn-outline-light w-100 mt-2 gcon-receipt-inspect-btn" data-receipt-id="${escapeHtml(r.receipt_id)}">
-                <i class="bi bi-search me-1"></i>Inspect
-            </button>
-        </div>
-    `).join("");
+    const totalPages = Math.max(1, Math.ceil(receiptTotalCount / RECEIPT_PAGE_SIZE));
+    if (receiptPage > totalPages) {
+        receiptPage = totalPages;
+    }
 
-    grid.querySelectorAll(".gcon-receipt-inspect-btn").forEach(btn => {
-        btn.addEventListener("click", () => openReceiptDetail(btn.dataset.receiptId));
-    });
+    if (receipts.length === 0) {
+        grid.innerHTML = `<div class="text-secondary text-center py-4">No receipts match this filter.</div>`;
+    } else {
+        grid.innerHTML = receipts.map(r => `
+            <div class="gcon-receipt-card" data-receipt-id="${escapeHtml(r.receipt_id)}">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="gcon-receipt-id" title="${escapeHtml(r.receipt_id)}">${escapeHtml(r.receipt_id)}</span>
+                    <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
+                        <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
+                    </span>
+                </div>
+                <div class="gcon-receipt-meta">
+                    <span><i class="bi bi-braces me-1"></i>${escapeHtml(r.job_id || "-")}</span>
+                    ${statusBadge(r.status)}
+                </div>
+                <div class="gcon-receipt-meta text-secondary small">
+                    <i class="bi bi-clock-history me-1"></i>${escapeHtml(r.created_at || "-")}
+                </div>
+                <button class="btn btn-sm btn-outline-light w-100 mt-2 gcon-receipt-inspect-btn" data-receipt-id="${escapeHtml(r.receipt_id)}">
+                    <i class="bi bi-search me-1"></i>Inspect
+                </button>
+            </div>
+        `).join("");
+
+        grid.querySelectorAll(".gcon-receipt-inspect-btn").forEach(btn => {
+            btn.addEventListener("click", () => openReceiptDetail(btn.dataset.receiptId));
+        });
+    }
+
+    const rangeStart = receiptTotalCount === 0 ? 0 : offset + 1;
+    const rangeEnd = Math.min(offset + RECEIPT_PAGE_SIZE, receiptTotalCount);
+    setText("receipts-page-info", `${rangeStart}-${rangeEnd} of ${receiptTotalCount}`);
+
+    const prevBtn = document.getElementById("receipts-prev-page");
+    const nextBtn = document.getElementById("receipts-next-page");
+    if (prevBtn) prevBtn.disabled = receiptPage <= 1;
+    if (nextBtn) nextBtn.disabled = receiptPage >= totalPages;
 }
 
 async function loadReceiptsTab() {
     try {
-        receiptsData = await fetchJson("/receipts");
-        renderReceiptSummaryTiles(receiptsData);
-
-        const search = document.getElementById("receipts-search");
-        renderReceiptCards(filterReceiptsData(search ? search.value : ""));
+        const summary = await fetchJson("/receipts-summary");
+        renderReceiptSummaryTiles(summary);
     } catch (err) {
-        console.error("Failed to load receipts:", err);
-        setConnectionStatus(false);
+        console.error("Failed to load receipts summary:", err);
     }
+    await renderReceiptCards();
 }
+
+const debouncedReceiptsSearch = debounce((value) => {
+    receiptSearchQuery = value;
+    receiptPage = 1;
+    renderReceiptCards();
+}, 300);
 
 function setupReceiptsTab() {
     const search = document.getElementById("receipts-search");
     if (search) {
-        search.addEventListener("input", () => renderReceiptCards(filterReceiptsData(search.value)));
+        search.addEventListener("input", () => debouncedReceiptsSearch(search.value));
     }
+
+    document.querySelectorAll("#receipts-verified-filter button").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll("#receipts-verified-filter button").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            receiptVerifiedFilter = btn.dataset.verified;
+            receiptPage = 1;
+            renderReceiptCards();
+        });
+    });
+
+    const prevBtn = document.getElementById("receipts-prev-page");
+    if (prevBtn) prevBtn.addEventListener("click", () => { receiptPage -= 1; renderReceiptCards(); });
+
+    const nextBtn = document.getElementById("receipts-next-page");
+    if (nextBtn) nextBtn.addEventListener("click", () => { receiptPage += 1; renderReceiptCards(); });
 
     const verifyBtn = document.getElementById("receipts-tab-verify-all-btn");
     if (verifyBtn) {
@@ -1643,8 +1753,66 @@ async function openReceiptDetail(receiptId) {
         const body = document.getElementById("drawer-body");
 
         const metricsRows = Object.entries(r.proof.metrics || {})
+            .filter(([k]) => k !== "stages")
             .map(([k, v]) => receiptDetailRow(k, escapeHtml(v)))
             .join("") || `<div class="text-secondary small">No additional metrics recorded.</div>`;
+
+        const kindLabels = { command: "Command", resourced: "Resourced", staged: "Staged" };
+        const kindLabel = kindLabels[r.kind] || r.kind || "Command";
+
+        const stages = r.proof.stages || [];
+        const expected = (r.stages_expected ?? null);
+        const stageRows = stages.map(s => `
+            <div class="gcon-kv-row">
+                <span class="gcon-kv-label">Stage ${escapeHtml(s.stage ?? "-")}</span>
+                <span class="gcon-kv-value mono small">${escapeHtml(JSON.stringify(s.metrics || {}))} &middot; ${escapeHtml(s.observed_at || "")}</span>
+            </div>
+        `).join("");
+        const stagesPanel = r.kind === "staged" ? `
+            <div class="gcon-panel mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>Stages</strong>
+                    <span class="text-secondary small">${stages.length}${expected ? ` / ${expected}` : ""} observed</span>
+                </div>
+                ${stageRows || `<div class="text-secondary small">No stage checkpoints observed yet -- either the job hasn't reported one, or it doesn't call the GCON_STAGE_REPORT_PATH convention.</div>`}
+            </div>
+        ` : "";
+
+        // Replicated-execution verification (see gcon.execution.replication) --
+        // only present when this job was submitted with `verify`. Shows every
+        // witness node's own signed receipt, not just this one, so the full
+        // agreement trail is visible from any single replica's inspector view.
+        const executionProof = r.execution_proof || null;
+        const replicaRows = (r.replicas || []).map(replica => `
+            <div class="gcon-kv-row">
+                <span class="gcon-kv-label">${escapeHtml(replica.node_id || "-")}</span>
+                <span class="gcon-kv-value mono small">
+                    ${copyableValue(replica.receipt_id)}
+                    ${replica.receipt_id === r.receipt_id ? `<span class="badge bg-secondary ms-1">this receipt</span>` : ""}
+                </span>
+            </div>
+        `).join("");
+        const mismatchRows = (executionProof?.mismatches || []).map(m => `
+            <div class="gcon-kv-row">
+                <span class="gcon-kv-label">${escapeHtml(m.field || "replica count")}</span>
+                <span class="gcon-kv-value small">${escapeHtml(m.reason || `deviation ${m.deviation ?? "-"} (tolerance ${m.tolerance ?? "-"})`)}</span>
+            </div>
+        `).join("");
+        const replicatedPanel = executionProof ? `
+            <div class="gcon-panel mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>Replicated Execution</strong>
+                    <span class="badge ${executionProof.agreement ? "bg-success" : "bg-danger"}">
+                        <i class="bi ${executionProof.agreement ? "bi-check-circle" : "bi-exclamation-triangle"} me-1"></i>${executionProof.agreement ? "Replicas Agree" : "Disputed"}
+                    </span>
+                </div>
+                <div class="text-secondary small mb-2">
+                    ${(executionProof.witnesses || []).length} witnesses &middot; compared ${(executionProof.compared_fields || []).join(", ") || "-"} &middot; max deviation ${typeof executionProof.max_deviation === "number" ? executionProof.max_deviation.toFixed(4) : "-"}
+                </div>
+                ${replicaRows || `<div class="text-secondary small">No other replica receipts recorded.</div>`}
+                ${mismatchRows ? `<div class="mt-2 pt-2 border-top">${mismatchRows}</div>` : ""}
+            </div>
+        ` : "";
 
         const artifactRows = (r.artifacts || []).map(a => `
             <div class="gcon-kv-row">
@@ -1657,9 +1825,12 @@ async function openReceiptDetail(receiptId) {
             <div class="gcon-panel mb-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <strong>Verification</strong>
-                    <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
-                        <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
-                    </span>
+                    <div>
+                        <span class="badge bg-secondary me-1">${escapeHtml(kindLabel)}</span>
+                        <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
+                            <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
+                        </span>
+                    </div>
                 </div>
                 <div class="text-secondary small">${escapeHtml(r.verification_message)}</div>
             </div>
@@ -1682,6 +1853,17 @@ async function openReceiptDetail(receiptId) {
                 ${receiptDetailRow("Started", escapeHtml(r.execution.created_at || "-"))}
                 ${receiptDetailRow("Completed", escapeHtml(r.execution.completed_at || "-"))}
             </div>
+
+            <div class="gcon-panel mb-3">
+                <strong class="d-block mb-2">Job Output</strong>
+                ${r.output
+                    ? `<pre class="gcon-receipt-output mono small mb-0">${escapeHtml(r.output)}</pre>`
+                    : `<div class="text-secondary small">No output captured for this execution.</div>`}
+            </div>
+
+            ${stagesPanel}
+
+            ${replicatedPanel}
 
             <div class="gcon-panel mb-3">
                 <strong class="d-block mb-2">Metrics</strong>
@@ -1723,31 +1905,20 @@ async function openReceiptDetail(receiptId) {
 // uses.
 // ---------------------------------------------------------------
 
-let executionsData = [];
-let companiesData = [];
 let execStatusFilter = "";
 let execCompanyFilter = "";
 let execSearchQuery = "";
 let execPage = 1;
 const EXEC_PAGE_SIZE = 25;
+let execTotalCount = 0;
+let companiesData = [];
 
-function filterExecutionsData() {
-    let rows = executionsData;
-
-    if (execStatusFilter) {
-        rows = rows.filter(j => j.status === execStatusFilter);
-    }
-    if (execCompanyFilter) {
-        rows = rows.filter(j => j.org_id === execCompanyFilter);
-    }
-    if (execSearchQuery) {
-        const q = execSearchQuery.toLowerCase();
-        rows = rows.filter(j =>
-            (j.job_id || "").toLowerCase().includes(q) ||
-            (j.node_id || "").toLowerCase().includes(q)
-        );
-    }
-    return rows;
+function debounce(fn, delayMs) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delayMs);
+    };
 }
 
 function formatDuration(seconds) {
@@ -1791,15 +1962,40 @@ function buildLifecycleStepper(job) {
     `;
 }
 
-function renderExecutionsTable() {
+async function renderExecutionsTable() {
     const tbody = document.getElementById("executions-tbody");
     if (!tbody) return;
 
-    const filtered = filterExecutionsData();
-    const totalPages = Math.max(1, Math.ceil(filtered.length / EXEC_PAGE_SIZE));
-    execPage = Math.min(execPage, totalPages);
-    const start = (execPage - 1) * EXEC_PAGE_SIZE;
-    const pageRows = filtered.slice(start, start + EXEC_PAGE_SIZE);
+    const offset = (execPage - 1) * EXEC_PAGE_SIZE;
+    const qs = new URLSearchParams({
+        paginate: "true",
+        limit: EXEC_PAGE_SIZE,
+        offset,
+    });
+    if (execStatusFilter) qs.set("status", execStatusFilter);
+    if (execCompanyFilter) qs.set("org_id", execCompanyFilter);
+    if (execSearchQuery) qs.set("search", execSearchQuery);
+
+    let pageRows = [];
+    try {
+        const { data, headers } = await fetchJsonWithHeaders(`/jobs?${qs.toString()}`);
+        pageRows = data;
+        execTotalCount = parseInt(headers.get("X-Total-Count") || "0", 10);
+    } catch (err) {
+        console.error("Failed to load executions page:", err);
+        setConnectionStatus(false);
+        tbody.innerHTML = `<tr><td colspan="5" class="text-secondary text-center py-4">Failed to load executions.</td></tr>`;
+        return;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(execTotalCount / EXEC_PAGE_SIZE));
+    if (execPage > totalPages) {
+        // The filter/search just changed out from under a page number
+        // that no longer exists (e.g. was on page 5, search now only
+        // matches 1 page) -- snap back rather than showing an empty
+        // page with working-looking pagination controls.
+        execPage = totalPages;
+    }
 
     if (pageRows.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" class="text-secondary text-center py-4">No executions match this filter.</td></tr>`;
@@ -1819,9 +2015,9 @@ function renderExecutionsTable() {
         });
     }
 
-    const rangeStart = filtered.length === 0 ? 0 : start + 1;
-    const rangeEnd = Math.min(start + EXEC_PAGE_SIZE, filtered.length);
-    setText("executions-page-info", `${rangeStart}-${rangeEnd} of ${filtered.length}`);
+    const rangeStart = execTotalCount === 0 ? 0 : offset + 1;
+    const rangeEnd = Math.min(offset + EXEC_PAGE_SIZE, execTotalCount);
+    setText("executions-page-info", `${rangeStart}-${rangeEnd} of ${execTotalCount}`);
 
     const prevBtn = document.getElementById("executions-prev-page");
     const nextBtn = document.getElementById("executions-next-page");
@@ -1829,33 +2025,36 @@ function renderExecutionsTable() {
     if (nextBtn) nextBtn.disabled = execPage >= totalPages;
 }
 
-function renderExecutionSummaryTiles(jobs) {
-    setText("exec-tab-total", jobs.length);
-    setText("exec-tab-queued", jobs.filter(j => j.status === "pending").length);
-    setText("exec-tab-running", jobs.filter(j => j.status === "running").length);
-    setText("exec-tab-completed", jobs.filter(j => j.status === "completed").length);
-    setText("exec-tab-failed", jobs.filter(j => j.status === "failed").length);
+async function renderExecutionSummaryTiles() {
+    try {
+        const counts = await fetchJson("/jobs/status-counts");
+        setText("exec-tab-total", counts.total);
+        setText("exec-tab-queued", counts.queued);
+        setText("exec-tab-running", counts.running);
+        setText("exec-tab-completed", counts.completed);
+        setText("exec-tab-failed", counts.failed);
+    } catch (err) {
+        console.error("Failed to load execution status counts:", err);
+    }
 }
 
 async function loadExecutionsTab() {
-    try {
-        executionsData = await fetchJson("/jobs");
-        renderExecutionSummaryTiles(executionsData);
-        renderExecutionsTable();
-    } catch (err) {
-        console.error("Failed to load executions:", err);
-        setConnectionStatus(false);
-    }
+    await Promise.all([
+        renderExecutionSummaryTiles(),
+        renderExecutionsTable(),
+    ]);
 }
+
+const debouncedExecutionsSearch = debounce((value) => {
+    execSearchQuery = value;
+    execPage = 1;
+    renderExecutionsTable();
+}, 300);
 
 function setupExecutionsTab() {
     const search = document.getElementById("executions-search");
     if (search) {
-        search.addEventListener("input", () => {
-            execSearchQuery = search.value;
-            execPage = 1;
-            renderExecutionsTable();
-        });
+        search.addEventListener("input", () => debouncedExecutionsSearch(search.value));
     }
 
     const companyFilter = document.getElementById("executions-company-filter");
@@ -3441,6 +3640,412 @@ async function setupApiKeysTab() {
 }
 
 // ---------------------------------------------------------------
+// Security & Keys — HMAC keyring + mTLS CA rotation status/actions
+// (see gcon.execution.hmac_keyring / gcon.transport.tls_rotation).
+// ---------------------------------------------------------------
+async function loadSecurityTab() {
+    try {
+        const status = await fetchJson("/management/keys");
+
+        const hmacBody = document.getElementById("security-hmac-body");
+        if (hmacBody) {
+            const keys = status.hmac ? Object.entries(status.hmac.keys) : [];
+            hmacBody.innerHTML = keys.length === 0
+                ? `<tr><td colspan="3" class="text-center text-secondary">No keyring (single-key mode).</td></tr>`
+                : keys.map(([keyId, meta]) => `
+                    <tr>
+                        <td><code>${escapeHtml(keyId)}</code></td>
+                        <td>${meta.created_at ? new Date(meta.created_at).toLocaleString() : "--"}</td>
+                        <td>${meta.current
+                            ? `<span class="badge bg-success">Current</span>`
+                            : meta.retired_at
+                                ? `<span class="badge bg-secondary">Retired ${new Date(meta.retired_at).toLocaleDateString()}</span>`
+                                : `<span class="badge bg-secondary">Retired</span>`}
+                        </td>
+                    </tr>
+                `).join("");
+        }
+
+        const fpEl = document.getElementById("security-ca-fingerprint");
+        if (fpEl) fpEl.textContent = status.mtls?.active_ca_fingerprint || "Not configured";
+
+        const retiredBody = document.getElementById("security-retired-ca-body");
+        if (retiredBody) {
+            const retired = status.mtls?.retired_cas || [];
+            retiredBody.innerHTML = retired.length === 0
+                ? `<tr><td colspan="2" class="text-center text-secondary">None</td></tr>`
+                : retired.map(ca => `
+                    <tr>
+                        <td><code>${escapeHtml((ca.fingerprint || "").slice(0, 24))}...</code></td>
+                        <td>${new Date(ca.retired_at).toLocaleString()}</td>
+                    </tr>
+                `).join("");
+        }
+
+        const revokedBody = document.getElementById("security-revoked-body");
+        if (revokedBody) {
+            const revoked = status.mtls?.revoked_certificates || [];
+            revokedBody.innerHTML = revoked.length === 0
+                ? `<tr><td colspan="4" class="text-center text-secondary">None</td></tr>`
+                : revoked.map(r => `
+                    <tr>
+                        <td>${escapeHtml(r.node_id || "")}</td>
+                        <td><code>${escapeHtml((r.fingerprint || "").slice(0, 20))}...</code></td>
+                        <td>${escapeHtml(r.reason || "")}</td>
+                        <td>${new Date(r.revoked_at).toLocaleString()}</td>
+                    </tr>
+                `).join("");
+        }
+    } catch (err) {
+        console.error("Failed to load security status:", err);
+        setConnectionStatus(false);
+    }
+}
+
+async function setupSecurityTab() {
+    const rotateHmacBtn = document.getElementById("security-rotate-hmac-btn");
+    if (rotateHmacBtn) {
+        rotateHmacBtn.addEventListener("click", async () => {
+            if (!confirm("Rotate the HMAC receipt-signing key now? The current key is retired, not deleted — existing receipts keep verifying.")) return;
+            try {
+                await fetchJson("/management/keys/hmac/rotate", { method: "POST" });
+                showToast("HMAC key rotated.");
+                await loadSecurityTab();
+            } catch (err) {
+                console.error("Failed to rotate HMAC key:", err);
+                showToast(err.message || "Failed to rotate HMAC key.", true);
+            }
+        });
+    }
+
+    const rotateCaBtn = document.getElementById("security-rotate-ca-btn");
+    if (rotateCaBtn) {
+        rotateCaBtn.addEventListener("click", async () => {
+            if (!confirm("Rotate the mTLS cluster CA now? New certificates will be signed under the new CA; existing node certs keep working during the grace period.")) return;
+            try {
+                await fetchJson("/management/keys/mtls/rotate-ca", { method: "POST" });
+                showToast("mTLS CA rotated.");
+                await loadSecurityTab();
+            } catch (err) {
+                console.error("Failed to rotate CA:", err);
+                showToast(err.message || "Failed to rotate CA.", true);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------
+// Staking — bonded node deposits, slashing history (see
+// gcon.execution.staking).
+// ---------------------------------------------------------------
+async function loadStakingTab() {
+    try {
+        const [staking, events] = await Promise.all([
+            fetchJson("/management/staking"),
+            fetchJson("/management/staking/events"),
+        ]);
+
+        const cfg = staking.config || {};
+        setText("staking-cfg-enabled", cfg.enabled ? "Enforced" : "Off (informational only)");
+        setText("staking-cfg-min", cfg.min_stake_required);
+        setText("staking-cfg-slash", `${Math.round((cfg.slash_fraction || 0) * 100)}%`);
+        setText("staking-cfg-unbond", `${cfg.unbonding_period_days} days`);
+
+        const body = document.getElementById("staking-body");
+        if (body) {
+            const stakes = staking.stakes || [];
+            body.innerHTML = stakes.length === 0
+                ? `<tr><td colspan="5" class="text-center text-secondary">No nodes have bonded stake.</td></tr>`
+                : stakes.map(s => `
+                    <tr>
+                        <td>${escapeHtml(s.hostname || s.node_id)}</td>
+                        <td>${s.bonded_amount}</td>
+                        <td>${s.unbonding_amount}${s.unbonding_release_at ? ` <span class="text-secondary small">until ${new Date(s.unbonding_release_at).toLocaleDateString()}</span>` : ""}</td>
+                        <td>${s.slashed_total}</td>
+                        <td>${s.meets_minimum
+                            ? `<span class="badge bg-success">Yes</span>`
+                            : `<span class="badge bg-danger">No</span>`}
+                        </td>
+                    </tr>
+                `).join("");
+        }
+
+        const eventsBody = document.getElementById("staking-events-body");
+        if (eventsBody) {
+            eventsBody.innerHTML = events.length === 0
+                ? `<tr><td colspan="5" class="text-center text-secondary">No stake events yet.</td></tr>`
+                : events.map(e => `
+                    <tr>
+                        <td>${escapeHtml(e.node_id)}</td>
+                        <td>${escapeHtml(e.event_type)}</td>
+                        <td>${e.amount}</td>
+                        <td>${escapeHtml(e.reason || "")}</td>
+                        <td>${new Date(e.created_at).toLocaleString()}</td>
+                    </tr>
+                `).join("");
+        }
+    } catch (err) {
+        console.error("Failed to load staking data:", err);
+        setConnectionStatus(false);
+    }
+}
+
+async function setupStakingTab() {
+    const bondBtn = document.getElementById("staking-bond-btn");
+    if (bondBtn) {
+        bondBtn.addEventListener("click", async () => {
+            const nodeId = document.getElementById("staking-bond-node-id").value.trim();
+            const amount = parseInt(document.getElementById("staking-bond-amount").value, 10);
+            if (!nodeId || !amount || amount <= 0) return;
+            try {
+                await fetchJson(`/management/staking/${encodeURIComponent(nodeId)}/bond`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ amount }),
+                });
+                showToast(`Bonded ${amount} for ${nodeId}.`);
+                await loadStakingTab();
+            } catch (err) {
+                console.error("Failed to bond stake:", err);
+                showToast(err.message || "Failed to bond stake.", true);
+            }
+        });
+    }
+
+    const unbondBtn = document.getElementById("staking-unbond-btn");
+    if (unbondBtn) {
+        unbondBtn.addEventListener("click", async () => {
+            const nodeId = document.getElementById("staking-bond-node-id").value.trim();
+            const amount = parseInt(document.getElementById("staking-bond-amount").value, 10);
+            if (!nodeId || !amount || amount <= 0) return;
+            try {
+                await fetchJson(`/management/staking/${encodeURIComponent(nodeId)}/unbond`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ amount }),
+                });
+                showToast(`Unbond requested for ${nodeId}.`);
+                await loadStakingTab();
+            } catch (err) {
+                console.error("Failed to request unbond:", err);
+                showToast(err.message || "Failed to request unbond.", true);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------
+// Billing — usage-based invoices (see gcon.billing.invoicing).
+// ---------------------------------------------------------------
+async function loadBillingOrgOptions() {
+    const select = document.getElementById("billing-gen-org");
+    if (!select) return;
+    try {
+        const orgs = await fetchJson("/management/organizations");
+        select.innerHTML = orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+    } catch (err) { /* non-fatal */ }
+}
+
+function invoiceStatusBadge(status) {
+    const map = { draft: "secondary", open: "info", paid: "success", failed: "danger", void: "dark" };
+    return `<span class="badge bg-${map[status] || "secondary"}">${escapeHtml(status)}</span>`;
+}
+
+async function loadBillingTab() {
+    try {
+        const [pricing, invoices] = await Promise.all([
+            fetchJson("/management/billing/pricing"),
+            fetchJson("/management/billing/invoices"),
+        ]);
+
+        setText("billing-price-gpu", `${pricing.gpu_second_cents}¢`);
+        setText("billing-price-in", `${pricing.llm_input_token_cents}¢`);
+        setText("billing-price-out", `${pricing.llm_output_token_cents}¢`);
+        setText("billing-price-currency", (pricing.currency || "").toUpperCase());
+
+        await loadBillingOrgOptions();
+
+        const body = document.getElementById("billing-invoices-body");
+        if (body) {
+            body.innerHTML = invoices.length === 0
+                ? `<tr><td colspan="6" class="text-center text-secondary">No invoices yet.</td></tr>`
+                : invoices.map(inv => `
+                    <tr>
+                        <td><code>${escapeHtml(inv.invoice_id.slice(0, 12))}</code></td>
+                        <td>${escapeHtml(inv.org_id)}</td>
+                        <td>${inv.period_start} &rarr; ${inv.period_end}</td>
+                        <td>${(inv.amount_cents / 100).toFixed(2)} ${(inv.currency || "").toUpperCase()}</td>
+                        <td>${invoiceStatusBadge(inv.status)}</td>
+                        <td>
+                            ${inv.status === "draft"
+                                ? `<button class="btn btn-sm btn-outline-primary invoice-finalize-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Finalize</button>`
+                                : ""}
+                        </td>
+                    </tr>
+                `).join("");
+
+            document.querySelectorAll(".invoice-finalize-btn").forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    try {
+                        await fetchJson(`/management/billing/invoices/${btn.dataset.invoiceId}/finalize`, { method: "POST" });
+                        showToast("Invoice finalized.");
+                        await loadBillingTab();
+                    } catch (err) {
+                        console.error("Failed to finalize invoice:", err);
+                        showToast(err.message || "Failed to finalize invoice.", true);
+                    }
+                });
+            });
+        }
+    } catch (err) {
+        console.error("Failed to load billing data:", err);
+        setConnectionStatus(false);
+    }
+}
+
+async function setupBillingTab() {
+    const generateBtn = document.getElementById("billing-generate-btn");
+    if (generateBtn) {
+        generateBtn.addEventListener("click", async () => {
+            const orgId = document.getElementById("billing-gen-org").value;
+            const start = document.getElementById("billing-gen-start").value;
+            const end = document.getElementById("billing-gen-end").value;
+            if (!orgId || !start || !end) {
+                showToast("Pick an org and a start/end date.", true);
+                return;
+            }
+            try {
+                await fetchJson("/management/billing/invoices/generate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ org_id: orgId, period_start: start, period_end: end }),
+                });
+                showToast("Invoice generated.");
+                await loadBillingTab();
+            } catch (err) {
+                console.error("Failed to generate invoice:", err);
+                showToast(err.message || "Failed to generate invoice.", true);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------
+// Webhooks — standing org subscriptions + delivery history (see
+// gcon.transport.webhooks).
+// ---------------------------------------------------------------
+async function loadWebhooksOrgOptions() {
+    const select = document.getElementById("webhooks-new-org");
+    if (!select) return;
+    try {
+        const orgs = await fetchJson("/management/organizations");
+        select.innerHTML = orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+    } catch (err) { /* non-fatal */ }
+}
+
+function webhookDeliveryStatusBadge(status) {
+    const map = { pending: "secondary", retrying: "warning", success: "success", failed: "danger" };
+    return `<span class="badge bg-${map[status] || "secondary"}">${escapeHtml(status)}</span>`;
+}
+
+async function loadWebhooksTab() {
+    try {
+        await loadWebhooksOrgOptions();
+        const [subs, deliveries] = await Promise.all([
+            fetchJson("/management/webhooks"),
+            fetchJson("/management/webhooks/deliveries"),
+        ]);
+
+        const subsBody = document.getElementById("webhooks-subs-body");
+        if (subsBody) {
+            subsBody.innerHTML = subs.length === 0
+                ? `<tr><td colspan="6" class="text-center text-secondary">No subscriptions.</td></tr>`
+                : subs.map(s => `
+                    <tr>
+                        <td>${escapeHtml(s.org_id)}</td>
+                        <td class="text-break">${escapeHtml(s.url)}</td>
+                        <td>${(s.event_types || []).map(e => `<span class="badge bg-dark me-1">${escapeHtml(e)}</span>`).join("")}</td>
+                        <td><code>${escapeHtml(s.secret)}</code></td>
+                        <td>${s.active
+                            ? `<span class="badge bg-success">Active</span>`
+                            : `<span class="badge bg-secondary">Inactive</span>`}
+                        </td>
+                        <td>
+                            ${s.active
+                                ? `<button class="btn btn-sm btn-outline-danger webhook-deactivate-btn" data-subscription-id="${escapeHtml(s.subscription_id)}">Deactivate</button>`
+                                : ""}
+                        </td>
+                    </tr>
+                `).join("");
+
+            document.querySelectorAll(".webhook-deactivate-btn").forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    try {
+                        await fetchJson(`/management/webhooks/${btn.dataset.subscriptionId}/deactivate`, { method: "POST" });
+                        showToast("Subscription deactivated.");
+                        await loadWebhooksTab();
+                    } catch (err) {
+                        console.error("Failed to deactivate webhook:", err);
+                        showToast(err.message || "Failed to deactivate webhook.", true);
+                    }
+                });
+            });
+        }
+
+        const deliveriesBody = document.getElementById("webhooks-deliveries-body");
+        if (deliveriesBody) {
+            deliveriesBody.innerHTML = deliveries.length === 0
+                ? `<tr><td colspan="6" class="text-center text-secondary">No deliveries yet.</td></tr>`
+                : deliveries.map(d => `
+                    <tr>
+                        <td>${escapeHtml(d.event_type)}</td>
+                        <td>${escapeHtml(d.job_id || "")}</td>
+                        <td>${webhookDeliveryStatusBadge(d.status)}</td>
+                        <td>${d.attempt_count}</td>
+                        <td>${d.response_code ?? ""}${d.last_error ? ` <span class="text-secondary small">${escapeHtml(d.last_error)}</span>` : ""}</td>
+                        <td>${d.last_attempt_at ? new Date(d.last_attempt_at).toLocaleString() : "--"}</td>
+                    </tr>
+                `).join("");
+        }
+    } catch (err) {
+        console.error("Failed to load webhooks data:", err);
+        setConnectionStatus(false);
+    }
+}
+
+async function setupWebhooksTab() {
+    const createBtn = document.getElementById("webhooks-create-btn");
+    if (createBtn) {
+        createBtn.addEventListener("click", async () => {
+            const orgId = document.getElementById("webhooks-new-org").value;
+            const url = document.getElementById("webhooks-new-url").value.trim();
+            const eventType = document.getElementById("webhooks-new-event").value;
+            if (!orgId || !url) {
+                showToast("Pick an org and enter a URL.", true);
+                return;
+            }
+            try {
+                const result = await fetchJson("/management/webhooks", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ org_id: orgId, url, event_types: [eventType] }),
+                });
+                document.getElementById("webhooks-new-url").value = "";
+                const reveal = document.getElementById("webhooks-reveal");
+                if (reveal) {
+                    reveal.classList.remove("d-none");
+                    reveal.innerHTML = `<i class="bi bi-exclamation-triangle me-2"></i>Copy this signing secret now — it won't be shown again: <code>${escapeHtml(result.secret)}</code>`;
+                }
+                await loadWebhooksTab();
+            } catch (err) {
+                console.error("Failed to create webhook subscription:", err);
+                showToast(err.message || "Failed to create webhook subscription.", true);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------
 // Management: Permissions
 // ---------------------------------------------------------------
 
@@ -4051,6 +4656,10 @@ setupExplorerNav();
 setupControls();
 setupUsersTab();
 setupApiKeysTab();
+setupSecurityTab();
+setupStakingTab();
+setupBillingTab();
+setupWebhooksTab();
 setupOrganizationsTab();
 setupTeamsTab();
 setupGlobalSearch();

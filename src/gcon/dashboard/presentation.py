@@ -10,8 +10,6 @@ It simply provides a unified interface to the coordinator.
 
 from datetime import datetime, UTC
 
-from gcon.cluster.autoscaler import AutoScaler
-
 
 class PresentationLayer:
     """
@@ -30,7 +28,15 @@ class PresentationLayer:
             coordinator: The active GCONCoordinator instance.
         """
         self.coordinator = coordinator
-        self.autoscaler = AutoScaler(coordinator)
+        # Reuse the coordinator's own AutoScaler (see
+        # GCONCoordinator.__init__) rather than constructing a second,
+        # separate AutoScaler(coordinator) here. Two independent
+        # instances would each keep their own `scaled_nodes` list --
+        # a node the coordinator's automatic autoscale_loop created
+        # would be invisible to this layer's manual scale_down (and
+        # vice versa), since AutoScaler.scale_down only ever removes
+        # nodes it personally remembers creating.
+        self.autoscaler = coordinator.autoscaler
         self.started_at = datetime.now(UTC)
   
     def get_nodes(self, org_id=None):
@@ -55,6 +61,17 @@ class PresentationLayer:
         jobs -- see coordinator.get_jobs() for why each exists.
         """
         return self.coordinator.get_jobs(status=status, limit=limit, org_id=org_id)
+
+    def get_jobs_page(self, status=None, search=None, org_id=None, limit=50, offset=0):
+        """Real server-side pagination for the Executions tab -- see
+        coordinator.get_jobs_page's docstring. Returns
+        (items, total_count)."""
+        return self.coordinator.get_jobs_page(
+            status=status, search=search, org_id=org_id, limit=limit, offset=offset,
+        )
+
+    def get_job_status_counts(self):
+        return self.coordinator.get_job_status_counts()
     
     def get_storage(self):
         """
@@ -145,7 +162,11 @@ class PresentationLayer:
         """
         return self.coordinator.submit_workflow(workflow)
 
-    def submit_job(self, job_id, command, artifacts=None, created_by=None, workflow_id=None, org_id=None):
+    def submit_job(
+        self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
+        org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
+        callback_url=None,
+    ):
         """
         Submit a new job to the cluster.
 
@@ -159,6 +180,9 @@ class PresentationLayer:
         attributed to (see api_v1.py's submit_job route, which derives
         it from the submitting user's organization_id) for the
         dashboard's Companies panel.
+
+        `kind`/`requires`/`stages`/`dataset_artifacts` -- see
+        GCONCoordinator.submit_job.
         """
         return self.coordinator.submit_job(
             job_id,
@@ -167,6 +191,10 @@ class PresentationLayer:
             created_by=created_by,
             workflow_id=workflow_id,
             org_id=org_id,
+            kind=kind,
+            requires=requires,
+            stages=stages,
+            dataset_artifacts=dataset_artifacts,
     ) 
     def register_node(self, node):
         """
@@ -241,21 +269,29 @@ class PresentationLayer:
         """
         health = self.get_cluster_health()
         trust = self.get_trust_score()
+        receipts_summary = self.get_receipts_summary()
 
         return {
             "metrics": self.get_dashboard_metrics(),
             "nodes": self.get_nodes(),
-            "jobs": self.get_jobs(),
+            # Capped, not the full history: nothing in the Home
+            # Dashboard actually reads this field today (metrics.*
+            # above already carries the running/completed/failed
+            # counts it needs) -- but rather than drop the key
+            # entirely and risk breaking an undiscovered consumer,
+            # bounding it means this payload -- rebuilt on every /ws
+            # tick -- stops scaling with total job history.
+            "jobs": self.get_jobs(limit=50),
             "events": self.get_events(),
             "storage": self.get_storage(),
             "workflows": self.get_workflows(),
-            "receipts_count": len(self.coordinator.get_receipts()),
+            "receipts_count": receipts_summary["total"],
             "health": health,
             "trust": trust,
             "hero": self.get_hero_status(health, trust),
             "global_status": self.get_global_status(health),
             "node_summary": self.get_node_summary(),
-            "receipts_summary": self.get_receipts_summary(),
+            "receipts_summary": receipts_summary,
             "storage_summary": self.get_storage_summary(health),
             "critical_alerts": self.get_critical_alerts(health),
             "execution_timeline": self.get_execution_timeline(),
@@ -275,18 +311,19 @@ class PresentationLayer:
     def get_receipts_summary(self):
         """
         Return live verification counts across all receipts, for the
-        Receipt Summary widget. Verification is recomputed against
-        each receipt's real signed proof (see Coordinator.get_receipts),
-        never cached as a stale flag.
-        """
-        receipts = self.coordinator.get_receipts()
-        verified = sum(1 for r in receipts if r.get("verified"))
+        Receipt Summary widget.
 
-        return {
-            "total": len(receipts),
-            "verified": verified,
-            "unverified": len(receipts) - verified,
-        }
+        Uses Coordinator.get_receipt_verification_counts() -- a
+        grouped COUNT query (or, without a control_plane, the
+        already-bounded in-memory running counters) -- instead of
+        building the full receipt list via get_receipts() just to
+        sum() a boolean over it. That was the same O(total receipts)
+        cost this whole pagination pass exists to remove, hiding
+        inside a summary widget that's part of the periodic websocket
+        payload -- i.e. it ran on every dashboard refresh tick,
+        regardless of how much receipt history had accumulated.
+        """
+        return self.coordinator.get_receipt_verification_counts()
 
     def get_storage_summary(self, health=None):
         """
@@ -410,17 +447,17 @@ class PresentationLayer:
         trust = trust or self.get_trust_score()
         global_status = self.get_global_status(health)
         nodes = self.get_nodes()
-        jobs = self.get_jobs()
-        receipts = self.get_receipts()
+        job_counts = self.get_job_status_counts()
+        receipts_summary = self.get_receipts_summary()
 
         return {
             "product_name": "GCON",
             "tagline": "Execution Verification Platform",
             "connected_nodes": sum(1 for n in nodes if n.get("status") != "offline"),
             "total_nodes": len(nodes),
-            "running_executions": sum(1 for j in jobs if j.get("status") == "running"),
-            "verified_receipts": sum(1 for r in receipts if r.get("verified")),
-            "total_receipts": len(receipts),
+            "running_executions": job_counts["running"],
+            "verified_receipts": receipts_summary["verified"],
+            "total_receipts": receipts_summary["total"],
             "trust_score": trust["trust_score"],
             "coordinator_id": global_status["coordinator_id"],
             "coordinator_online": global_status["coordinator_online"],
@@ -435,11 +472,18 @@ class PresentationLayer:
         status, and the underlying health breakdown — all sourced
         from the same live coordinator state used elsewhere, so this
         view can never disagree with the Home Dashboard.
+
+        `verification_failures` is capped at the 20 most recent
+        failing receipts (via get_receipts_page, a real DB query, not
+        the full unverified set filtered out of get_receipts()) --
+        this is a status widget, not the Receipts tab; a cluster with
+        thousands of unverified receipts doesn't need all of them
+        shipped here to make the point that something's wrong.
         """
         health = self.get_cluster_health()
         trust = self.get_trust_score()
-        receipts = self.get_receipts()
-        failures = [r for r in receipts if not r.get("verified")]
+        receipts_summary = self.get_receipts_summary()
+        failures, _ = self.get_receipts_page(verified=False, limit=20)
         nodes = self.get_nodes()
 
         node_trust = [
@@ -455,7 +499,7 @@ class PresentationLayer:
         return {
             "trust": trust,
             "history": self.get_trust_history(),
-            "receipts_summary": self.get_receipts_summary(),
+            "receipts_summary": receipts_summary,
             "verification_failures": failures,
             "node_trust": node_trust,
             "health": health,
@@ -483,7 +527,7 @@ class PresentationLayer:
                 "scheduler_running": global_status["scheduler_running"],
                 "started_at": self.coordinator.started_at.isoformat(),
                 "total_nodes": len(nodes),
-                "running_jobs": sum(1 for j in self.get_jobs() if j.get("status") == "running"),
+                "running_jobs": self.get_job_status_counts()["running"],
             },
             "nodes": [
                 {
@@ -508,6 +552,14 @@ class PresentationLayer:
         Return all generated job receipts.
         """
         return self.coordinator.get_receipts()
+
+    def get_receipts_page(self, verified=None, search=None, limit=50, offset=0):
+        """Real server-side pagination for the Receipts tab -- see
+        coordinator.get_receipts_page's docstring. Returns
+        (items, total_count)."""
+        return self.coordinator.get_receipts_page(
+            verified=verified, search=search, limit=limit, offset=offset,
+        )
 
     def get_receipt_detail(self, receipt_id):
         """

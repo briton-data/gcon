@@ -33,6 +33,15 @@
                 <span class="gcon-service-value muted" id="svc-val-heartbeat">--</span>
             </div>
 
+            <!-- Only shown when this coordinator was started with --ha
+                 (see gcon.cluster.leader_election); hidden entirely for
+                 the default single-coordinator case rather than showing
+                 a permanently-disabled row. -->
+            <div class="gcon-service-row d-none" id="svc-row-ha">
+                <span class="gcon-service-name"><span class="dot" id="svc-dot-ha"></span>Coordinator Mode</span>
+                <span class="gcon-service-value" id="svc-val-ha">--</span>
+            </div>
+
         </div>
 
         <a href="#" class="gcon-panel-link d-inline-block mt-2" data-tab="cluster">View all services &rarr;</a>

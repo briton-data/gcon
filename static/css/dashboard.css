@@ -1,5 +1,4 @@
 
-
 /* ==========================================================
    GCON Dashboard Styles
    ========================================================== */
@@ -155,16 +154,6 @@
     box-sizing: border-box;
 }
 
-body {
-    background:
-        radial-gradient(1200px 600px at 15% -10%, rgba(59, 130, 246, 0.08), transparent 60%),
-        radial-gradient(1000px 500px at 100% 0%, rgba(139, 92, 246, 0.06), transparent 55%),
-        var(--bg);
-    color: var(--text);
-    font-family: "Inter", sans-serif;
-    letter-spacing: -0.005em;
-}
-
 /* ==========================================================
    Metric Cards
 ========================================================== */
@@ -195,16 +184,6 @@ body {
 
 }
 
-.gcon-metric-card:hover {
-
-    transform: translateY(-3px);
-
-    border-color: var(--border-strong);
-
-    box-shadow: var(--shadow-md);
-
-}
-
 .gcon-metric-top {
 
     display: flex;
@@ -215,51 +194,6 @@ body {
 
 }
 
-.gcon-metric-icon {
-
-    font-size: 1.4rem;
-
-    color: var(--primary);
-
-    width: 40px;
-
-    height: 40px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: var(--radius-sm);
-
-    background: var(--primary-dim);
-
-}
-
-.gcon-metric-value {
-
-    font-size: 2.1rem;
-
-    font-weight: 700;
-
-    letter-spacing: -0.02em;
-
-    font-variant-numeric: tabular-nums;
-
-}
-
-.gcon-metric-title {
-
-    font-size: .82rem;
-
-    color: var(--muted);
-
-    letter-spacing: .02em;
-
-    font-weight: 500;
-
-}
 /* ==========================================================
    Panels
    ========================================================== */
@@ -271,18 +205,6 @@ body {
     padding: 22px;
     margin-bottom: 20px;
     box-shadow: var(--shadow-sm);
-}
-
-.gcon-panel-header {
-    margin-bottom: 16px;
-    border-bottom: 1px solid var(--border-subtle);
-    padding-bottom: 14px;
-}
-
-.gcon-panel-header h5 {
-    margin: 0;
-    font-weight: 600;
-    letter-spacing: -0.01em;
 }
 
 .gcon-panel-body {
@@ -316,32 +238,9 @@ body {
 
 }
 
-.gcon-navbar .navbar-brand {
-    background: var(--gradient-brand);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-}
-
-.gcon-navbar .navbar-brand i {
-    -webkit-text-fill-color: var(--primary);
-}
-
 /* ==========================================================
    Sidebar
 ========================================================== */
-
-.gcon-sidebar {
-
-    background: var(--sidebar);
-
-    min-height: calc(100vh - 56px);
-
-    border-right: 1px solid var(--border-subtle);
-
-}
 
 .gcon-sidebar h5 {
     color: var(--muted);
@@ -354,42 +253,6 @@ body {
 .gcon-sidebar .list-group {
 
     gap: 4px;
-
-}
-
-.gcon-sidebar .list-group-item {
-
-    background: transparent;
-
-    border: none;
-
-    color: var(--text-dim);
-
-    border-radius: var(--radius-sm);
-
-    font-size: .9rem;
-
-    padding: 9px 12px;
-
-    transition: background .15s ease, color .15s ease;
-
-}
-
-.gcon-sidebar .list-group-item:hover {
-
-    background: var(--surface-2);
-
-    color: var(--text);
-
-}
-
-.gcon-sidebar .active {
-
-    background: var(--primary-dim) !important;
-
-    color: #BFDBFE !important;
-
-    box-shadow: inset 2px 0 0 var(--primary);
 
 }
 
@@ -412,11 +275,6 @@ body {
 
 }
 
-.gcon-table tbody td {
-
-    vertical-align: middle;
-
-}
 /* ==========================================================
    Activity Feed
 ========================================================== */
@@ -953,32 +811,6 @@ body {
     flex-wrap: wrap;
 }
 
-.gcon-status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 10px;
-    border-radius: 999px;
-    font-size: .74rem;
-    font-weight: 600;
-    color: var(--text-dim);
-    background: var(--surface-2);
-    border: 1px solid var(--border-subtle);
-    white-space: nowrap;
-}
-
-.gcon-status-pill .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
-}
-
-.gcon-status-pill.ok .dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
-.gcon-status-pill.warn .dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
-.gcon-status-pill.bad .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
-
 /* ==========================================================
    Home Dashboard — Critical Alerts
    ========================================================== */
@@ -987,26 +819,7 @@ body {
     border-color: var(--border-subtle);
 }
 
-.gcon-alerts-panel.has-alerts {
-    border-color: rgba(239, 68, 68, 0.35);
-    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.08), var(--shadow-sm);
-}
-
-.gcon-alert-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 12px 14px;
-    border-radius: var(--radius-sm);
-    background: var(--surface-2);
-    border: 1px solid var(--border-subtle);
-    margin-bottom: 8px;
-}
-
 .gcon-alert-item:last-child { margin-bottom: 0; }
-
-.gcon-alert-item.critical { border-left: 3px solid var(--danger); }
-.gcon-alert-item.warning { border-left: 3px solid var(--warning); }
 
 .gcon-alert-icon {
     font-size: 1rem;
@@ -1016,19 +829,6 @@ body {
 
 .gcon-alert-item.critical .gcon-alert-icon { color: var(--danger); }
 .gcon-alert-item.warning .gcon-alert-icon { color: var(--warning); }
-
-.gcon-alert-source {
-    font-size: .72rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    font-weight: 700;
-}
-
-.gcon-alert-message {
-    font-size: .88rem;
-    color: var(--text);
-}
 
 .gcon-alerts-empty {
     display: flex;
@@ -1166,15 +966,6 @@ body {
 
 .gcon-topology-mini svg { width: 100%; height: 100%; }
 
-.gcon-panel-link {
-    font-size: .78rem;
-    color: var(--primary);
-    text-decoration: none;
-    font-weight: 600;
-}
-
-.gcon-panel-link:hover { color: var(--violet); }
-
 /* ==========================================================
    Receipt Explorer
    ========================================================== */
@@ -1246,6 +1037,17 @@ body {
 .gcon-kv-value.mono {
     font-family: "SFMono-Regular", Consolas, monospace;
     font-size: .78rem;
+}
+
+.gcon-receipt-output {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: .78rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 280px;
+    overflow-y: auto;
+    color: var(--text);
+    background: transparent;
 }
 
 .gcon-copy-value {
@@ -1827,7 +1629,6 @@ body {
 .gcon-notif-badge.gcon-badge-warning { background: var(--warning); color: #1a1300; }
 .gcon-notif-badge.gcon-badge-security { background: var(--violet); }
 .gcon-notif-badge.gcon-badge-info { background: var(--info); color: #04181d; }
-
 
 /* ==========================================================
    GCON Operator Theme — Light/Dark Design System

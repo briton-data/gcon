@@ -421,9 +421,28 @@
                         <input type="text" id="receipts-search" class="form-control form-control-sm w-auto"
                                placeholder="Filter by receipt or job ID...">
                     </div>
+
+                    <div class="btn-group btn-group-sm mb-3 mx-3" id="receipts-verified-filter" role="group">
+                        <button type="button" class="btn btn-outline-light active" data-verified="">All</button>
+                        <button type="button" class="btn btn-outline-light" data-verified="true">Verified</button>
+                        <button type="button" class="btn btn-outline-light" data-verified="false">Unverified</button>
+                    </div>
+
                     <div class="gcon-panel-body">
                         <div class="gcon-receipt-grid" id="receipts-grid">
                             <div class="text-secondary text-center py-4">Loading receipts...</div>
+                        </div>
+
+                        <div class="d-flex justify-content-between align-items-center px-1 py-2 flex-wrap gap-2" id="receipts-pagination">
+                            <small class="text-secondary" id="receipts-page-info">--</small>
+                            <div class="btn-group btn-group-sm">
+                                <button type="button" class="btn btn-outline-light" id="receipts-prev-page">
+                                    <i class="bi bi-chevron-left"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-light" id="receipts-next-page">
+                                    <i class="bi bi-chevron-right"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1100,6 +1119,216 @@
                                 </thead>
                                 <tbody id="apikeys-body">
                                     <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Security & Keys -->
+            <div class="gcon-tab d-none" id="tab-security">
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-file-lock2 me-2"></i>HMAC Receipt-Signing Key</h5>
+                        <button class="btn btn-sm btn-outline-warning" id="security-rotate-hmac-btn">
+                            <i class="bi bi-arrow-repeat me-1"></i>Rotate Key
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <p class="text-secondary small mb-2">
+                            Rotating generates a new signing key immediately; the previous
+                            key is retired (not deleted) so receipts already issued keep
+                            verifying.
+                        </p>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Key ID</th><th>Created</th><th>Status</th></tr>
+                                </thead>
+                                <tbody id="security-hmac-body">
+                                    <tr><td colspan="3" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-patch-check-fill me-2"></i>mTLS Cluster CA</h5>
+                        <button class="btn btn-sm btn-outline-warning" id="security-rotate-ca-btn">
+                            <i class="bi bi-arrow-repeat me-1"></i>Rotate CA
+                        </button>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <p class="text-secondary small mb-2">
+                            Rotating replaces the CA that signs new node/coordinator
+                            certificates. Certificates already issued under the retired CA
+                            keep working during a grace period. This takes effect for new
+                            connections without restarting the coordinator.
+                        </p>
+                        <div class="mb-3">
+                            <span class="text-secondary small">Active CA fingerprint:</span>
+                            <code id="security-ca-fingerprint" class="d-block small">--</code>
+                        </div>
+                        <h6 class="text-secondary small text-uppercase mb-2">Retired CAs (still trusted)</h6>
+                        <div class="table-responsive mb-3">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Fingerprint</th><th>Retired</th></tr></thead>
+                                <tbody id="security-retired-ca-body">
+                                    <tr><td colspan="2" class="text-center text-secondary">None</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <h6 class="text-secondary small text-uppercase mb-2">Revoked Node Certificates</h6>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Node</th><th>Fingerprint</th><th>Reason</th><th>Revoked</th></tr></thead>
+                                <tbody id="security-revoked-body">
+                                    <tr><td colspan="4" class="text-center text-secondary">None</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Staking -->
+            <div class="gcon-tab d-none" id="tab-staking">
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Config</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="row g-3" id="staking-config-row">
+                            <div class="col-auto"><span class="text-secondary small">Enforcement:</span> <span id="staking-cfg-enabled">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Min stake required:</span> <span id="staking-cfg-min">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Slash fraction:</span> <span id="staking-cfg-slash">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Unbonding period:</span> <span id="staking-cfg-unbond">--</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-piggy-bank me-2"></i>Node Stakes</h5>
+                        <div class="d-flex gap-2">
+                            <input type="text" class="form-control form-control-sm" id="staking-bond-node-id" placeholder="node_id" style="width:140px;">
+                            <input type="number" class="form-control form-control-sm" id="staking-bond-amount" placeholder="amount" style="width:100px;">
+                            <button class="btn btn-sm btn-primary" id="staking-bond-btn">Bond</button>
+                            <button class="btn btn-sm btn-outline-light" id="staking-unbond-btn">Request Unbond</button>
+                        </div>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Node</th><th>Bonded</th><th>Unbonding</th><th>Slashed (total)</th><th>Meets Minimum</th></tr>
+                                </thead>
+                                <tbody id="staking-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-clock-history me-2"></i>Stake Events</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Node</th><th>Event</th><th>Amount</th><th>Reason</th><th>When</th></tr>
+                                </thead>
+                                <tbody id="staking-events-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Billing -->
+            <div class="gcon-tab d-none" id="tab-billing">
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-tags me-2"></i>Current Pricing</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="row g-3" id="billing-pricing-row">
+                            <div class="col-auto"><span class="text-secondary small">GPU-second:</span> <span id="billing-price-gpu">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">LLM input token:</span> <span id="billing-price-in">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">LLM output token:</span> <span id="billing-price-out">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Currency:</span> <span id="billing-price-currency">--</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-receipt me-2"></i>Invoices</h5>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <select class="form-select form-select-sm" id="billing-gen-org" style="width:160px;"></select>
+                            <input type="date" class="form-control form-control-sm" id="billing-gen-start" style="width:150px;">
+                            <input type="date" class="form-control form-control-sm" id="billing-gen-end" style="width:150px;">
+                            <button class="btn btn-sm btn-primary" id="billing-generate-btn">Generate Invoice</button>
+                        </div>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Invoice</th><th>Org</th><th>Period</th><th>Amount</th><th>Status</th><th>Action</th></tr>
+                                </thead>
+                                <tbody id="billing-invoices-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Webhooks -->
+            <div class="gcon-tab d-none" id="tab-webhooks">
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-broadcast me-2"></i>Subscriptions</h5>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <select class="form-select form-select-sm" id="webhooks-new-org" style="width:160px;"></select>
+                            <input type="text" class="form-control form-control-sm" id="webhooks-new-url" placeholder="https://..." style="width:220px;">
+                            <select class="form-select form-select-sm" id="webhooks-new-event" style="width:150px;">
+                                <option value="JOB_COMPLETED">JOB_COMPLETED</option>
+                                <option value="JOB_FAILED">JOB_FAILED</option>
+                                <option value="JOB_CANCELLED">JOB_CANCELLED</option>
+                            </select>
+                            <button class="btn btn-sm btn-primary" id="webhooks-create-btn">Add Subscription</button>
+                        </div>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div id="webhooks-reveal" class="alert alert-warning d-none"></div>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Org</th><th>URL</th><th>Events</th><th>Secret</th><th>Status</th><th>Action</th></tr>
+                                </thead>
+                                <tbody id="webhooks-subs-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-arrow-left-right me-2"></i>Recent Deliveries</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr><th>Event</th><th>Job</th><th>Status</th><th>Attempts</th><th>Response</th><th>Last Attempt</th></tr>
+                                </thead>
+                                <tbody id="webhooks-deliveries-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
