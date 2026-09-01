@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, Response, RedirectResponse
+from fastapi.responses import HTMLResponse, Response, RedirectResponse, JSONResponse
 from fastapi.encoders import jsonable_encoder
 from fastapi.templating import Jinja2Templates
 from fastapi import Request, Cookie, HTTPException, Depends
@@ -149,10 +149,38 @@ class WebServer:
         def jobs(
             status: str | None = None,
             limit: int | None = None,
+            offset: int = 0,
+            search: str | None = None,
             org_id: str | None = None,
+            paginate: bool = False,
             user=Depends(self.current_user),
         ):
+            # `paginate=true` switches this into real server-side
+            # pagination against full history (see PresentationLayer
+            # .get_jobs_page) instead of the older get_jobs()'s single
+            # bounded-limit shape -- an explicit flag rather than
+            # inferring it from which optional params are set, so
+            # "org_id filter, no search, page 1" can't accidentally
+            # fall through to the old unpaginated path. Default stays
+            # off so existing callers that just want "the most recent
+            # N jobs" (e.g. the Control Center's own loadJobs()) are
+            # completely unaffected: same request, same bare-array
+            # response, same behavior.
+            if paginate:
+                page_limit = limit or 50
+                items, total = self.presentation.get_jobs_page(
+                    status=status, search=search, org_id=org_id,
+                    limit=page_limit, offset=offset,
+                )
+                return JSONResponse(
+                    content=jsonable_encoder(items),
+                    headers={"X-Total-Count": str(total)},
+                )
             return self.presentation.get_jobs(status=status, limit=limit, org_id=org_id)
+
+        @self.app.get("/jobs/status-counts")
+        def jobs_status_counts(user=Depends(self.current_user)):
+            return self.presentation.get_job_status_counts()
 
         @self.app.get("/jobs/{job_id}")
         def job_detail(job_id: str, user=Depends(self.current_user)):
@@ -179,9 +207,35 @@ class WebServer:
 
         # ---- Explorer views ----
 
+        @self.app.get("/receipts-summary")
+        def receipts_summary(user=Depends(self.current_user)):
+            return self.presentation.get_receipts_summary()
+
         @self.app.get("/receipts")
-        def receipts(user=Depends(self.current_user)):
-            return self.presentation.get_receipts()
+        def receipts(
+            verified: str | None = None,
+            search: str | None = None,
+            limit: int = 50,
+            offset: int = 0,
+            user=Depends(self.current_user),
+        ):
+            # `verified` accepts "true"/"false" as query-string text
+            # (there's no bool query-param coercion without an
+            # explicit Query(...) annotation, and this stays simple
+            # rather than pulling that in for one param); anything
+            # else (unset, or literally "all") means no filter.
+            verified_filter = None
+            if verified == "true":
+                verified_filter = True
+            elif verified == "false":
+                verified_filter = False
+            items, total = self.presentation.get_receipts_page(
+                verified=verified_filter, search=search, limit=limit, offset=offset,
+            )
+            return JSONResponse(
+                content=jsonable_encoder(items),
+                headers={"X-Total-Count": str(total)},
+            )
 
         @self.app.get("/receipts/{receipt_id}")
         def receipt_detail(receipt_id: str, user=Depends(self.current_user)):
@@ -675,7 +729,135 @@ class WebServer:
         @self.app.post("/management/api-keys/{key_id}/regenerate")
         def mgmt_regenerate_api_key(key_id: str, user=Depends(self.require_permission("Manage API keys"))):
             return self.management.regenerate_api_key(key_id)
-        
+
+        # ---- Management: Key rotation (HMAC + mTLS) ----
+        # "Manage cluster" (not a new permission) gates rotation
+        # actions -- these are cluster-infra operations, same bar as
+        # the existing rediscover-nodes/clear-failed-jobs admin
+        # actions in api_v1/presentation.
+
+        @self.app.get("/management/keys")
+        def mgmt_key_status(user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.get_key_rotation_status()
+
+        @self.app.post("/management/keys/hmac/rotate")
+        def mgmt_rotate_hmac(user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.rotate_hmac_key()
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/keys/mtls/rotate-ca")
+        def mgmt_rotate_ca(user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.rotate_mtls_ca()
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/keys/mtls/revoke/{node_id}")
+        def mgmt_revoke_node_cert(node_id: str, payload: dict = None,
+                                   user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.revoke_node_certificate(
+                    node_id, reason=(payload or {}).get("reason", "")
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except FileNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        # ---- Management: Staking ----
+
+        @self.app.get("/management/staking")
+        def mgmt_staking(user=Depends(self.require_permission("View monitoring"))):
+            return {
+                "config": self.management.get_staking_config(),
+                "stakes": self.management.get_node_stakes(),
+            }
+
+        @self.app.get("/management/staking/events")
+        def mgmt_staking_events(node_id: str = None,
+                                 user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_stake_events(node_id=node_id)
+
+        @self.app.post("/management/staking/{node_id}/bond")
+        def mgmt_bond_stake(node_id: str, payload: dict,
+                             user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.bond_node_stake(node_id, payload["amount"])
+            except (ValueError, KeyError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/staking/{node_id}/unbond")
+        def mgmt_unbond_stake(node_id: str, payload: dict,
+                               user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.request_unbond_node_stake(node_id, payload["amount"])
+            except (ValueError, KeyError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        # ---- Management: Billing ----
+
+        @self.app.get("/management/billing/invoices")
+        def mgmt_invoices(org_id: str = None,
+                           user=Depends(self.require_permission("Access analytics"))):
+            return self.management.get_invoices(org_id=org_id)
+
+        @self.app.get("/management/billing/pricing")
+        def mgmt_pricing(user=Depends(self.require_permission("Access analytics"))):
+            return self.management.get_pricing()
+
+        @self.app.post("/management/billing/invoices/generate")
+        def mgmt_generate_invoice(payload: dict,
+                                   user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.generate_invoice_now(
+                    payload["org_id"], payload["period_start"], payload["period_end"],
+                )
+            except (ValueError, KeyError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/billing/invoices/{invoice_id}/finalize")
+        def mgmt_finalize_invoice(invoice_id: str,
+                                   user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.finalize_invoice_now(invoice_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        # ---- Management: Webhooks ----
+
+        @self.app.get("/management/webhooks")
+        def mgmt_webhooks(org_id: str = None,
+                           user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.get_webhook_subscriptions(org_id=org_id)
+
+        @self.app.post("/management/webhooks")
+        def mgmt_create_webhook(payload: dict,
+                                 user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.create_webhook_subscription(
+                    payload["org_id"], payload["url"], payload["event_types"],
+                )
+            except KeyError as e:
+                raise HTTPException(status_code=400, detail=f"Missing field: {e}")
+
+        @self.app.post("/management/webhooks/{subscription_id}/deactivate")
+        def mgmt_deactivate_webhook(subscription_id: str,
+                                     user=Depends(self.require_permission("Manage cluster"))):
+            self.management.deactivate_webhook_subscription(subscription_id)
+            return {"deactivated": subscription_id}
+
+        @self.app.get("/management/webhooks/deliveries")
+        def mgmt_webhook_deliveries(subscription_id: str = None,
+                                     user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.get_webhook_deliveries(subscription_id=subscription_id)
+
+        # ---- Management: HA / leader election status ----
+
+        @self.app.get("/management/ha-status")
+        def mgmt_ha_status(user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_ha_status()
 
         # ---- Management: Audit log & notifications ----
 

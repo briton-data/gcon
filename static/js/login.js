@@ -2,6 +2,19 @@ const emailInput = document.getElementById("login-email");
 const passwordInput = document.getElementById("login-password");
 const errorBox = document.getElementById("login-error");
 const submitBtn = document.getElementById("login-submit");
+const passwordToggle = document.getElementById("login-password-toggle");
+const passwordToggleIcon = document.getElementById("login-password-toggle-icon");
+
+if (passwordToggle) {
+    passwordToggle.addEventListener("click", () => {
+        const showing = passwordInput.type === "text";
+        passwordInput.type = showing ? "password" : "text";
+        passwordToggleIcon.classList.toggle("bi-eye-fill", showing);
+        passwordToggleIcon.classList.toggle("bi-eye-slash-fill", !showing);
+        passwordToggle.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+        passwordToggle.title = showing ? "Show password" : "Hide password";
+    });
+}
 
 async function doLogin() {
     errorBox.classList.add("d-none");
