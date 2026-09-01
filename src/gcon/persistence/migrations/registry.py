@@ -189,4 +189,152 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_jobs_org ON jobs (org_id)",
         ],
     ),
+    Migration(
+        version=3,
+        name="billing_staking_webhooks_ha_retention",
+        up_sql=[
+            # ------------------------------------------------- billing
+            # Invoices are generated from get_org_usage_summary() metering
+            # data (see gcon.billing.invoicing) -- this table stores the
+            # generated line items and status, not a payment integration
+            # itself. No card/bank data ever lands here; a real charge is
+            # made (or not) via gcon.billing.providers.PaymentProvider,
+            # referenced by provider + provider_charge_id once attempted.
+            """
+            CREATE TABLE invoices (
+                invoice_id          TEXT PRIMARY KEY,
+                org_id              TEXT NOT NULL,
+                period_start        TEXT NOT NULL,
+                period_end          TEXT NOT NULL,
+                currency            TEXT NOT NULL DEFAULT 'usd',
+                amount_cents        INTEGER NOT NULL DEFAULT 0,
+                status              TEXT NOT NULL DEFAULT 'draft',
+                provider            TEXT,
+                provider_charge_id  TEXT,
+                provider_error      TEXT,
+                created_at          TEXT NOT NULL,
+                finalized_at        TEXT,
+                paid_at             TEXT,
+                UNIQUE (org_id, period_start, period_end)
+            )
+            """,
+            "CREATE INDEX idx_invoices_org ON invoices (org_id)",
+            "CREATE INDEX idx_invoices_status ON invoices (status)",
+            """
+            CREATE TABLE invoice_line_items (
+                line_item_id   TEXT PRIMARY KEY,
+                invoice_id     TEXT NOT NULL REFERENCES invoices (invoice_id) ON DELETE CASCADE,
+                description    TEXT NOT NULL,
+                quantity       REAL NOT NULL,
+                unit           TEXT NOT NULL,
+                unit_price_cents INTEGER NOT NULL,
+                amount_cents   INTEGER NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_invoice_line_items_invoice ON invoice_line_items (invoice_id)",
+            # ------------------------------------------------- staking
+            # One bonded-deposit ledger row per node. Balances are GCON's
+            # own accounting units (see gcon.execution.staking module
+            # docstring) -- there is no on-chain token here, this is the
+            # scaffolding a real bonded-stake system would sit behind.
+            """
+            CREATE TABLE node_stakes (
+                node_id              TEXT PRIMARY KEY REFERENCES nodes (node_id) ON DELETE CASCADE,
+                bonded_amount        INTEGER NOT NULL DEFAULT 0,
+                unbonding_amount     INTEGER NOT NULL DEFAULT 0,
+                unbonding_release_at TEXT,
+                slashed_total        INTEGER NOT NULL DEFAULT 0,
+                updated_at           TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE stake_events (
+                event_id     TEXT PRIMARY KEY,
+                node_id      TEXT NOT NULL,
+                event_type   TEXT NOT NULL,
+                amount       INTEGER NOT NULL,
+                reason       TEXT,
+                job_id       TEXT,
+                receipt_id   TEXT,
+                created_at   TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_stake_events_node ON stake_events (node_id)",
+            "CREATE INDEX idx_stake_events_type ON stake_events (event_type)",
+            # ------------------------------------------------- webhooks
+            """
+            CREATE TABLE webhook_subscriptions (
+                subscription_id  TEXT PRIMARY KEY,
+                org_id           TEXT NOT NULL,
+                url              TEXT NOT NULL,
+                secret           TEXT NOT NULL,
+                event_types_json TEXT NOT NULL,
+                active           INTEGER NOT NULL DEFAULT 1,
+                created_at       TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_webhook_subscriptions_org ON webhook_subscriptions (org_id)",
+            """
+            CREATE TABLE webhook_deliveries (
+                delivery_id      TEXT PRIMARY KEY,
+                subscription_id  TEXT REFERENCES webhook_subscriptions (subscription_id) ON DELETE CASCADE,
+                org_id           TEXT,
+                url              TEXT NOT NULL,
+                secret           TEXT NOT NULL,
+                job_id           TEXT,
+                event_type       TEXT NOT NULL,
+                payload_json     TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'pending',
+                attempt_count    INTEGER NOT NULL DEFAULT 0,
+                response_code    INTEGER,
+                last_error       TEXT,
+                created_at       TEXT NOT NULL,
+                last_attempt_at  TEXT,
+                next_attempt_at  TEXT
+            )
+            """,
+            "CREATE INDEX idx_webhook_deliveries_status ON webhook_deliveries (status)",
+            "CREATE INDEX idx_webhook_deliveries_subscription ON webhook_deliveries (subscription_id)",
+            # A job can also register a one-off callback URL at submit
+            # time without a standing subscription (the common case for
+            # a single batch of jobs) -- see JobSubmitRequest.callback_url.
+            "ALTER TABLE jobs ADD COLUMN callback_url TEXT",
+            # --------------------------------------------- HA / failover
+            # Single shared row per lease name, contended by every
+            # coordinator process pointed at this same control-plane DB.
+            # SQLite's own locking (a write takes the one process-level
+            # RLock plus the file lock) makes acquisition atomic without
+            # needing a separate distributed-lock service. See
+            # gcon.cluster.leader_election.
+            """
+            CREATE TABLE coordinator_leases (
+                lease_name   TEXT PRIMARY KEY,
+                holder_id    TEXT NOT NULL,
+                term         INTEGER NOT NULL DEFAULT 0,
+                acquired_at  TEXT NOT NULL,
+                expires_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            )
+            """,
+        ],
+    ),
+    Migration(
+        version=4,
+        name="receipt_verification_and_uploaded_at_indexes",
+        up_sql=[
+            # The `verified` column has existed since the initial
+            # schema but was never actually written by anything --
+            # ReceiptRepository.mark_verified() had no caller, so it
+            # always sat at its DEFAULT 0. Coordinator._commit_receipt_
+            # verification now persists real results into it (see that
+            # method), which is what makes the two indexes below useful
+            # for real server-side filtering (WHERE verified = ?)
+            # instead of always false-negative-matching every row.
+            "CREATE INDEX idx_receipts_verified ON receipts (verified)",
+            # Backs ORDER BY uploaded_at DESC LIMIT ? OFFSET ? --
+            # ReceiptRepository.search_paginated's primary access
+            # pattern, and list_recent's before it.
+            "CREATE INDEX idx_receipts_uploaded_at ON receipts (uploaded_at)",
+        ],
+    ),
 ]

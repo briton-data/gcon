@@ -20,6 +20,10 @@ from gcon.persistence.repositories import (
     ClusterEventRepository,
     ExecutionLogRepository,
     SettingsRepository,
+    StakeRepository,
+    InvoiceRepository,
+    WebhookRepository,
+    LeaseRepository,
 )
 
 
@@ -36,6 +40,10 @@ class ControlPlane:
         self.cluster_events = ClusterEventRepository(self.db)
         self.execution_logs = ExecutionLogRepository(self.db)
         self.settings = SettingsRepository(self.db)
+        self.stakes = StakeRepository(self.db)
+        self.invoices = InvoiceRepository(self.db)
+        self.webhooks = WebhookRepository(self.db)
+        self.leases = LeaseRepository(self.db)
 
     def close(self) -> None:
         self.db.close()
