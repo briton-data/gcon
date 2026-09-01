@@ -13,11 +13,13 @@ available at /api/v1/docs (Swagger UI) and /api/v1/redoc, with the
 raw schema at /api/v1/openapi.json.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
+
+from gcon.cluster.coordinator import NotLeaderError
 
 
 # ---------------------------------------------------------------
@@ -57,6 +59,48 @@ class JobSubmitRequest(BaseModel):
     command: str = Field(..., description="Shell command the job will run")
     artifacts: Optional[List[str]] = Field(
         default=None, description="Optional list of file paths to register as artifacts"
+    )
+    kind: str = Field(
+        default="command",
+        description=(
+            "'command' (default -- plain, unstructured), 'resourced' "
+            "(adds `requires`, matched against node capabilities at "
+            "scheduling time), or 'staged' (adds `stages`, a "
+            "per-checkpoint progress-reporting contract)."
+        ),
+    )
+    requires: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "'resourced' jobs only: capability requirements matched "
+            "against each candidate node before dispatch, e.g. "
+            '{"gpu": true, "min_vram_gb": 12, "min_cpu_cores": 4}.'
+        ),
+    )
+    stages: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "'staged' jobs only, e.g. {\"expected\": 15}. GCON does not "
+            "run the stages itself -- the job's own code reports each "
+            "one via GCON_STAGE_REPORT_PATH; see docs."
+        ),
+    )
+    dataset_artifacts: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "IDs of artifacts already registered with this coordinator "
+            "(not filepaths) that this job declares as input data. "
+            "Folded into the receipt's input_hash at completion."
+        ),
+    )
+    callback_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "If set, GCON POSTs a signed JSON payload here when this "
+            "job reaches a terminal state (completed/failed/cancelled), "
+            "instead of requiring the submitter to poll. Body is signed "
+            "via HMAC-SHA256 in the X-GCON-Signature header."
+        ),
     )
 
 
@@ -308,9 +352,21 @@ def create_api_v1_app(management, presentation):
                 payload.artifacts,
                 created_by=owner.user_id if owner else None,
                 org_id=org_id,
+                kind=payload.kind,
+                requires=payload.requires,
+                stages=payload.stages,
+                dataset_artifacts=payload.dataset_artifacts,
+                callback_url=payload.callback_url,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except NotLeaderError as e:
+            # 503 (not 400/404): the request itself is fine, this
+            # coordinator process just isn't the one that should
+            # handle it right now -- a client/load-balancer should
+            # retry, ideally against the leader. See
+            # gcon.cluster.leader_election / GCONCoordinator.submit_job.
+            raise HTTPException(status_code=503, detail=str(e))
         return {"job_id": payload.job_id, "submitted": True}
 
     @app.post(
