@@ -264,23 +264,46 @@ def test_job_output_is_streamed_and_persisted(running_transport, tmp_path):
 
 
 # ----------------------------------------------------------------- receipts
-def test_receipt_uploaded_and_persisted(running_transport, tmp_path):
+def test_job_result_returned_over_transport(running_transport, tmp_path):
+    """
+    Receipt creation/signing/persistence is a GCONCoordinator
+    responsibility (ExecutionVerifier.create_receipt in
+    coordinator.py's _run_job, using a key that never leaves the
+    coordinator), not something the bare transport does on its own --
+    this test previously asserted the opposite (that a raw
+    transport.send_job() call, with no coordinator in the loop,
+    still resulted in a persisted receipt) because agent_daemon.py
+    used to independently generate and upload a second,
+    Ed25519-signed receipt via AgentDaemon._upload_receipt(). That
+    receipt used an incompatible scheme the coordinator's verifier
+    could never check, and because it was the only receipt ever
+    persisted for a remote job, it silently overwrote the correct one
+    on every coordinator restart -- every receipt in the dashboard
+    showed "Unverified" as a result. _upload_receipt() is no longer
+    called; this test now covers what this layer (GrpcTransport +
+    AgentDaemon, no coordinator) is actually responsible for: the
+    real JobResult coming back correctly. See test_coordinator.py /
+    the receipt-signing tests for end-to-end receipt verification
+    through the full coordinator.
+    """
     transport, address = running_transport
     cert_dir = transport.config.tls_cert_dir
 
     daemon = _start_agent("node-receipt-1", address, cert_dir, tmp_path)
     try:
         assert wait_until(lambda: "node-receipt-1" in transport.list_node_ids())
-        transport.send_job("node-receipt-1", "job-receipt-1", "echo receipt-test", timeout=15)
-
-        assert wait_until(
-            lambda: len(transport.control_plane.receipts.list_for_job("job-receipt-1")) > 0,
-            timeout=5,
+        response = transport.send_job(
+            "node-receipt-1", "job-receipt-1", "echo receipt-test", timeout=15
         )
-        receipts = transport.control_plane.receipts.list_for_job("job-receipt-1")
-        assert len(receipts) == 1
-        assert receipts[0]["payload"]["job_id"] == "job-receipt-1"
-        assert receipts[0]["receipt_hash"]
+
+        assert response["result"]["status"] == "success"
+        assert "receipt-test" in response["result"].get("stdout", "")
+
+        # No receipt is persisted here -- there is no coordinator in
+        # this test to create/sign/persist one (that only happens in
+        # GCONCoordinator._run_job). Confirms the bare transport no
+        # longer does this itself.
+        assert transport.control_plane.receipts.list_for_job("job-receipt-1") == []
     finally:
         daemon.stop()
 
