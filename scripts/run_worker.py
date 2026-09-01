@@ -112,6 +112,18 @@ def main():
     # in job receipts.
     gpu_info = agent.detect_gpu()
     capabilities = {"gpu": gpu_info.get("gpu_name", "Unknown GPU")}
+    # gpu_memory_total_mb / cpu_cores: real, already-collected numbers
+    # (detect_gpu() and os.cpu_count() respectively) that used to be
+    # measured and then simply discarded here -- Scheduler.select_node's
+    # `requires: {"min_vram_gb": ..., "min_cpu_cores": ...}` matching
+    # for "resourced" jobs needs these to actually have something to
+    # compare against. Only set gpu_memory_total_mb when a real GPU
+    # was detected (memory_total is legitimately 0/absent otherwise --
+    # never reported as a fabricated 0 that could pass a min_vram_gb
+    # check it shouldn't).
+    if gpu_info.get("memory_total"):
+        capabilities["gpu_memory_total_mb"] = str(gpu_info["memory_total"])
+    capabilities["cpu_cores"] = str(os.cpu_count() or 0)
     for item in args.capability:
         if "=" not in item:
             parser.error(f"--capability must be KEY=VALUE, got: {item}")

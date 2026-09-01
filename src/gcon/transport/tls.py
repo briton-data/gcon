@@ -82,11 +82,24 @@ def _new_key():
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def ensure_ca(cert_dir: str) -> CertPaths:
+def ensure_ca(cert_dir: str, common_name: str = "GCON Cluster CA") -> CertPaths:
     """Create (or reuse) a development/self-managed CA under
     `cert_dir`. Idempotent: if the CA already exists, it is reused
     rather than regenerated, so already-issued node certificates
-    stay valid."""
+    stay valid.
+
+    `common_name` defaults to a fixed string for backward
+    compatibility (every CA this function has ever generated used
+    it) -- but see `gcon.transport.tls_rotation.rotate_ca`, which
+    passes a distinguishing name for a freshly rotated CA. Two CAs
+    sharing an identical Subject Name in the same trust bundle is a
+    real problem, not just a cosmetic one: OpenSSL's path-building
+    picks a candidate issuer cert by subject-name match, so if a
+    retired and a current CA both answer to "GCON Cluster CA", it can
+    pick the wrong one to verify a given leaf's signature against and
+    fail handshakes for certs that are actually still validly signed
+    -- multi-CA rotation requires each generation to be
+    distinguishable this way."""
     os.makedirs(cert_dir, exist_ok=True)
     ca_key_path = os.path.join(cert_dir, CA_KEY_FILE)
     ca_cert_path = os.path.join(cert_dir, CA_CERT_FILE)
@@ -96,7 +109,7 @@ def ensure_ca(cert_dir: str) -> CertPaths:
 
     key = _new_key()
     subject = issuer = x509.Name(
-        [x509.NameAttribute(NameOID.COMMON_NAME, "GCON Cluster CA")]
+        [x509.NameAttribute(NameOID.COMMON_NAME, common_name)]
     )
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (

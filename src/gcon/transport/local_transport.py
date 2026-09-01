@@ -51,7 +51,14 @@ class LocalTransport(Transport):
         job_id: str,
         command: str,
         timeout: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        # `metadata` (staged-job stage-reporting) is accepted here only
+        # for interface parity with GrpcTransport -- it's a no-op on
+        # this path. The real stage-report polling lives in
+        # GCONAgent.execute_job()/AgentDaemon, reached over gRPC; an
+        # in-process `node` registered with LocalTransport has no
+        # equivalent wiring to receive it.
         node = self.get_node(node_id)
 
         result = node.execute_job(job_id, command, timeout=timeout)

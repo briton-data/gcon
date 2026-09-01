@@ -41,8 +41,12 @@ from typing import Any, Dict, List, Optional, Callable
 
 import grpc
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+
 from gcon.persistence.control_plane import ControlPlane
 from gcon.transport import tls
+from gcon.transport import tls_rotation
 from gcon.transport.config import TransportConfig
 from gcon.transport.errors import (
     JobDispatchTimeoutError,
@@ -184,6 +188,39 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 f"certificate identity '{peer_cn}' does not match claimed node_id "
                 f"'{request.node_id}'",
             )
+        # Application-level revocation check: the TLS handshake itself
+        # only proves this certificate chains to a CA we (still) trust,
+        # not that it hasn't since been individually revoked -- gRPC's
+        # Python SSL credentials have no CRL/OCSP support, so a revoked
+        # cert would otherwise keep authenticating successfully right
+        # up until the CA that signed it is itself rotated out of the
+        # trust bundle (a much coarser, slower control). See
+        # gcon.transport.tls_rotation.revoke_node_cert.
+        cert_der = context.auth_context().get("x509_pem_cert")
+        if cert_der and self.config is not None:
+            revoked = False
+            try:
+                pem_bytes = cert_der[0]
+                if isinstance(pem_bytes, str):
+                    pem_bytes = pem_bytes.encode()
+                fingerprint = x509.load_pem_x509_certificate(pem_bytes).fingerprint(hashes.SHA256()).hex()
+                revoked = tls_rotation.is_fingerprint_revoked(self.config.tls_cert_dir, fingerprint)
+            except Exception as e:
+                # Fail open on a revocation-check bug/misconfiguration --
+                # this is a defense-in-depth check on top of mTLS, not
+                # the only auth this RPC has; a bug here shouldn't turn
+                # into every legitimate node being unable to register.
+                # Deliberately outside the abort() call below: context
+                # .abort() raises its own internal exception to unwind
+                # the handler, which must NOT be caught here (it would
+                # otherwise get logged as if it were a check failure and
+                # swallowed, letting a revoked node register anyway).
+                logger.warning(f"revocation check failed for '{peer_cn}' (allowing): {e!r}")
+            if revoked:
+                context.abort(
+                    grpc.StatusCode.PERMISSION_DENIED,
+                    f"certificate for '{peer_cn}' has been revoked",
+                )
 
         session_token = uuid.uuid4().hex
         with self._lock:
@@ -446,10 +483,19 @@ class GrpcTransport(Transport):
             ],
         )
         pb_grpc.add_AgentControlServicer_to_server(self.servicer, self._server)
-        credentials = tls.load_server_credentials(
-            self.config.tls_cert_dir, hostname=self.config.grpc_host
+        hostname = (
+            self.config.grpc_host
             if self.config.grpc_host not in ("0.0.0.0", "")
-            else "localhost",
+            else "localhost"
+        )
+        # Dynamic (hot-reloadable) credentials, not the static
+        # tls.load_server_credentials -- so gcon.transport.tls_rotation
+        # .rotate_ca()/reissue_coordinator_cert() take effect for the
+        # next incoming connection without restarting this server. See
+        # tls_rotation's module docstring for exactly what "hot" does
+        # and doesn't cover here.
+        credentials = tls_rotation.load_dynamic_server_credentials(
+            self.config.tls_cert_dir, hostname=hostname,
         )
         bind_addr = f"{self.config.grpc_host}:{self.config.grpc_port}"
         actual_port = self._server.add_secure_port(bind_addr, credentials)
@@ -493,8 +539,15 @@ class GrpcTransport(Transport):
         ]
 
     def send_job(
-        self, node_id: str, job_id: str, command: str, timeout: Optional[float] = None
+        self,
+        node_id: str,
+        job_id: str,
+        command: str,
+        timeout: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        import json as _json
+
         session = self.get_node(node_id)
 
         request_message_id = new_message_id()
@@ -510,6 +563,7 @@ class GrpcTransport(Transport):
                     timeout_seconds=int(timeout) if timeout else 0,
                     request_message_id=request_message_id,
                     attempt_id=attempt["attempt_id"],
+                    metadata_json=_json.dumps(metadata) if metadata else "",
                 )
             )
         )

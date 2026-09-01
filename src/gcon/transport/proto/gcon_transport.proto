@@ -83,6 +83,15 @@ message JobAssign {
   int32 timeout_seconds = 3;   // 0 == no timeout
   string request_message_id = 4; // idempotency key for this dispatch
   string attempt_id = 5;         // durable job_attempts row for this dispatch
+  // JSON object carrying job-kind metadata the agent needs at
+  // execution time -- currently just {"kind": "staged", "stages":
+  // {"expected": N}} for staged jobs, so the agent knows to export
+  // GCON_STAGE_REPORT_PATH. Left "" for plain "command"/"resourced"
+  // jobs (resourced's `requires` is coordinator-only -- matched at
+  // scheduling time -- so it never needs to reach the agent at all).
+  // A JSON string, not new message fields, so future job-kind
+  // metadata doesn't require another proto/codegen round trip.
+  string metadata_json = 6;
 }
 
 message JobCancel {

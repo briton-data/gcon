@@ -54,7 +54,7 @@ class CommunicationManager:
         """
         return self.transport.list_node_ids()
 
-    def send_job(self, node_id, job_id, command, timeout=None):
+    def send_job(self, node_id, job_id, command, timeout=None, metadata=None):
         """
         Send a job to a registered node for execution.
 
@@ -65,8 +65,12 @@ class CommunicationManager:
                 regardless of what the caller intended -- a hung job
                 script would block the coordinator's per-job worker
                 thread (and the node it's "running" on) forever.
+            metadata: Job-kind metadata (see Transport.send_job) --
+                currently only used by staged jobs.
         """
-        return self.transport.send_job(node_id, job_id, command, timeout=timeout)
+        return self.transport.send_job(
+            node_id, job_id, command, timeout=timeout, metadata=metadata
+        )
 
     def cancel_job(self, node_id, job_id):
         """
