@@ -30,7 +30,8 @@ NOTIFICATION_TYPES = [
     "node_registered", "job_failed", "receipt_generated",
     "receipt_verification_failed", "receipt_verification_recovered",
     "health_degraded", "health_critical", "health_recovered",
-    "storage_warning",
+    "storage_warning", "node_stake_slashed", "webhook_delivery_failed",
+    "coordinator_became_leader", "coordinator_lost_leadership",
 ]
 
 SEVERITY_LEVELS = ["critical", "warning", "information", "security"]
@@ -48,10 +49,15 @@ TYPE_SEVERITY = {
     "receipt_generated": "information",
     "receipt_verification_failed": "critical",
     "receipt_verification_recovered": "information",
+    "policy_violation": "warning",
     "health_degraded": "warning",
     "health_critical": "critical",
     "health_recovered": "information",
     "storage_warning": "warning",
+    "node_stake_slashed": "critical",
+    "webhook_delivery_failed": "warning",
+    "coordinator_became_leader": "information",
+    "coordinator_lost_leadership": "warning",
 }
 
 # type -> category
@@ -67,10 +73,15 @@ TYPE_CATEGORY = {
     "receipt_generated": "receipt_verification",
     "receipt_verification_failed": "receipt_verification",
     "receipt_verification_recovered": "receipt_verification",
+    "policy_violation": "receipt_verification",
     "health_degraded": "cluster_events",
     "health_critical": "cluster_events",
     "health_recovered": "cluster_events",
     "storage_warning": "cluster_events",
+    "node_stake_slashed": "receipt_verification",
+    "webhook_delivery_failed": "cluster_events",
+    "coordinator_became_leader": "cluster_events",
+    "coordinator_lost_leadership": "cluster_events",
 }
 
 
