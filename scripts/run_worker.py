@@ -82,6 +82,18 @@ def main():
              "actual hostname (socket.gethostname()).",
     )
     parser.add_argument(
+        "--tls-sni-override",
+        default=os.environ.get("GCON_TLS_SNI_OVERRIDE"),
+        help="Override the hostname used for TLS SNI/certificate "
+             "verification (e.g. 'bore.pub') without changing "
+             "--coordinator. Needed when the coordinator is reached "
+             "through a proxy (e.g. Railway's TCP proxy) whose "
+             "hostname isn't in the server cert's SAN, but a name "
+             "that IS in the SAN still routes to it. Leave unset for "
+             "local/dev runs where --coordinator's host already "
+             "matches the cert.",
+    )
+    parser.add_argument(
         "--capability", action="append", default=[],
         metavar="KEY=VALUE",
         help="Repeatable, e.g. --capability ram_gb=128. Merged with the "
@@ -151,6 +163,7 @@ def main():
         agent=agent,
         hostname=args.hostname,
         capabilities=capabilities,
+        sni_override=args.tls_sni_override,
     )
 
     def handle_signal(signum, frame):

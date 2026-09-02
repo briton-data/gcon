@@ -55,12 +55,22 @@ class AgentDaemon:
         hostname: Optional[str] = None,
         capabilities: Optional[Dict[str, str]] = None,
         config: Optional[TransportConfig] = None,
+        sni_override: Optional[str] = None,
     ):
         self.node_id = node_id
         self.coordinator_address = coordinator_address
         self.cert_dir = cert_dir
         self.agent = agent or GCONAgent(node_id=node_id)
         self.hostname = hostname or socket.gethostname()
+        # Forces TLS SNI / hostname verification to a fixed name
+        # (e.g. "bore.pub") regardless of what host we actually dial
+        # -- needed when the coordinator sits behind a proxy whose
+        # real hostname (e.g. Railway's "caboose.proxy.rlwy.net")
+        # isn't in the server cert's SAN, but a name that IS in the
+        # SAN (bore.pub/localhost) still reaches it at the TCP layer.
+        # None (default) preserves the existing behavior of
+        # verifying against whatever host we actually resolved.
+        self.sni_override = sni_override
         self.capabilities = {k: str(v) for k, v in (capabilities or {}).items()}
         self.config = config or TransportConfig.load(control_plane=None)
 
@@ -150,10 +160,15 @@ class AgentDaemon:
             ("grpc.max_send_message_length", self.config.grpc_max_message_bytes),
             ("grpc.max_receive_message_length", self.config.grpc_max_message_bytes),
         ]
-        if original_host is not None:
-            # Keep TLS validating against the real hostname's cert
-            # identity even though we're dialing an IP literal.
-            options.append(("grpc.ssl_target_name_override", original_host))
+        # sni_override wins when set (e.g. "bore.pub" for a coordinator
+        # behind a proxy whose real hostname isn't in the cert's SAN);
+        # otherwise fall back to the previous behavior of validating
+        # against whatever host we actually resolved, so dialing an
+        # IP literal doesn't silently change what cert identity we
+        # check against.
+        sni_name = self.sni_override or original_host
+        if sni_name is not None:
+            options.append(("grpc.ssl_target_name_override", sni_name))
         channel = grpc.secure_channel(target, credentials, options=options)
         try:
             stub = pb_grpc.AgentControlStub(channel)
