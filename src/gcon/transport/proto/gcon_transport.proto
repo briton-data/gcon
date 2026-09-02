@@ -21,6 +21,21 @@ service AgentControl {
   // is already connected.
   rpc Register(RegisterRequest) returns (RegisterResponse);
 
+  // Self-enrollment: a worker with NO issued certificate yet sends a
+  // CSR it generated locally, plus a shared bootstrap token (an
+  // out-of-band secret distributed to every worker via provisioning
+  // -- NOT a per-node secret, and NOT the node's identity; the CSR's
+  // keypair is the identity). The coordinator validates the token,
+  // signs the CSR with its own CA, and returns the signed leaf cert
+  // plus the CA cert. Deliberately callable *without* an existing
+  // client certificate (this is the one RPC that must work before a
+  // worker has any cert to present) -- the token is what stands in
+  // for authentication on this single call. Idempotent per node_id:
+  // re-enrolling the same node_id with a valid token re-signs a
+  // fresh cert rather than erroring, so a worker that lost its local
+  // disk (reimaged VM, ephemeral container) can re-enroll cleanly.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
   // Long-lived, agent-initiated, bidirectional control channel.
   // Agent -> Coordinator: HEARTBEAT, JOB_RESULT, SHUTDOWN_NOTICE.
   // Coordinator -> Agent: JOB_ASSIGN, JOB_CANCEL, PING.
@@ -46,6 +61,19 @@ message RegisterResponse {
   string session_token = 2;
   int32 heartbeat_interval_seconds = 3;
   string reason = 4; // populated when accepted == false
+}
+
+message EnrollRequest {
+  string node_id = 1;
+  string enroll_token = 2;
+  bytes csr_pem = 3; // PEM-encoded CSR generated locally by the worker; private key never leaves it
+}
+
+message EnrollResponse {
+  bool accepted = 1;
+  string reason = 2;    // populated when accepted == false (bad token, CN mismatch, etc.)
+  bytes cert_pem = 3;   // signed leaf cert, CN == node_id
+  bytes ca_cert_pem = 4; // so the worker can build its trust root without any prior CA copy
 }
 
 // ---- Control stream envelopes -------------------------------------------

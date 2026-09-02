@@ -56,6 +56,8 @@ class AgentDaemon:
         capabilities: Optional[Dict[str, str]] = None,
         config: Optional[TransportConfig] = None,
         sni_override: Optional[str] = None,
+        enroll_token: Optional[str] = None,
+        enroll_address: Optional[str] = None,
     ):
         self.node_id = node_id
         self.coordinator_address = coordinator_address
@@ -71,6 +73,20 @@ class AgentDaemon:
         # None (default) preserves the existing behavior of
         # verifying against whatever host we actually resolved.
         self.sni_override = sni_override
+        # Shared bootstrap secret for first-boot self-enrollment (see
+        # _ensure_enrolled). Only ever used once per worker -- after
+        # a cert exists on disk it's never read again, so it's safe
+        # to bake the same value into every worker's provisioning
+        # image without that being a per-node secret.
+        self.enroll_token = enroll_token
+        # External host:port for the coordinator's plaintext enroll
+        # port (see GrpcTransport.start()'s second server) -- NOT the
+        # same as coordinator_address's port once behind something
+        # like Railway's TCP proxy, where each exposed internal port
+        # gets its own distinct external port/proxy. Falls back to
+        # coordinator_address only for the simple case (no proxy in
+        # front, internal port + 1 reachable directly).
+        self.enroll_address = enroll_address or coordinator_address
         self.capabilities = {k: str(v) for k, v in (capabilities or {}).items()}
         self.config = config or TransportConfig.load(control_plane=None)
 
@@ -142,7 +158,70 @@ class AgentDaemon:
         ipv4 = infos[0][4][0]
         return f"{ipv4}:{port}", host
 
+    def _ensure_enrolled(self) -> None:
+        """
+        First-boot self-enrollment: if this node has no cert on disk
+        yet, generate a keypair + CSR locally, send it to the
+        coordinator's unauthenticated Enroll RPC along with the
+        shared bootstrap token, and write back the signed cert + CA
+        cert it returns. No-ops immediately if a cert already exists
+        (every boot after the first) -- so this is safe to call
+        unconditionally on every startup, not just "first ever" ones.
+
+        Deliberately dials with grpc.insecure_channel for this one
+        call: this node has no CA cert yet to verify the coordinator
+        against, so there's nothing to pin TLS to on the very first
+        contact. Security here comes from `enroll_token` (must match
+        the coordinator's GCON_ENROLL_TOKEN) instead of transport
+        verification -- standard trust-on-first-use, same trust model
+        as e.g. SSH host keys on first connect. Every call after this
+        one uses full mTLS as normal, verified against the CA cert
+        this call just fetched and saved.
+        """
+        cert_path = os.path.join(self.cert_dir, f"agent-{self.node_id}.cert.pem")
+        ca_cert_path = os.path.join(self.cert_dir, tls.CA_CERT_FILE)
+        if os.path.exists(cert_path) and os.path.exists(ca_cert_path):
+            return  # already enrolled from a previous boot -- nothing to do
+
+        if not self.enroll_token:
+            raise RuntimeError(
+                f"No certificate found for node '{self.node_id}' in {self.cert_dir} "
+                "and no enroll_token was provided -- pass --enroll-token / set "
+                "GCON_ENROLL_TOKEN to self-enroll, or pre-provision a cert."
+            )
+
+        os.makedirs(self.cert_dir, exist_ok=True)
+        key_pem, csr_pem = tls.generate_agent_csr(self.node_id)
+
+        logger.info("No cert on disk for '%s' -- self-enrolling with coordinator at %s ...",
+                    self.node_id, self.enroll_address)
+        channel = grpc.insecure_channel(self.enroll_address)
+        try:
+            stub = pb_grpc.AgentControlStub(channel)
+            response = stub.Enroll(
+                pb.EnrollRequest(
+                    node_id=self.node_id, enroll_token=self.enroll_token, csr_pem=csr_pem,
+                ),
+                timeout=15,
+            )
+        finally:
+            channel.close()
+
+        if not response.accepted:
+            raise RuntimeError(f"Enrollment rejected by coordinator: {response.reason}")
+
+        key_path = os.path.join(self.cert_dir, f"agent-{self.node_id}.key.pem")
+        with open(key_path, "wb") as f:
+            f.write(key_pem)
+        os.chmod(key_path, 0o600)
+        with open(cert_path, "wb") as f:
+            f.write(response.cert_pem)
+        with open(ca_cert_path, "wb") as f:
+            f.write(response.ca_cert_pem)
+        logger.info("Enrolled '%s'; cert + CA saved to %s", self.node_id, self.cert_dir)
+
     def _connect_and_serve(self) -> None:
+        self._ensure_enrolled()
         credentials = tls.load_agent_channel_credentials(self.cert_dir, self.node_id)
         try:
             target, original_host = self._resolve_ipv4_target()
