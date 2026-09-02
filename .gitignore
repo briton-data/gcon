@@ -31,3 +31,6 @@ worker0*
 data/*.db
 data/*.db-shm
 data/*.db-wal
+certs-from-railway/
+certs-worker-*.tar.gz
+provisioned/
