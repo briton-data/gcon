@@ -36,6 +36,15 @@ class EventType:
 
     # Receipt Events
     RECEIPT_GENERATED = "RECEIPT_GENERATED"
+    POLICY_VIOLATION = "POLICY_VIOLATION"
+
+    # Replicated-Execution Verification Events
+    # Published when >=2 replicas of a verify-tagged job disagree
+    # (see gcon.execution.replication.compare_results) -- a distinct
+    # signal from POLICY_VIOLATION, since this is about whether the
+    # computation itself matches across independent nodes, not about
+    # a single node's own reported metrics breaching policy.json.
+    EXECUTION_DISPUTED = "EXECUTION_DISPUTED"
 
     # System Events
     CLUSTER_STARTED = "CLUSTER_STARTED"
@@ -47,3 +56,13 @@ class EventType:
     HEALTH_RECOVERED = "HEALTH_RECOVERED"
     RECEIPT_VERIFICATION_FAILED = "RECEIPT_VERIFICATION_FAILED"
     RECEIPT_VERIFICATION_RECOVERED = "RECEIPT_VERIFICATION_RECOVERED"
+
+    # Staking Events
+    NODE_STAKE_SLASHED = "NODE_STAKE_SLASHED"
+
+    # Webhook Events
+    WEBHOOK_DELIVERY_FAILED = "WEBHOOK_DELIVERY_FAILED"
+
+    # HA / Leader Election Events
+    COORDINATOR_BECAME_LEADER = "COORDINATOR_BECAME_LEADER"
+    COORDINATOR_LOST_LEADERSHIP = "COORDINATOR_LOST_LEADERSHIP"
