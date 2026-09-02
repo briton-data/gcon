@@ -268,6 +268,102 @@ def issue_dashboard_cert(
     )
 
 
+def generate_agent_csr(node_id: str):
+    """
+    Client-side, run on the worker itself: generates a fresh private
+    key and a CSR for it, entirely locally -- no CA access needed,
+    nothing to copy in. The private key never leaves this function's
+    caller (it's returned as PEM bytes for the caller to write to
+    disk itself; this module never transmits it). Pair with
+    `sign_agent_csr` on the coordinator side via the Enroll RPC.
+
+    Returns (private_key_pem_bytes, csr_pem_bytes).
+    """
+    key = _new_key()
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, node_id)]))
+        .sign(key, hashes.SHA256())
+    )
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    return key_pem, csr_pem
+
+
+def sign_agent_csr(cert_dir: str, csr_pem: bytes, node_id: str, days_valid: int = 825) -> bytes:
+    """
+    Server-side (coordinator, inside the Enroll RPC handler): signs a
+    worker-submitted CSR with the current CA. Deliberately does NOT
+    write anything to `cert_dir` for the agent -- an enrolled node's
+    cert lives on the worker's own disk, not the coordinator's; the
+    coordinator only needs its own CA (read here) to sign it.
+
+    Validates two things before signing, since this is reachable
+    without an existing client cert (see the Enroll RPC's docstring
+    in the .proto) and the enroll-token check alone doesn't protect
+    against a malformed or mismatched CSR:
+      - the CSR's own embedded signature is valid (proves the sender
+        actually holds the private key for the public key in it)
+      - the CSR's Subject CN matches the node_id claimed in the
+        request, so a caller can't submit a CSR for one identity
+        while claiming a different node_id in the RPC fields the
+        coordinator logs/keys off of
+
+    Raises ValueError on either check failing -- the Enroll handler
+    should catch this and return EnrollResponse(accepted=False,
+    reason=str(e)), not let it propagate as an RPC error.
+    """
+    csr = x509.load_pem_x509_csr(csr_pem)
+    if not csr.is_signature_valid:
+        raise ValueError("CSR signature is invalid")
+    cn_attrs = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if not cn_attrs or cn_attrs[0].value != node_id:
+        raise ValueError("CSR common name does not match claimed node_id")
+
+    ca = ensure_ca(cert_dir)
+    with open(ca.key_path, "rb") as f:
+        ca_key = serialization.load_pem_private_key(f.read(), password=None)
+    with open(ca.cert_path, "rb") as f:
+        ca_cert = x509.load_pem_x509_certificate(f.read())
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=days_valid))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(node_id)]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
 def issue_agent_cert(cert_dir: str, node_id: str) -> CertPaths:
     """
     The issued certificate's Common Name is the node_id. The

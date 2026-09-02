@@ -94,6 +94,26 @@ def main():
              "matches the cert.",
     )
     parser.add_argument(
+        "--enroll-token",
+        default=os.environ.get("GCON_ENROLL_TOKEN"),
+        help="Shared bootstrap secret for first-boot self-enrollment "
+             "(must match the coordinator's GCON_ENROLL_TOKEN). Only "
+             "used when --cert-dir has no cert yet for this node_id -- "
+             "ignored on every later run once a cert exists. The same "
+             "value is meant to be baked into every worker's "
+             "provisioning image; it is not a per-node secret.",
+    )
+    parser.add_argument(
+        "--enroll-address",
+        default=os.environ.get("GCON_ENROLL_ADDRESS"),
+        help="host:port for the coordinator's plaintext enroll port "
+             "(only used during first-boot self-enrollment). This is "
+             "NOT --coordinator's port -- behind a proxy like "
+             "Railway's, the enroll port is exposed as its own "
+             "separate external address. Defaults to --coordinator "
+             "if unset (fine for a direct, unproxied connection).",
+    )
+    parser.add_argument(
         "--capability", action="append", default=[],
         metavar="KEY=VALUE",
         help="Repeatable, e.g. --capability ram_gb=128. Merged with the "
@@ -164,6 +184,8 @@ def main():
         hostname=args.hostname,
         capabilities=capabilities,
         sni_override=args.tls_sni_override,
+        enroll_token=args.enroll_token,
+        enroll_address=args.enroll_address,
     )
 
     def handle_signal(signum, frame):

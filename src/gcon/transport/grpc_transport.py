@@ -31,7 +31,9 @@ itself opened, without polling.
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import secrets
 import threading
 import time
 import uuid
@@ -59,6 +61,13 @@ from gcon.transport.proto import gcon_transport_pb2 as pb
 from gcon.transport.proto import gcon_transport_pb2_grpc as pb_grpc
 
 logger = logging.getLogger(__name__)
+
+# The one shared bootstrap secret every worker's provisioning image
+# carries identically -- proves "allowed to enroll something", not
+# a per-node identity (the CSR's keypair is that). Rotate by
+# changing this env var + redeploying; already-enrolled workers are
+# unaffected since they never present this again after Enroll.
+_ENROLL_TOKEN = os.environ.get("GCON_ENROLL_TOKEN", "")
 
 
 def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
@@ -267,6 +276,34 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             heartbeat_interval_seconds=int(self.config.heartbeat_interval_seconds),
         )
 
+    # -------------------------------------------------------- self-enrollment
+    def Enroll(self, request, context):
+        """
+        Reachable with NO client certificate -- this is the one RPC
+        that must work before a worker has any cert to present (see
+        GrpcTransport.start()'s second, non-mTLS port, which is the
+        only port this actually needs to answer on). Security here
+        is the shared token, not TLS client identity.
+        """
+        if not _ENROLL_TOKEN or not secrets.compare_digest(request.enroll_token, _ENROLL_TOKEN):
+            return pb.EnrollResponse(accepted=False, reason="invalid or missing enroll token")
+        if not request.node_id:
+            return pb.EnrollResponse(accepted=False, reason="node_id is required")
+        try:
+            cert_pem = tls.sign_agent_csr(
+                self.config.tls_cert_dir, request.csr_pem, request.node_id,
+            )
+        except ValueError as e:
+            logger.warning("Enroll rejected for node_id=%s: %s", request.node_id, e)
+            return pb.EnrollResponse(accepted=False, reason=str(e))
+
+        ca_cert_path = os.path.join(self.config.tls_cert_dir, tls.CA_CERT_FILE)
+        with open(ca_cert_path, "rb") as f:
+            ca_cert_pem = f.read()
+
+        logger.info("Enrolled new node via CSR: node_id=%s", request.node_id)
+        return pb.EnrollResponse(accepted=True, cert_pem=cert_pem, ca_cert_pem=ca_cert_pem)
+
     # -------------------------------------------------------- control stream
     def Control(self, request_iterator, context):
         state = {"node_id": None, "session": None}
@@ -472,6 +509,7 @@ class GrpcTransport(Transport):
             on_node_registered=on_node_registered,
         )
         self._server: Optional[grpc.Server] = None
+        self._enroll_server: Optional[grpc.Server] = None
 
     # ---------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -501,6 +539,32 @@ class GrpcTransport(Transport):
         actual_port = self._server.add_secure_port(bind_addr, credentials)
         self._server.start()
         logger.info("GrpcTransport listening on %s (TLS, mTLS required)", bind_addr)
+
+        # Second, separate server: plaintext, same servicer, but only
+        # Enroll is actually usable here (every other handler
+        # immediately aborts via _peer_common_name(context) returning
+        # None -- see Register). This exists solely so a worker with
+        # no cert yet has *something* to dial; the shared enroll
+        # token is what gates Enroll itself. Skipped entirely if no
+        # token is configured, so an operator who hasn't opted into
+        # self-enrollment doesn't get an unauthenticated port opened
+        # on their coordinator for nothing.
+        if _ENROLL_TOKEN:
+            self._enroll_server = grpc.server(
+                futures.ThreadPoolExecutor(max_workers=4),
+            )
+            pb_grpc.add_AgentControlServicer_to_server(self.servicer, self._enroll_server)
+            enroll_port = getattr(self.config, "grpc_enroll_port", self.config.grpc_port + 1)
+            enroll_bind_addr = f"{self.config.grpc_host}:{enroll_port}"
+            self._enroll_server.add_insecure_port(enroll_bind_addr)
+            self._enroll_server.start()
+            logger.info(
+                "GrpcTransport enroll port listening on %s (plaintext, token-gated, Enroll only)",
+                enroll_bind_addr,
+            )
+        else:
+            logger.info("GCON_ENROLL_TOKEN not set -- self-enrollment port disabled")
+
         return actual_port
 
     def wait_for_termination(self, timeout: Optional[float] = None) -> None:
@@ -617,6 +681,8 @@ class GrpcTransport(Transport):
             session.close()
         if self._server is not None:
             self._server.stop(grace).wait()
+        if self._enroll_server is not None:
+            self._enroll_server.stop(grace).wait()
         # Extra bounded wait for each Control stream's own disconnect
         # bookkeeping (run on the server's request-handling threads,
         # not something server.stop().wait() strictly synchronizes on)
