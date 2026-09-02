@@ -195,7 +195,7 @@ There is **no** `DELETE /jobs/{job_id}` — cancellation is a `POST` to a
 
 #### `POST /jobs`
 
-**Request:**
+**Request (minimal):**
 ```json
 {
   "job_id": "my-job-001",
@@ -204,8 +204,43 @@ There is **no** `DELETE /jobs/{job_id}` — cancellation is a `POST` to a
 }
 ```
 `artifacts` is optional — a plain list of file paths to register, not a
-separate upload step. There is no `timeout_seconds` or `tags` field on
-this endpoint.
+separate upload step.
+
+**Request (full — every field `JobSubmitRequest` actually accepts):**
+```json
+{
+  "job_id": "my-job-001",
+  "command": "python train.py --epochs 10",
+  "artifacts": ["model.pkl"],
+  "kind": "resourced",
+  "requires": {"gpu": true, "min_vram_gb": 12, "min_cpu_cores": 4},
+  "stages": {"expected": 15},
+  "dataset_artifacts": ["artifact-id-already-registered"],
+  "callback_url": "https://example.com/gcon-webhook"
+}
+```
+- `kind`: `"command"` (default, unstructured), `"resourced"` (adds
+  `requires`, matched against node capabilities at scheduling time), or
+  `"staged"` (adds `stages`, a per-checkpoint progress contract the
+  job's own code reports via `GCON_STAGE_REPORT_PATH`).
+- `requires` / `stages`: only meaningful for their matching `kind`.
+- `dataset_artifacts`: IDs of artifacts *already registered* with this
+  coordinator (not filepaths) — folded into the receipt's `input_hash`
+  at completion.
+- `callback_url`: GCON POSTs a signed JSON payload here on completion/
+  failure/cancellation instead of requiring the submitter to poll (HMAC
+  signature in `X-GCON-Signature`).
+
+**Not exposed here:** `verify` (replicated-execution verification —
+dispatch to N nodes, compare results — see `docs/ARCHITECTURE.md`'s
+Already Built section) is a real, working parameter on
+`GCONCoordinator.submit_job()` at the Python level, but
+`JobSubmitRequest` doesn't have a matching field yet. A `POST /jobs` call
+today cannot request replicated verification — only direct
+`coordinator.submit_job(..., verify={...})` calls can. This is a real
+gap in the public API surface, not a deliberate design choice; worth
+knowing if you're building against `/api/v1` expecting parity with the
+Python API.
 
 **Response:**
 ```json
@@ -310,6 +345,16 @@ round-trip.
   }
 ]
 ```
+
+This is the summary list only. Detail fields that exist on a receipt —
+`attested_node_id` (mTLS-verified node identity, if any), the full signed
+`proof`, and (for `verify=`-tagged jobs, Python-API-only today — see
+`POST /jobs` above) `execution_proof`/`replicas` — are not included here
+and have no dedicated public-API route to fetch them by id (see the note
+at the top of this section). They're only reachable today via the
+dashboard's session-authenticated Receipt Inspector, or by calling
+`coordinator.get_receipt_detail()` directly if you're working inside the
+same process.
 
 #### `GET /artifacts`
 
@@ -421,7 +466,9 @@ There is no server-side `/receipts/{id}/verify` endpoint. Receipts are
 checked against their signed proof directly. The coordinator itself
 recomputes `verified` live via `ExecutionVerifier.validate_proof()` on
 every call to `get_receipts()` (so the dashboard and `GET /receipts` can
-never show a stale flag). Standalone, without a running coordinator:
+never show a stale flag) — there is no stored `verified` field anywhere
+in a receipt; a signature is always re-checked, never trusted from
+storage. Standalone, without a running coordinator:
 
 ```python
 from gcon.execution.run_job import JobRunner
@@ -436,6 +483,18 @@ codebase — `gcon.execution.verifier.ExecutionVerifier` for locally-run,
 single-agent job receipts (`JobRunner`), and the coordinator's own
 verifier in `gcon.cluster.coordinator` for HMAC-signed, cluster-issued
 receipts. Don't assume one substitutes for the other.
+
+**Important distinction:** in both paths, the signature is created by
+whichever process calls `create_receipt()` (the coordinator, in the
+cluster path) — not by the worker node that actually ran the job. A
+valid signature proves the record hasn't been tampered with since that
+process signed it; it does not, by itself, independently prove the node
+that reported the underlying result was telling the truth. See
+`docs/ARCHITECTURE.md`'s Security Model for the full picture, including
+`attested_node_id` (binds a receipt to the coordinator's own record of
+an mTLS-verified node identity — real, but still coordinator-vouched, not
+node-signed) and replicated-execution verification (`verify=`, adds
+independent cross-node agreement evidence, Python API only today).
 
 ---
 

@@ -68,8 +68,7 @@ GCON (Decentralized Verified GPU Compute Network) is designed to enable verifiab
     "proof": {
       "gpu": "RTX 4090",
       "runtime_seconds": 120.5,
-      "signature": "9e7d3c...",
-      "verified": true
+      "signature": "9e7d3c..."
     }
   }
 │                                                                   │
@@ -194,12 +193,20 @@ class ExecutionMetrics:
     "input_hash": "sha256_hash",
     "output_hash": "sha256_hash",
     "timestamp": "ISO_8601_timestamp",
-    "signature": "HMAC_signature",
-    "verified": true
+    "key_id": "which HmacKeyring key signed this, if rotation is in use",
+    "attested_node_id": "mTLS-authenticated node identity, only present when the coordinator has one on file for this node (see docs/TRANSPORT_AND_PERSISTENCE.md) -- omitted entirely otherwise, not null",
+    "signature": "HMAC_signature"
   },
   "issued_at": "ISO_8601_timestamp"
 }
 ```
+There is no `verified` field stored anywhere in this structure — a
+receipt's validity is always computed live via
+`ExecutionVerifier.validate_proof(receipt["proof"])`, never read off a
+stored value. A replicated job's receipt additionally carries a sibling
+`execution_proof` field alongside `proof` (not inside the signed payload
+— see the redundancy note above); that's specific to
+`verify=`-tagged jobs and absent otherwise.
 
 ## Security Model
 
@@ -222,18 +229,56 @@ class ExecutionMetrics:
    - SHA256 hashing of all outputs
    - Enables customer to verify output wasn't modified
 
-2. **HMAC Signatures**
-   - HMAC-SHA256 of proof data
-   - Uses provider's secret key
-   - Enables signature verification
+2. **HMAC Signatures — coordinator-signed, not node-signed**
+   - HMAC-SHA256 of proof data, using a coordinator-held key
+     (`gcon.execution.hmac_keyring.HmacKeyring`, rotation-capable,
+     persisted outside version control — see the module docstring; a
+     genuinely random key is generated per deployment, never a
+     hardcoded default)
+   - **Important distinction, easy to get wrong reading this doc
+     alone:** the signature is created by the *coordinator*
+     (`GCONCoordinator.verifier`, one instance, one key), not by the
+     worker node that actually ran the job. It proves "the coordinator
+     recorded this," not "node X cryptographically attests to this" —
+     a compromised or dishonest agent can report fabricated results and
+     the coordinator will sign them, because nothing here independently
+     verifies the *content* the agent reported.
+   - What partially closes that gap today: **node-attested receipts**
+     (`attested_node_id`, added to the signed payload when the
+     coordinator has a real mTLS-authenticated identity on file for
+     that node — see `docs/TRANSPORT_AND_PERSISTENCE.md`). This proves
+     the result arrived over a connection the coordinator's transport
+     layer cryptographically authenticated as that specific node's
+     certificate, which is real evidence, but it's still the
+     coordinator vouching for that fact via its own key — not the node
+     independently signing with its own. True per-node non-repudiation
+     (the node's own key signs its own result, checkable by a third
+     party without trusting the coordinator's key custody) is not built
+     — see [Future Enhancements](#future-enhancements).
+   - A previous version of `generate_execution_proof()` also stored a
+     static `"verified": true` field on every proof, unconditionally, at
+     creation time, before any check had run. It's gone — real
+     verification is always `ExecutionVerifier.validate_proof()`,
+     recomputed live, never read from a stored field.
+   - **Redundancy as a separate, additive check:** replicated-execution
+     verification (see [Already Built](#already-built-not-future-anymore))
+     is a different mechanism from either of the above — it doesn't
+     strengthen any individual signature, it adds independent evidence
+     by comparing N separately-dispatched nodes' results. Its own honest
+     limit: agreement between colluding or commonly-compromised nodes
+     would still look like agreement.
 
-3. **Hardware Attestation** (Future)
+3. **Hardware Attestation (Future)**
    - GPU hardware identification
    - Hardware capability verification
    - Attestation from trusted hardware sources
+   - (Node-attested receipts, above, are a real but different thing —
+     transport-identity attestation, not hardware attestation)
 
 4. **Timestamp Validation**
-   - Receipts must be recent (< 24 hours)
+   - Receipts must be recent (< 24 hours) — `validate_proof()` rejects
+     an otherwise-valid signature if the proof's timestamp is older
+     than that
    - Prevents replay attacks
    - Enables temporal verification
 
@@ -299,6 +344,12 @@ receipt_manager.save_receipt(receipt)
 ```
 
 ### Step 6: Receipt Return to Customer
+
+This `verified` is the live result of calling `validate_proof()` at
+response time — computed fresh, not read from anywhere inside the
+receipt itself (see the correction under
+[Security Mechanisms](#security-mechanisms) above):
+
 ```json
 {
   "verified": true,
@@ -309,63 +360,81 @@ receipt_manager.save_receipt(receipt)
 
 ## Known Limitations
 
-### Single Point of Failure: One Coordinator Process
+### Coordinator High Availability: Real, Opt-In, With Real Caveats
 
-GCON currently runs exactly one `GCONCoordinator` process per cluster.
-This is a deliberate scope boundary, not an oversight -- multi-
-coordinator support is tracked as future work (see below), and
-nothing in this section should be read as a plan to add it
-incidentally as part of other changes.
+**This section previously said GCON runs exactly one `GCONCoordinator`
+process with no leader election, "not implemented yet." That's no
+longer accurate** — `gcon.cluster.leader_election.LeaderElector` and
+`scripts/run_coordinator.py --ha` are real, built, and covered in detail
+in **[docs/FAILOVER.md](FAILOVER.md)**. Read that document for the full
+picture (what it gives you, what it explicitly doesn't, how failover
+actually plays out). Summary for this page:
 
-**Assumptions baked into the current design that only hold with one
-Coordinator:**
-- `NodeRegistry`, `Scheduler`, and the in-memory job queue all live
-  in one process's memory. There is no shared/replicated state store
-  between Coordinators, because there is only ever one.
-- Agents dial (or are dialed by) a single, fixed Coordinator address
-  (`grpc_host`/`grpc_port` in `TransportConfig`). There is no
-  discovery mechanism for a second Coordinator or for failing over
-  to one.
-- The control-plane database (`gcon.persistence`) is written to by
-  one Coordinator process at a time; nothing enforces mutual
-  exclusion because nothing else is expected to write to it
-  concurrently.
+- **Default (no `--ha`):** exactly one coordinator process, as originally
+  described below — this default behavior is unchanged.
+- **With `--ha`:** N coordinator processes share one control-plane
+  database; a SQLite-backed lease (`coordinator_leases` table) determines
+  which one is active. The active one runs the gRPC transport and
+  dispatches jobs; standbys block (see FAILOVER.md's operational notes —
+  a standby doesn't even serve read-only queries today, contrary to what
+  you might assume). Failover is lease-expiry-based, not consensus-based:
+  there's a real, bounded gap (up to the lease TTL, default 10s) between
+  a leader dying and a standby taking over, and it's active-passive, not
+  active-active.
 
-**If the Coordinator process crashes:**
+**What the original "if the Coordinator process crashes" behavior below
+still describes accurately, `--ha` or not:**
+- In-flight job recovery on restart/failover is the same
+  `restore_from_persistence` path either way — HA doesn't add new
+  recovery logic, it just gets a new process to run that same path
+  sooner (once it acquires the lease) instead of waiting for a human to
+  restart the one coordinator by hand.
+- No VIP/load-balancer/DNS failover is included — after a failover,
+  something (you) still needs to point agents/dashboard users at the new
+  leader's address. See FAILOVER.md.
+
+**Assumptions baked into the current design that hold regardless of
+`--ha`:**
+- `NodeRegistry`, `Scheduler`, and the in-memory job queue all live in
+  one process's memory *at a time* — with `--ha`, that's the current
+  leader's memory; a promoted standby starts these fresh, not by
+  inheriting the previous leader's live state (there is no live-state
+  handoff, only durable-DB continuity).
+- Agents dial a single, fixed coordinator gRPC address at a time. There
+  is no client-side multi-address failover in `AgentDaemon` — if the
+  leader changes, agents need to be pointed at the new address by
+  something outside GCON (see FAILOVER.md's VIP/LB note).
+
+**If the (leading, or only) Coordinator process crashes:**
 - All *live* scheduling state is lost: `NodeRegistry`'s connected-node
-  map, in-flight job assignments, and any node the scheduler
-  considered "busy". Agents' gRPC streams drop.
+  map, in-flight job assignments, and any node the scheduler considered
+  "busy". Agents' gRPC streams drop.
 - Jobs that were mid-execution on an agent are not automatically
-  recovered or resubmitted. They finish on the agent (if the agent
-  is still running) but the Coordinator has no record of that until
-  it restarts.
-- **What continues functioning:** agents keep any job they're
-  actively executing until it exits, since job execution runs on the
-  agent, not the Coordinator. The control-plane database is
-  untouched (data is not lost, just not being written to).
-- **What stops functioning:** new job submission, scheduling, node
-  registration/heartbeat processing, the dashboard and `/api/v1`
-  (both depend on a running Coordinator process), and any
-  in-progress WebSocket push to the dashboard.
-- **On restart:** the Coordinator reloads durable node/job/receipt
-  records from the control-plane database
-  (`restore_from_persistence`), but *live* connections are not
-  restored automatically -- agents must reconnect and re-register
-  (`register_agent`) before they show up as live nodes again.
+  recovered or resubmitted by the crashed process (obviously), but *are*
+  reconciled by whichever process (the same one restarted, or a new
+  leader under `--ha`) next calls `restore_from_persistence`.
+- **What continues functioning:** agents keep any job they're actively
+  executing until it exits, since job execution runs on the agent, not
+  the Coordinator. The control-plane database is untouched.
+- **What stops functioning until a coordinator is leading again:** new
+  job submission, scheduling, node registration/heartbeat processing,
+  the dashboard and `/api/v1`, and any in-progress WebSocket push.
+- **On the next coordinator to lead:** it reloads durable node/job/
+  receipt records from the control-plane database
+  (`restore_from_persistence`), but *live* connections are not restored
+  automatically — agents must reconnect and re-register (`register_agent`)
+  before they show up as live nodes again.
 
-**Explicitly out of scope today:**
-- No leader election (e.g. Raft, etcd-style lease) between
-  Coordinator instances.
-- No distributed consensus on cluster state -- state is whatever one
-  process's memory + database says it is.
-- No automatic failover: recovering from a crashed Coordinator is a
-  manual operational step (restart the process; agents reconnect).
-
-**Planned future direction:** HA Coordinator support (multiple
-Coordinator processes with leader election and either a shared
-state store or consensus-replicated `NodeRegistry`/scheduler state)
-is a known gap, not a rejected idea -- it is simply not implemented
-yet.
+**Still genuinely not built** (see FAILOVER.md for the fully detailed
+version of each):
+- Consensus-based election (Raft/etcd-style) — this is lease-based.
+- A distributed (non-SQLite-file) control-plane database for real
+  cross-host HA — see `docs/TRANSPORT_AND_PERSISTENCE.md`'s SQLite →
+  PostgreSQL migration path for what would close this.
+- VIP/load-balancer/DNS integration, or client-side agent failover.
+- A standby serving read-only dashboard/API traffic (the code path could
+  support it; `run_coordinator.py`'s current wiring doesn't call it that
+  way today).
 
 ## Scalability Considerations
 
@@ -394,8 +463,45 @@ Enhancements," which was no longer accurate:
 - **Coordinator + agent fleet** (`gcon.cluster.coordinator`,
   `gcon.transport`) — mTLS gRPC transport, node registry, scheduler, job
   recovery/restart from the control-plane database on coordinator
-  restart. See [Known Limitations](#known-limitations) above for the
-  single-coordinator constraint this still has.
+  restart.
+- **Coordinator high availability** (`gcon.cluster.leader_election`,
+  `scripts/run_coordinator.py --ha`) — lease-based failover across
+  multiple coordinator processes sharing one control-plane database. See
+  [docs/FAILOVER.md](FAILOVER.md) for what this does and does not cover;
+  it replaces the single-coordinator-only assumption in
+  [Known Limitations](#known-limitations) above when opted into, though
+  that section's caveats (bounded failover gap, no VIP/LB, active-passive
+  only) still apply.
+- **Replicated-execution verification** (`gcon.execution.replication`,
+  `submit_job(verify={"replicas": N, "tolerance": ...})`) — dispatches a
+  job to N independently-selected nodes and compares their results for
+  agreement, with each replica keeping its own independently
+  HMAC-signed receipt (`self.replica_receipts`). Surfaced in the
+  dashboard's Receipt Inspector as a "Replicated Execution" panel
+  (witnesses, agreement, max deviation, mismatches). Not yet exposed via
+  the public `/api/v1` — `POST /jobs`'s `JobSubmitRequest` model doesn't
+  have a `verify` field yet; only reachable through
+  `GCONCoordinator.submit_job()` directly. See
+  [Security Model](#security-model) below for what this mechanism does
+  and does not prove.
+- **Node-attested receipts** — a receipt's signed payload can carry
+  `attested_node_id`: the mTLS-authenticated identity
+  (`NodeRepository.auth_fingerprint`, set only after
+  `grpc_transport.py`'s `Register` handler verifies it against the
+  claimed `node_id`) the coordinator has on file for that node.
+  `ExecutionVerifier.create_receipt` refuses to sign — raises, doesn't
+  silently proceed — if the claimed and attested identities disagree.
+  This is real but partial hardware/node attestation, distinct from the
+  "Hardware Attestation (Future)" item below — see
+  [Security Model](#security-model).
+- **Autoscaling** (`gcon.cluster.autoscaler.AutoScaler`) — opt-in
+  (`GCON_AUTOSCALE_ENABLED=1`) periodic loop comparing pending jobs to
+  idle nodes; only capable of creating real dispatchable nodes under
+  `LocalTransport` (in-process/dev), since provisioning a real new
+  worker process under a network transport is explicitly not
+  implemented (`AutoScaler.scale_up` raises rather than registering a
+  node that can't actually receive work). Manual scale up/down via the
+  dashboard shares the same `AutoScaler` instance as the automatic loop.
 - **REST API** — versioned, API-key-authenticated `/api/v1` (see
   [docs/API.md](API.md)), plus a Python SDK (`gcon_sdk`).
 - **WebSocket real-time monitoring** — `/ws` on the dashboard, pushing
@@ -410,9 +516,14 @@ Enhancements," which was no longer accurate:
 
 Genuinely not built yet, as of this doc:
 
-1. **HA Coordinator** — leader election / consensus-replicated cluster
-   state across multiple Coordinator processes (see
-   [Known Limitations](#known-limitations)).
+1. **Cross-host coordinator HA** — the `--ha` lease election in
+   [docs/FAILOVER.md](FAILOVER.md) is real, but it's backed by a single
+   SQLite file; safe multi-process HA on one host, not yet safe
+   multi-host HA (SQLite's network-filesystem locking isn't reliable
+   enough to build that on top of as-is). Needs the Postgres dialect
+   (see `docs/TRANSPORT_AND_PERSISTENCE.md`) wired all the way through.
+   Also missing: VIP/load-balancer integration, client-side agent
+   failover, and a standby actually serving read-only traffic.
 
 2. **Container Support**
    - Docker/Singularity job execution (job commands run as subprocesses
@@ -420,9 +531,17 @@ Genuinely not built yet, as of this doc:
    - Reproducible execution environments
 
 3. **Advanced Verification**
-   - Zero-knowledge proofs
-   - Hardware attestation (TPM/SGX)
-   - Trusted execution environments
+   - Zero-knowledge proofs of correct execution (ruled out for now as
+     impractical for real training workloads — proving overhead and the
+     floating-point/finite-field mismatch, not just "not gotten to yet")
+   - Full hardware attestation (TPM/SGX/confidential-computing GPU
+     modes) — distinct from the node-attested receipts already built
+     (see [Already Built](#already-built-not-future-anymore) above),
+     which bind a receipt to the coordinator's own record of an mTLS
+     identity, not to a hardware root of trust
+   - True per-node non-repudiation: every receipt today is signed by the
+     coordinator's own HMAC key, not by the executing node's own key —
+     see [Security Model](#security-model)'s note on this
 
 4. **Performance**
    - Multi-GPU support

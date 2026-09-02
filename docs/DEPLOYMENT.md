@@ -11,10 +11,11 @@ Production-ready deployment instructions for GCON clusters.
 3. [Standalone Server Deployment](#standalone-server-deployment)
 4. [Docker Deployment](#docker-deployment)
 5. [Multi-Node Cluster](#multi-node-cluster)
-6. [Security Hardening](#security-hardening)
-7. [Monitoring & Observability](#monitoring--observability)
-8. [Troubleshooting](#troubleshooting)
-9. [Operations Runbooks](#operations-runbooks)
+6. [High Availability](#high-availability)
+7. [Security Hardening](#security-hardening)
+8. [Monitoring & Observability](#monitoring--observability)
+9. [Troubleshooting](#troubleshooting)
+10. [Operations Runbooks](#operations-runbooks)
 
 ---
 
@@ -146,11 +147,13 @@ These are the real settings read by `gcon.transport.config.TransportConfig`
 (the gRPC/agent side) and documented in `scripts/run_coordinator.py`'s own
 docstring (the dashboard/API side). There is no S3 or Postgres storage
 backend — persistence is SQLite via `gcon.persistence.control_plane`
-(`data/gcon_control_plane.db`), matching the "Single coordinator,
-SQLite-backed, no HA/failover yet" status the README calls out. Env vars
-override the `settings` table in that database, which overrides hardcoded
-defaults — see `TransportConfig`'s docstring for the full precedence
-rule.
+(`data/gcon_control_plane.db`). Single-coordinator is still the default;
+`--ha` opts into lease-based multi-coordinator failover on the same
+SQLite file — see [High Availability](#high-availability) below and
+[docs/FAILOVER.md](FAILOVER.md) for what that does and doesn't cover.
+Env vars override the `settings` table in that database, which overrides
+hardcoded defaults — see `TransportConfig`'s docstring for the full
+precedence rule.
 
 ```bash
 # gRPC transport (coordinator <-> agents, mTLS) — see gcon.transport.config
@@ -443,18 +446,71 @@ have. Persistence is exclusively local SQLite, via
 - `data/gcon_control_plane.db` — settings, API keys, users, audit log
 
 Both use SQLite's WAL mode (you'll see matching `-shm`/`-wal` files next
-to each `.db`). This is exactly what the README's status section already
-flags: **single coordinator, SQLite-backed, no HA/failover yet.** For a
-production deployment today, that means:
+to each `.db`). Default deployment is still single coordinator,
+SQLite-backed. `--ha` (see [High Availability](#high-availability) below)
+lets multiple coordinator processes share this same database file with
+lease-based failover — but that's safe for multiple processes on **one
+host**, not verified-safe across hosts over a network filesystem (SQLite's
+locking guarantees there are unreliable) — see
+[docs/FAILOVER.md](FAILOVER.md)'s operational notes for the honest
+version of this. For a production deployment today, that still means:
 
 - `data/` and `keys/`/`certs/` must live on durable, backed-up storage
   (see [Backup and Restore](#backup-and-restore) below) — there is no
   built-in replication.
-- Running two coordinators against the same `data/` directory is not a
-  supported HA setup; SQLite isn't a multi-writer network database.
-- If you need a different storage backend, that's a real gap to file an
-  issue/PR against — don't configure env vars for a backend that isn't
-  wired up, since GCON will silently ignore them and keep using SQLite.
+- Running coordinators against the same `data/` directory **across
+  different hosts** is not a supported HA setup — SQLite isn't a
+  multi-writer network database. Same-host, multiple processes (e.g. a
+  supervisor keeping two `--ha` processes running so one can restart
+  without a full outage) is the supported case.
+- If you need a different storage backend for real cross-host HA, that's
+  a real gap — the Postgres dialect exists in the schema/migration
+  design (see `docs/TRANSPORT_AND_PERSISTENCE.md`) but isn't fully wired
+  through yet. Don't configure env vars for a backend that isn't wired
+  up; GCON will silently ignore them and keep using SQLite.
+
+---
+
+## High Availability
+
+Full detail, honest limitations, and how failover actually plays out:
+**[docs/FAILOVER.md](FAILOVER.md)**. Quick version for a same-host
+supervised setup:
+
+```bash
+# Two coordinator processes, same host, same DB file, under a supervisor
+# that restarts either one if it dies (systemd shown below).
+
+# /etc/systemd/system/gcon-coordinator-a.service
+[Service]
+ExecStart=/opt/gcon/venv/bin/python scripts/run_coordinator.py \
+  --ha --coordinator-id coord-a --db /opt/gcon/data/gcon_control_plane.db
+Restart=on-failure
+RestartSec=5
+
+# /etc/systemd/system/gcon-coordinator-b.service
+[Service]
+ExecStart=/opt/gcon/venv/bin/python scripts/run_coordinator.py \
+  --ha --coordinator-id coord-b --db /opt/gcon/data/gcon_control_plane.db
+Restart=on-failure
+RestartSec=5
+```
+
+Whichever starts first (or is currently leading after a previous
+failover) serves traffic; the other blocks as standby. Check who's
+currently leading:
+
+```bash
+sqlite3 /opt/gcon/data/gcon_control_plane.db \
+  "SELECT holder_id, term, expires_at FROM coordinator_leases WHERE lease_name = 'coordinator-leader';"
+```
+
+Read [docs/FAILOVER.md](FAILOVER.md) before relying on this in
+production — in particular: this is same-host only (not safe across
+hosts on the current SQLite backend), there's no VIP/load-balancer
+wiring included (you still need to point agents at whichever process is
+leading after a failover), and a standby doesn't serve read-only
+dashboard/API traffic today, it's fully passive until it wins the lease.
 
 ---
 
@@ -485,36 +541,75 @@ sudo systemctl restart nginx
 
 ### 2. Cryptographic Keys
 
-**Coordinator Key:**
+**This section previously described generating standalone RSA keypairs
+by hand with `openssl` and distributing public keys "via config
+management." That's not how the real system works — rewritten against
+`gcon.transport.tls` and `gcon.execution.hmac_keyring`.**
+
+There are two, genuinely different key systems in GCON — don't conflate
+them:
+
+**Transport identity (mTLS, per-node, asymmetric):**
+Every agent's identity is an X.509 client certificate, issued from a
+shared CA — not a bare RSA keypair you generate and distribute
+manually.
 
 ```bash
-# Generate 4096-bit RSA key
-openssl genrsa -out keys/coordinator.key 4096
-openssl rsa -in keys/coordinator.key -pubout -out keys/coordinator.pub
-
-# Restrict permissions
-chmod 600 keys/coordinator.key
-chmod 644 keys/coordinator.pub
+# Provision the CA + coordinator + per-node certs together
+python scripts/generate_dev_certs.py --cert-dir /etc/gcon/certs \
+    --coordinator-hostname coordinator.internal \
+    --node worker-01 --node worker-02
 ```
 
-**Agent Keys:**
+This is real dev/self-managed-CA tooling, built on `cryptography`
+(already a dependency) — see `scripts/generate_dev_certs.py` and
+`gcon.transport.tls`. Operators with an existing CA can point
+`tls_cert_dir` at certificates issued by that CA instead of using this
+script. The certificate's Common Name **is** the node's identity — the
+coordinator verifies it during the mTLS handshake itself, and again
+in-band at `Register` time (`grpc_transport.py::_peer_common_name`
+checked against the claimed `node_id`) — an agent cannot register as an
+identity it doesn't hold a certificate for.
 
 ```bash
-# Each agent should have its own key
-# Generate during agent provisioning:
-openssl genrsa -out keys/agent-{id}.key 4096
-openssl rsa -in keys/agent-{id}.key -pubout -out keys/agent-{id}.pub
-
-# Distribute public keys to coordinator securely
-# (via config management, not HTTP)
+chmod 600 /etc/gcon/certs/*.key.pem   # private keys: operator-owned, restrict like any private key
+chmod 644 /etc/gcon/certs/*.cert.pem  # certs are not secret
 ```
 
-**Key Storage (Production):**
+**Receipt signing (HMAC, coordinator-held, symmetric):**
+Execution receipts are HMAC-SHA256 signed, not RSA-signed, and — this is
+important and easy to miss — signed by the **coordinator's** key, not by
+each individual agent's own key. See
+`gcon.execution.hmac_keyring.HmacKeyring`:
 
-- Store private keys in **Hardware Security Module (HSM)**
-- Store in **Trusted Platform Module (TPM)** on agents
-- Use **AWS KMS**, **Azure Key Vault**, or equivalent
-- Never commit keys to version control
+```bash
+# GCON_HMAC_KEY_PATH, default ./keys/hmac_secret.key -- generated
+# automatically (secrets.token_hex(32), genuinely random) on first run
+# if it doesn't exist yet. There is no hardcoded default key anywhere
+# in the source; a receipt forged with a guessed/well-known key is
+# rejected (see tests/ regression coverage for this specific case).
+export GCON_HMAC_KEY_PATH=/opt/gcon/keys/hmac_secret.key
+chmod 600 /opt/gcon/keys/hmac_secret.key
+```
+
+`HmacKeyring` supports rotation (a new key can be activated while old
+keys stay valid for verifying receipts signed before the rotation — see
+its module docstring for the revocation window). Because signing is
+coordinator-side, a receipt's signature proves "the coordinator recorded
+this," not "node X independently attests to this" — see
+`docs/ARCHITECTURE.md`'s Security Model for the full honest breakdown of
+what this does and doesn't prove, and what `attested_node_id` (real,
+partial mitigation) adds on top.
+
+**Key storage (production):**
+
+- Both key types above are files on disk — protect them like any
+  private key material (owner-only permissions, backed-up, not committed)
+- Store in a **Hardware Security Module (HSM)** or your cloud provider's
+  key management service if your threat model requires it — GCON itself
+  doesn't integrate with one today; this means protecting the raw key
+  files at the filesystem/OS level
+- Never commit `keys/` or `certs/` to version control
 
 ### 3. API Authentication
 
@@ -549,20 +644,44 @@ looked up in the `api_keys` table, not signed/decoded JWTs.
 
 ### 4. Agent Verification
 
+**This section previously referenced `gcon.verification.ReceiptVerifier`
+and `registry.get_agent_public_key()` — neither exists. There is no
+per-agent asymmetric public-key registry; see the Cryptographic Keys
+section above for how signing actually works (coordinator-held HMAC key,
+not per-agent RSA).** The real verification path:
+
 ```python
-# Coordinator should verify agent identity
-# before accepting job results
+from gcon.execution.verifier import ExecutionVerifier
 
-from gcon.verification import ReceiptVerifier
-
-receipt = agent_submission  # From agent
-public_key = registry.get_agent_public_key(receipt['agent_id'])
-
-verifier = ReceiptVerifier()
-if not verifier.verify(receipt, public_key):
+verifier = ExecutionVerifier()  # loads the coordinator's own HmacKeyring
+is_valid, message = verifier.validate_proof(receipt["proof"])
+if not is_valid:
     # Reject receipt, alert security team
-    raise Exception(f"Unverified receipt from {receipt['agent_id']}")
+    raise Exception(f"Invalid receipt for job '{receipt['job_id']}': {message}")
 ```
+
+This is exactly what the coordinator itself does, live, on every call to
+`get_receipts()`/`get_receipt_detail()` — never trust a stored `verified`
+flag; there isn't one (see `docs/ARCHITECTURE.md`'s Security Model).
+
+**What this does and does not verify:** a passing `validate_proof()`
+confirms the receipt's signature matches the coordinator's key and
+hasn't been tampered with since signing — it does **not** independently
+confirm the agent that reported the underlying result was telling the
+truth about what it ran (see the coordinator-vs-node-signing distinction
+in `docs/ARCHITECTURE.md`). Two things that do add real evidence on top
+of the signature:
+
+- **`attested_node_id`** — if present in `receipt["proof"]`, it's the
+  mTLS-authenticated identity the coordinator had on file for this node
+  at signing time. `ExecutionVerifier.create_receipt()` already refuses
+  to sign (raises `ValueError`) if this disagrees with the claimed
+  `agent_id` — so if you have a receipt at all, that check already
+  passed. Absent entirely (not `null`) for nodes with no control-plane
+  record of an mTLS identity (e.g. `LocalTransport`/dev nodes).
+- **`execution_proof`** — present only on jobs submitted with
+  `verify={"replicas": N, ...}`; shows whether N independently-dispatched
+  nodes agreed. See `docs/ARCHITECTURE.md`'s Already Built section.
 
 ---
 
@@ -796,6 +915,12 @@ sudo systemctl stop gcon-coordinator
 # 4. Backup state (if using disk storage)
 tar czf /backups/gcon-state-$(date +%s).tar.gz /var/lib/gcon/storage
 ```
+
+**Under `--ha`:** stopping the current leader this way releases its
+lease cleanly (`coordinator.shutdown()` already calls
+`leader_elector.stop(release=True)`), so a standby can acquire it
+immediately rather than waiting out the full lease TTL — this is faster
+than an unclean crash. See [docs/FAILOVER.md](FAILOVER.md).
 
 ### Add a New Agent
 
