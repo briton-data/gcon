@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from gcon.transport.proto import gcon_transport_pb2 as gcon_dot_transport_dot_proto_dot_gcon__transport__pb2
+from . import gcon_transport_pb2 as gcon__transport__pb2
 
-GRPC_GENERATED_VERSION = '1.83.0'
+GRPC_GENERATED_VERSION = '1.83.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in gcon/transport/proto/gcon_transport_pb2_grpc.py depends on'
+        + ' but the generated code in gcon_transport_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -45,23 +45,28 @@ class AgentControlStub:
         """
         self.Register = channel.unary_unary(
                 '/gcon.transport.v1.AgentControl/Register',
-                request_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterRequest.SerializeToString,
-                response_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterResponse.FromString,
+                request_serializer=gcon__transport__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=gcon__transport__pb2.RegisterResponse.FromString,
+                _registered_method=True)
+        self.Enroll = channel.unary_unary(
+                '/gcon.transport.v1.AgentControl/Enroll',
+                request_serializer=gcon__transport__pb2.EnrollRequest.SerializeToString,
+                response_deserializer=gcon__transport__pb2.EnrollResponse.FromString,
                 _registered_method=True)
         self.Control = channel.stream_stream(
                 '/gcon.transport.v1.AgentControl/Control',
-                request_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.AgentEnvelope.SerializeToString,
-                response_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.CoordinatorEnvelope.FromString,
+                request_serializer=gcon__transport__pb2.AgentEnvelope.SerializeToString,
+                response_deserializer=gcon__transport__pb2.CoordinatorEnvelope.FromString,
                 _registered_method=True)
         self.StreamLogs = channel.stream_unary(
                 '/gcon.transport.v1.AgentControl/StreamLogs',
-                request_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogChunk.SerializeToString,
-                response_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogAck.FromString,
+                request_serializer=gcon__transport__pb2.LogChunk.SerializeToString,
+                response_deserializer=gcon__transport__pb2.LogAck.FromString,
                 _registered_method=True)
         self.UploadReceipt = channel.unary_unary(
                 '/gcon.transport.v1.AgentControl/UploadReceipt',
-                request_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptUpload.SerializeToString,
-                response_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptAck.FromString,
+                request_serializer=gcon__transport__pb2.ReceiptUpload.SerializeToString,
+                response_deserializer=gcon__transport__pb2.ReceiptAck.FromString,
                 _registered_method=True)
 
 
@@ -85,6 +90,25 @@ class AgentControlServicer:
         must be presented on the Control stream, so a stolen/duplicated
         client cert alone is not sufficient to impersonate a node that
         is already connected.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Enroll(self, request, context):
+        """Self-enrollment: a worker with NO issued certificate yet sends a
+        CSR it generated locally, plus a shared bootstrap token (an
+        out-of-band secret distributed to every worker via provisioning
+        -- NOT a per-node secret, and NOT the node's identity; the CSR's
+        keypair is the identity). The coordinator validates the token,
+        signs the CSR with its own CA, and returns the signed leaf cert
+        plus the CA cert. Deliberately callable *without* an existing
+        client certificate (this is the one RPC that must work before a
+        worker has any cert to present) -- the token is what stands in
+        for authentication on this single call. Idempotent per node_id:
+        re-enrolling the same node_id with a valid token re-signs a
+        fresh cert rather than erroring, so a worker that lost its local
+        disk (reimaged VM, ephemeral container) can re-enroll cleanly.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -119,23 +143,28 @@ def add_AgentControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Register': grpc.unary_unary_rpc_method_handler(
                     servicer.Register,
-                    request_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterRequest.FromString,
-                    response_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterResponse.SerializeToString,
+                    request_deserializer=gcon__transport__pb2.RegisterRequest.FromString,
+                    response_serializer=gcon__transport__pb2.RegisterResponse.SerializeToString,
+            ),
+            'Enroll': grpc.unary_unary_rpc_method_handler(
+                    servicer.Enroll,
+                    request_deserializer=gcon__transport__pb2.EnrollRequest.FromString,
+                    response_serializer=gcon__transport__pb2.EnrollResponse.SerializeToString,
             ),
             'Control': grpc.stream_stream_rpc_method_handler(
                     servicer.Control,
-                    request_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.AgentEnvelope.FromString,
-                    response_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.CoordinatorEnvelope.SerializeToString,
+                    request_deserializer=gcon__transport__pb2.AgentEnvelope.FromString,
+                    response_serializer=gcon__transport__pb2.CoordinatorEnvelope.SerializeToString,
             ),
             'StreamLogs': grpc.stream_unary_rpc_method_handler(
                     servicer.StreamLogs,
-                    request_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogChunk.FromString,
-                    response_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogAck.SerializeToString,
+                    request_deserializer=gcon__transport__pb2.LogChunk.FromString,
+                    response_serializer=gcon__transport__pb2.LogAck.SerializeToString,
             ),
             'UploadReceipt': grpc.unary_unary_rpc_method_handler(
                     servicer.UploadReceipt,
-                    request_deserializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptUpload.FromString,
-                    response_serializer=gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptAck.SerializeToString,
+                    request_deserializer=gcon__transport__pb2.ReceiptUpload.FromString,
+                    response_serializer=gcon__transport__pb2.ReceiptAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,8 +201,35 @@ class AgentControl:
             request,
             target,
             '/gcon.transport.v1.AgentControl/Register',
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterRequest.SerializeToString,
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.RegisterResponse.FromString,
+            gcon__transport__pb2.RegisterRequest.SerializeToString,
+            gcon__transport__pb2.RegisterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Enroll(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/gcon.transport.v1.AgentControl/Enroll',
+            gcon__transport__pb2.EnrollRequest.SerializeToString,
+            gcon__transport__pb2.EnrollResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -199,8 +255,8 @@ class AgentControl:
             request_iterator,
             target,
             '/gcon.transport.v1.AgentControl/Control',
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.AgentEnvelope.SerializeToString,
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.CoordinatorEnvelope.FromString,
+            gcon__transport__pb2.AgentEnvelope.SerializeToString,
+            gcon__transport__pb2.CoordinatorEnvelope.FromString,
             options,
             channel_credentials,
             insecure,
@@ -226,8 +282,8 @@ class AgentControl:
             request_iterator,
             target,
             '/gcon.transport.v1.AgentControl/StreamLogs',
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogChunk.SerializeToString,
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.LogAck.FromString,
+            gcon__transport__pb2.LogChunk.SerializeToString,
+            gcon__transport__pb2.LogAck.FromString,
             options,
             channel_credentials,
             insecure,
@@ -253,8 +309,8 @@ class AgentControl:
             request,
             target,
             '/gcon.transport.v1.AgentControl/UploadReceipt',
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptUpload.SerializeToString,
-            gcon_dot_transport_dot_proto_dot_gcon__transport__pb2.ReceiptAck.FromString,
+            gcon__transport__pb2.ReceiptUpload.SerializeToString,
+            gcon__transport__pb2.ReceiptAck.FromString,
             options,
             channel_credentials,
             insecure,
