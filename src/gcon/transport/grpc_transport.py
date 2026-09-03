@@ -68,6 +68,10 @@ logger = logging.getLogger(__name__)
 # changing this env var + redeploying; already-enrolled workers are
 # unaffected since they never present this again after Enroll.
 _ENROLL_TOKEN = os.environ.get("GCON_ENROLL_TOKEN", "")
+logger.info(
+    "GCON_ENROLL_TOKEN loaded: length=%d, first4=%r, last4=%r",
+    len(_ENROLL_TOKEN), _ENROLL_TOKEN[:4], _ENROLL_TOKEN[-4:],
+)  # TEMP debug line -- remove once the token mismatch is confirmed fixed
 
 
 def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
