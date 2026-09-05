@@ -57,6 +57,18 @@ class NodeRegistry:
                 "running_jobs": 0,
                 "resource_timestamp": None,
                 "draining": False,
+                # Set by Coordinator._commit_receipt_verification when
+                # this node's receipts fail verification
+                # GCON_QUARANTINE_AFTER_FAILURES times in a row (see
+                # set_quarantined below) -- unlike draining (an
+                # operator choice, "stop sending new work but let the
+                # current job finish"), quarantine is an automatic
+                # consequence of this node's own signed output failing
+                # to check out, and is filtered the same way draining
+                # is: excluded from new dispatch, current job left to
+                # finish rather than force-killed.
+                "quarantined": False,
+                "quarantine_reason": None,
                 # Which company this (dedicated) node belongs to, if
                 # any -- read from the node object itself (set by
                 # RemoteNodeProxy/GCONNode at construction) rather than
@@ -95,6 +107,30 @@ class NodeRegistry:
 
             self.nodes[node_id]["draining"] = draining
 
+    def set_quarantined(self, node_id, quarantined, reason=None):
+        """
+        Mark a node as quarantined (or clear it). See the "quarantined"
+        field's comment in register() for how this differs from
+        draining. Like draining, a quarantined node keeps running any
+        job already in flight -- this only blocks new dispatch, it
+        does not kill a job mid-execution, since the receipt for that
+        job is exactly the evidence that would tell you whether this
+        node is actually misbehaving or just hit a one-off fluke.
+
+        `reason`, when quarantining, is a short human-readable string
+        (e.g. "3 consecutive receipt verification failures") surfaced
+        in the dashboard/API so an operator clearing a quarantine
+        manually knows why it happened without having to go dig
+        through logs. Cleared (set to None) whenever quarantined is
+        set back to False.
+        """
+        with self._lock:
+            if node_id not in self.nodes:
+                raise ValueError(f"Node '{node_id}' does not exist.")
+
+            self.nodes[node_id]["quarantined"] = quarantined
+            self.nodes[node_id]["quarantine_reason"] = reason if quarantined else None
+
     def get_node(self, node_id):
         """
         Return a node by ID.
@@ -114,13 +150,13 @@ class NodeRegistry:
 
     def available_nodes(self):
         """
-        Return all idle, non-draining nodes.
+        Return all idle, non-draining, non-quarantined nodes.
         """
         with self._lock:
             return [
                 info["node"]
                 for info in self.nodes.values()
-                if info["status"] == "idle" and not info.get("draining")
+                if info["status"] == "idle" and not info.get("draining") and not info.get("quarantined")
             ]
 
     def get_node_info(self, node_id):
@@ -151,8 +187,8 @@ class NodeRegistry:
         candidate node is only eligible if `filter_fn(info)` returns
         True (e.g. "resourced" jobs use this to exclude nodes whose
         reported capabilities don't satisfy the job's `requires`).
-        With no filter, every idle/non-draining node is eligible, same
-        as before this parameter existed.
+        With no filter, every idle/non-draining/non-quarantined node
+        is eligible, same as before this parameter existed.
 
         This closes a real race (AUDIT_REPORT.md 2.3 / audit finding
         C-1): Scheduler.select_node() used to just scan for an idle
@@ -170,14 +206,14 @@ class NodeRegistry:
 
         `score_fn(info)` scores one candidate node's info dict; the
         lowest score wins. Returns the claimed node's live node/agent
-        object (info["node"]), or None if no idle, non-draining node
-        is available.
+        object (info["node"]), or None if no idle, non-draining,
+        non-quarantined node is available.
         """
         with self._lock:
             best_info = None
             lowest_score = float("inf")
             for info in self.nodes.values():
-                if info["status"] != "idle" or info.get("draining"):
+                if info["status"] != "idle" or info.get("draining") or info.get("quarantined"):
                     continue
                 if filter_fn is not None and not filter_fn(info):
                     continue

@@ -172,6 +172,19 @@ class GCONCoordinator:
         self._max_concurrent_jobs_per_org = int(
             os.environ.get("GCON_MAX_CONCURRENT_JOBS_PER_ORG", "0")
         )
+        # Consecutive receipt-verification failures (see
+        # _commit_receipt_verification) that auto-quarantine a node --
+        # see registry.py's set_quarantined for what that actually
+        # does. 0 disables this entirely (today's behavior: a node
+        # with failing receipts stays in the idle pool exactly like
+        # any other node). A pass resets the streak to 0; only
+        # CONSECUTIVE failures count, so one bad receipt among many
+        # good ones doesn't quarantine a node that's actually fine.
+        self._quarantine_after_failures = int(
+            os.environ.get("GCON_QUARANTINE_AFTER_FAILURES", "0")
+        )
+        self._node_verification_failure_streak = {}
+        self._quarantine_lock = threading.Lock()
         self.scheduler_paused = False
 
         # Bounded, in-memory trust-score time series, sampled every
@@ -1080,6 +1093,19 @@ class GCONCoordinator:
                                         "receipt_id": receipt_id,
                                     },
                                 ))
+                    # Auto-quarantine a node whose receipts fail
+                    # verification GCON_QUARANTINE_AFTER_FAILURES times
+                    # in a row -- see registry.py's set_quarantined for
+                    # what quarantine actually does. Independent of
+                    # staking (stake_ledger may be None/disabled while
+                    # this still runs, and vice versa): they're two
+                    # separate consequences of the same failure, not
+                    # one gating the other. No-op while
+                    # _quarantine_after_failures is 0 (the default).
+                    if self._quarantine_after_failures > 0:
+                        node_id = receipt.get("agent_id")
+                        if node_id:
+                            self._register_verification_failure(node_id, job_id)
             elif receipt_id in self._known_unverified_receipt_ids:
                 self._known_unverified_receipt_ids.discard(receipt_id)
                 self.event_bus.publish(Event(
@@ -1087,6 +1113,58 @@ class GCONCoordinator:
                     source="Verifier",
                     payload={"receipt_id": receipt_id, "job_id": receipt.get("job_id", job_id)},
                 ))
+
+            if is_valid and self._quarantine_after_failures > 0:
+                # A good receipt clears this node's failure streak,
+                # whether or not it was the specific
+                # RECEIPT_VERIFICATION_RECOVERED transition above --
+                # an ordinary node that's never failed still needs its
+                # (empty) streak left alone, and a node recovering
+                # after one bad receipt shouldn't carry that single
+                # strike forward into a future unrelated failure.
+                node_id = receipt.get("agent_id")
+                if node_id:
+                    with self._quarantine_lock:
+                        self._node_verification_failure_streak.pop(node_id, None)
+
+    def _register_verification_failure(self, node_id, job_id):
+        """
+        Record one more consecutive receipt-verification failure for
+        `node_id` and quarantine it (registry.py's set_quarantined)
+        once GCON_QUARANTINE_AFTER_FAILURES is reached. Called from
+        check_cluster_health's newly-failed-receipt handling, once per
+        transition to failed -- see that call site for why this
+        specific hook point and not _commit_receipt_verification
+        (which fires from two different callers and would risk
+        double-counting the same receipt).
+        """
+        with self._quarantine_lock:
+            streak = self._node_verification_failure_streak.get(node_id, 0) + 1
+            self._node_verification_failure_streak[node_id] = streak
+            if streak < self._quarantine_after_failures:
+                return
+            # Reset now, under the same lock acquisition -- so
+            # clearing the quarantine later starts counting fresh
+            # rather than immediately re-triggering on the very next
+            # single failure.
+            self._node_verification_failure_streak.pop(node_id, None)
+
+        try:
+            self.registry.set_quarantined(
+                node_id, True,
+                reason=f"{streak} consecutive receipt verification failures (last: job '{job_id}')",
+            )
+        except ValueError:
+            # Node was removed/went offline between the failure and
+            # this check -- nothing left to quarantine.
+            return
+
+        print(f"[QUARANTINE] node '{node_id}' auto-quarantined after {streak} consecutive verification failures")
+        self.event_bus.publish(Event(
+            event_type=EventType.NODE_QUARANTINED,
+            source="Coordinator",
+            payload={"node_id": node_id, "job_id": job_id, "consecutive_failures": streak},
+        ))
 
     def get_trust_score(self):
         """
@@ -2197,6 +2275,27 @@ class GCONCoordinator:
         self.registry.set_draining(node_id, True)
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="NODE_DRAINING",
+            source="Coordinator", payload={"node_id": node_id},
+        ))
+
+    def clear_quarantine(self, node_id):
+        """
+        Manually clear a node's quarantine (see registry.py's
+        set_quarantined and _register_verification_failure -- the
+        automatic trigger) and reset its failure streak, so a single
+        stale strike doesn't linger and immediately re-quarantine it
+        on the next failure. An operator action, distinct from the
+        auto-quarantine itself: GCON doesn't un-quarantine nodes on
+        its own, since a node that failed verification needs a human
+        to actually decide it's trustworthy again (fixed, replaced
+        hardware, etc) rather than just waiting out a timer.
+        """
+        self.registry.get_node(node_id)  # raises if missing
+        self.registry.set_quarantined(node_id, False)
+        with self._quarantine_lock:
+            self._node_verification_failure_streak.pop(node_id, None)
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type="NODE_QUARANTINE_CLEARED",
             source="Coordinator", payload={"node_id": node_id},
         ))
         print(f"[NODE] '{node_id}' is draining — no new jobs will be assigned.")

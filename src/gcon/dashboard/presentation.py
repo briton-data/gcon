@@ -165,7 +165,7 @@ class PresentationLayer:
     def submit_job(
         self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
         org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
-        callback_url=None,
+        callback_url=None, verify=None,
     ):
         """
         Submit a new job to the cluster.
@@ -181,7 +181,7 @@ class PresentationLayer:
         it from the submitting user's organization_id) for the
         dashboard's Companies panel.
 
-        `kind`/`requires`/`stages`/`dataset_artifacts` -- see
+        `kind`/`requires`/`stages`/`dataset_artifacts`/`verify` -- see
         GCONCoordinator.submit_job.
         """
         return self.coordinator.submit_job(
@@ -195,7 +195,10 @@ class PresentationLayer:
             requires=requires,
             stages=stages,
             dataset_artifacts=dataset_artifacts,
-    ) 
+            callback_url=callback_url,
+            verify=verify,
+        )
+
     def register_node(self, node):
         """
         Register a new node with the cluster.
@@ -726,6 +729,15 @@ class PresentationLayer:
         """
         self.coordinator.drain_node(node_id)
         return {"node_id": node_id, "draining": True}
+
+    def clear_quarantine(self, node_id):
+        """
+        Manually clear a node's auto-quarantine (see
+        coordinator.clear_quarantine for why this is a manual, not
+        automatic, action).
+        """
+        self.coordinator.clear_quarantine(node_id)
+        return {"node_id": node_id, "quarantined": False}
 
     def restart_worker(self, node_id):
         """

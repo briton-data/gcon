@@ -30,6 +30,14 @@ class EventType:
     # Node lifecycle Events
     NODE_DRAINING = "NODE_DRAINING"
     NODE_RESTARTED = "NODE_RESTARTED"
+    # Published when a node is auto-quarantined after too many
+    # consecutive receipt-verification failures (see
+    # Coordinator._register_verification_failure /
+    # registry.py's set_quarantined) -- distinct from NODE_DRAINING,
+    # which is an operator's own choice, not a consequence of the
+    # node's own signed output failing to check out.
+    NODE_QUARANTINED = "NODE_QUARANTINED"
+    NODE_QUARANTINE_CLEARED = "NODE_QUARANTINE_CLEARED"
 
     # Artifact Events
     ARTIFACT_REGISTERED = "ARTIFACT_REGISTERED"
