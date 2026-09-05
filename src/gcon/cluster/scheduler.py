@@ -34,7 +34,7 @@ class Scheduler:
             from gcon.execution.staking import StakeLedger
             self.stake_ledger = StakeLedger(control_plane)
 
-    def select_node(self, requires=None):
+    def select_node(self, requires=None, org_id=None):
         """
         Select the least-loaded idle node satisfying `requires` (if
         given) and atomically claim it (marks it busy in the
@@ -49,6 +49,22 @@ class Scheduler:
         capabilities *before* scoring by load -- a node that doesn't
         satisfy it is never selected, rather than being selected and
         then failing the job (e.g. a CUDA assert) with no warning.
+
+        `org_id`, when the submitting job has one, restricts
+        candidates to nodes whose own attested org_id (see
+        registry.py's NodeRegistry.register -- read off the node
+        object at registration, ultimately sourced from the
+        TLS-attested org_id in grpc_transport.py's Register handler,
+        not a self-reported value) matches exactly. This is the
+        actual tenant-isolation boundary at dispatch time: without
+        it, a job submitted for one org's dedicated nodes could
+        silently land on a different org's node (or vice versa) --
+        the two would never even find out, since nothing else in the
+        dispatch path checks this. A job with org_id=None (no
+        org context -- shared/dev use) is only matched against nodes
+        that ALSO have org_id=None; it is never allowed to land on a
+        node that belongs to a real org, since that node is presumed
+        dedicated/trusted to that org's jobs only.
         """
 
         def score(info):
@@ -63,6 +79,7 @@ class Scheduler:
             filters.append(lambda info: self._satisfies(info, requires))
         if self.stake_ledger is not None and self.stake_ledger.staking_required:
             filters.append(lambda info: self.stake_ledger.meets_minimum(info["node"].node_id))
+        filters.append(lambda info: info.get("org_id") == org_id)
 
         filter_fn = None
         if filters:

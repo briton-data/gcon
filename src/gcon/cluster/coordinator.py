@@ -159,6 +159,19 @@ class GCONCoordinator:
         # specific deployment's real memory budget.
         self._max_jobs_in_memory = int(os.environ.get("GCON_MAX_JOBS_IN_MEMORY", "5000"))
         self._max_receipts_in_memory = int(os.environ.get("GCON_MAX_RECEIPTS_IN_MEMORY", "5000"))
+        # On a shared coordinator, one noisy org submitting a flood of
+        # jobs shouldn't be able to starve every other org's
+        # scheduling -- caps how many jobs a single org_id can have
+        # pending+running at once; further submissions are rejected
+        # outright (see submit_job) rather than silently queued behind
+        # an unbounded backlog. 0 disables the cap entirely (today's
+        # unlimited behavior), which is also what applies to jobs with
+        # org_id=None -- there's no org to attribute a flood to, so
+        # this cap can't protect against one; that's still bounded
+        # overall by _max_jobs_in_memory.
+        self._max_concurrent_jobs_per_org = int(
+            os.environ.get("GCON_MAX_CONCURRENT_JOBS_PER_ORG", "0")
+        )
         self.scheduler_paused = False
 
         # Bounded, in-memory trust-score time series, sampled every
@@ -523,6 +536,14 @@ class GCONCoordinator:
         agreement annotation on top, it never replaces or weakens the
         per-node signature.
 
+        Raises RuntimeError if `org_id` is given and that org already
+        has GCON_MAX_CONCURRENT_JOBS_PER_ORG jobs pending/running (see
+        __init__) -- a shared-coordinator fairness guard, off by
+        default (env unset = 0 = unlimited, today's behavior).
+        org_id=None jobs are never capped by this (nothing to
+        attribute a flood to), only by the coordinator-wide
+        _max_jobs_in_memory bound.
+
         Raises NotLeaderError if this coordinator is running as part
         of an HA cluster (leader_elector set -- see
         gcon.cluster.leader_election) and is currently a standby, not
@@ -561,6 +582,20 @@ class GCONCoordinator:
                 raise ValueError(
                     f"dataset_artifacts references unknown artifact "
                     f"'{artifact_id}' -- register it first."
+                )
+
+        if org_id is not None and self._max_concurrent_jobs_per_org > 0:
+            with self.jobs_lock:
+                in_flight = sum(
+                    1 for j in self.jobs.values()
+                    if j.get("org_id") == org_id and j.get("status") in ("pending", "running")
+                )
+            if in_flight >= self._max_concurrent_jobs_per_org:
+                raise RuntimeError(
+                    f"org '{org_id}' already has {in_flight} job(s) pending/running, "
+                    f"at its concurrent-job limit of {self._max_concurrent_jobs_per_org} "
+                    "(GCON_MAX_CONCURRENT_JOBS_PER_ORG) -- wait for one to finish or "
+                    "raise the limit before submitting more."
                 )
 
         with self.jobs_lock:
@@ -660,7 +695,7 @@ class GCONCoordinator:
             self._assign_replicated_job(job_id, job, verify_cfg)
             return
 
-        node = self.scheduler.select_node(requires=job.get("requires"))
+        node = self.scheduler.select_node(requires=job.get("requires"), org_id=job.get("org_id"))
 
         if node is None:
             if job.get("requires"):
@@ -737,7 +772,7 @@ class GCONCoordinator:
         nodes = []
 
         for _ in range(replicas):
-            node = self.scheduler.select_node(requires=job.get("requires"))
+            node = self.scheduler.select_node(requires=job.get("requires"), org_id=job.get("org_id"))
             if node is None:
                 for claimed in nodes:
                     claimed.status = "idle"
@@ -2960,13 +2995,19 @@ class GCONCoordinator:
 
         return newly_verified
 
-    def get_receipts_page(self, verified=None, search=None, limit=50, offset=0):
+    def get_receipts_page(self, verified=None, search=None, org_id=None, limit=50, offset=0):
         """Real server-side pagination for the Receipts tab -- see
         get_jobs_page's docstring, same reasoning. Returns (items,
-        total_count)."""
+        total_count).
+
+        `org_id` filters to receipts whose job belongs to that org --
+        see ReceiptRepository.search_paginated's join against jobs
+        for the DB-backed path, and get_receipts()'s docstring for
+        why a receipt row needs this indirection (no org_id column
+        of its own)."""
         if self.control_plane is not None:
             rows, total = self.control_plane.receipts.search_paginated(
-                verified=verified, search=search, limit=limit, offset=offset,
+                verified=verified, search=search, org_id=org_id, limit=limit, offset=offset,
             )
             items = []
             for row in rows:
@@ -2984,7 +3025,7 @@ class GCONCoordinator:
         # No control_plane: fall back to slicing the in-memory
         # get_receipts() result (already bounded by
         # _max_receipts_in_memory, so still cheap even unfiltered).
-        all_receipts = self.get_receipts()
+        all_receipts = self.get_receipts(org_id=org_id)
         if verified is not None:
             all_receipts = [r for r in all_receipts if bool(r.get("verified")) == verified]
         if search:
@@ -3010,9 +3051,18 @@ class GCONCoordinator:
             verified = self._verified_receipt_count
         return {"total": total, "verified": verified, "unverified": total - verified}
 
-    def get_receipts(self):
+    def get_receipts(self, org_id=None):
         """
         Return a dashboard-friendly summary of all receipts.
+
+        `org_id`, when given, filters down to receipts belonging to
+        jobs submitted for that org (looked up via self.jobs -- a
+        receipt row itself carries no org_id column, only its job_id
+        does; see get_receipts_page's DB-backed counterpart, which
+        joins against the jobs table for the same reason). This
+        previously had NO org filtering at all -- any caller got
+        every receipt in history regardless of which org's job it
+        belonged to.
 
         `verified` is the real signed-proof HMAC check (the same check
         `verify_all_receipts` uses), computed once per receipt and
@@ -3051,6 +3101,19 @@ class GCONCoordinator:
             self._commit_receipt_verification(job_id, receipt, is_valid)
 
         for job_id, receipt in receipts_snapshot:
+
+            if org_id is not None:
+                job_org_id = (self.jobs.get(job_id) or {}).get("org_id")
+                if job_org_id is None and job_id not in self.jobs:
+                    # Evicted from in-memory self.jobs (see
+                    # _evict_completed_if_over_capacity) -- fall back
+                    # to the durable record rather than treating a
+                    # merely-evicted job as org_id=None and either
+                    # wrongly excluding it or, worse, wrongly
+                    # including it under a filter it doesn't match.
+                    job_org_id = (self._load_job_from_control_plane(job_id) or {}).get("org_id")
+                if job_org_id != org_id:
+                    continue
 
             is_valid = cache_snapshot.get(job_id)
             if is_valid is None:

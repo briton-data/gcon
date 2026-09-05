@@ -11,8 +11,10 @@ from gcon.persistence.repositories.staking import StakeRepository
 from gcon.persistence.repositories.billing import InvoiceRepository
 from gcon.persistence.repositories.webhooks import WebhookRepository
 from gcon.persistence.repositories.leases import LeaseRepository
+from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
 
 __all__ = [
+    "EnrollTokenRepository",
     "NodeRepository",
     "NodeCapabilityRepository",
     "JobRepository",

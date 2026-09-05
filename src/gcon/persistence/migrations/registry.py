@@ -337,4 +337,32 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_receipts_uploaded_at ON receipts (uploaded_at)",
         ],
     ),
+    Migration(
+        version=5,
+        name="org_scoped_enroll_tokens",
+        up_sql=[
+            # Per-org bootstrap secrets for the Enroll RPC (see
+            # transport/grpc_transport.py and
+            # persistence/repositories/enroll_tokens.py). Replaces the
+            # single shared GCON_ENROLL_TOKEN env var as the source of
+            # truth for which org a newly-enrolling worker belongs to.
+            # token_hash only -- the plaintext token is never stored,
+            # only returned once at creation time (see
+            # EnrollTokenRepository.create_token). revoked_at NULL
+            # means active; a token is never deleted outright so
+            # audit history of who could once enroll survives revocation.
+            """
+            CREATE TABLE enroll_tokens (
+                token_id     TEXT PRIMARY KEY,
+                org_id       TEXT NOT NULL,
+                token_hash   TEXT NOT NULL,
+                label        TEXT,
+                created_at   TEXT NOT NULL,
+                revoked_at   TEXT,
+                UNIQUE (token_hash)
+            )
+            """,
+            "CREATE INDEX idx_enroll_tokens_org ON enroll_tokens (org_id)",
+        ],
+    ),
 ]

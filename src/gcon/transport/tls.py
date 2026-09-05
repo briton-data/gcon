@@ -294,7 +294,13 @@ def generate_agent_csr(node_id: str):
     return key_pem, csr_pem
 
 
-def sign_agent_csr(cert_dir: str, csr_pem: bytes, node_id: str, days_valid: int = 825) -> bytes:
+def sign_agent_csr(
+    cert_dir: str,
+    csr_pem: bytes,
+    node_id: str,
+    days_valid: int = 825,
+    org_id: Optional[str] = None,
+) -> bytes:
     """
     Server-side (coordinator, inside the Enroll RPC handler): signs a
     worker-submitted CSR with the current CA. Deliberately does NOT
@@ -316,6 +322,18 @@ def sign_agent_csr(cert_dir: str, csr_pem: bytes, node_id: str, days_valid: int 
     Raises ValueError on either check failing -- the Enroll handler
     should catch this and return EnrollResponse(accepted=False,
     reason=str(e)), not let it propagate as an RPC error.
+
+    `org_id`, when given, is resolved by the CALLER (the Enroll
+    handler, from whichever enroll_token was presented -- see
+    EnrollTokenRepository.lookup_org_id) and is never taken from the
+    CSR itself, which the worker fully controls. It's written into
+    the signed certificate's Subject as an Organizational Unit (OU)
+    attribute -- deliberately NOT copying csr.subject wholesale
+    anymore, so a worker cannot smuggle its own OU/org claim into a
+    CSR and have it survive signing unexamined. Once signed, org_id
+    is a TLS-authenticated fact for every RPC this node makes
+    afterward (see grpc_transport.py's _peer_org_id), not a
+    self-reported field a node could change per-request.
     """
     csr = x509.load_pem_x509_csr(csr_pem)
     if not csr.is_signature_valid:
@@ -330,10 +348,15 @@ def sign_agent_csr(cert_dir: str, csr_pem: bytes, node_id: str, days_valid: int 
     with open(ca.cert_path, "rb") as f:
         ca_cert = x509.load_pem_x509_certificate(f.read())
 
+    subject_attrs = [x509.NameAttribute(NameOID.COMMON_NAME, node_id)]
+    if org_id:
+        subject_attrs.append(x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, org_id))
+    subject = x509.Name(subject_attrs)
+
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
-        .subject_name(csr.subject)
+        .subject_name(subject)
         .issuer_name(ca_cert.subject)
         .public_key(csr.public_key())
         .serial_number(x509.random_serial_number())
