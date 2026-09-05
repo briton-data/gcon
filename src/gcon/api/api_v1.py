@@ -102,6 +102,21 @@ class JobSubmitRequest(BaseModel):
             "via HMAC-SHA256 in the X-GCON-Signature header."
         ),
     )
+    verify: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Dispatches this job to N independently-selected idle nodes "
+            "instead of one, and compares their results for agreement -- "
+            "e.g. {\"replicas\": 2, \"tolerance\": 0.02}. Orthogonal to "
+            "`kind`/`requires`/`stages`: a 'resourced' or 'staged' job "
+            "can also ask for replication. Each replica still gets its "
+            "own independently-signed receipt; this only adds a derived "
+            "agreement annotation on top, it does not replace or weaken "
+            "per-node signing. Previously Python-API only -- see "
+            "GCONCoordinator.submit_job's `verify` docstring for full "
+            "detail."
+        ),
+    )
 
 
 class JobSubmitResponse(BaseModel):
@@ -357,6 +372,7 @@ def create_api_v1_app(management, presentation):
                 stages=payload.stages,
                 dataset_artifacts=payload.dataset_artifacts,
                 callback_url=payload.callback_url,
+                verify=payload.verify,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

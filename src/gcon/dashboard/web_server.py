@@ -295,6 +295,13 @@ class WebServer:
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e))
 
+        @self.app.post("/cluster/nodes/{node_id}/clear-quarantine")
+        def cluster_clear_quarantine(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.presentation.clear_quarantine(node_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
         @self.app.post("/cluster/nodes/{node_id}/restart")
         def cluster_restart_node(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
             try:

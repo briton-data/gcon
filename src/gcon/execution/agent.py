@@ -2,7 +2,15 @@
 GCON Agent - Executes AI workloads and monitors GPU execution.
 
 The agent:
-1. Runs workloads in isolated containers
+1. Runs workloads as host subprocesses (subprocess.Popen) -- NOT in
+   isolated containers. There is no sandboxing: a job's command runs
+   with the same privileges and filesystem access as the agent
+   process itself. This docstring previously (incorrectly) claimed
+   container isolation; it did not exist then either. This is a real
+   multi-tenant risk on any node that ever runs more than one org's
+   jobs, not a cosmetic doc issue -- see ROADMAP.md Section 3. Actual
+   container/sandbox isolation (Docker/gVisor or similar) is tracked
+   there as open, unstarted work.
 2. Monitors GPU utilization and resources
 3. Records execution metrics
 4. Collects evidence for verification
