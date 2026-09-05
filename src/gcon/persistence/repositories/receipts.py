@@ -122,7 +122,8 @@ class ReceiptRepository:
         return [self._row_to_dict(r) for r in rows]
 
     def search_paginated(
-        self, verified: bool = None, search: str = None, limit: int = 50, offset: int = 0
+        self, verified: bool = None, search: str = None, org_id: str = None,
+        limit: int = 50, offset: int = 0,
     ) -> tuple:
         """Real server-side pagination against the full durable
         receipt history -- see JobRepository.search_paginated's
@@ -131,7 +132,15 @@ class ReceiptRepository:
         Coordinator._commit_receipt_verification actually writes to
         it (see migration 4's docstring) -- before that it was always
         the DEFAULT 0 regardless of a receipt's real verification
-        state. `search` matches receipt_id or job_id via LIKE."""
+        state. `search` matches receipt_id or job_id via LIKE.
+
+        `org_id`, when given, filters to receipts whose job belongs
+        to that org -- a receipt row has no org_id column of its own
+        (only jobs.org_id does, see migration 2), so this joins
+        against jobs rather than adding a denormalized column that
+        could drift from the real owning job. Previously this method
+        had no org filtering at all: every caller got every receipt
+        in history, regardless of org."""
         where = []
         params: List[Any] = []
         if verified is not None:
@@ -141,6 +150,9 @@ class ReceiptRepository:
             where.append("(receipt_id LIKE ? OR job_id LIKE ?)")
             like = f"%{search}%"
             params.extend([like, like])
+        if org_id is not None:
+            where.append("job_id IN (SELECT job_id FROM jobs WHERE org_id = ?)")
+            params.append(org_id)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
         count_row = self.db.query_one(f"SELECT COUNT(*) AS n FROM receipts {where_sql}", tuple(params))

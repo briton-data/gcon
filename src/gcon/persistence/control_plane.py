@@ -24,6 +24,7 @@ from gcon.persistence.repositories import (
     InvoiceRepository,
     WebhookRepository,
     LeaseRepository,
+    EnrollTokenRepository,
 )
 
 
@@ -44,6 +45,7 @@ class ControlPlane:
         self.invoices = InvoiceRepository(self.db)
         self.webhooks = WebhookRepository(self.db)
         self.leases = LeaseRepository(self.db)
+        self.enroll_tokens = EnrollTokenRepository(self.db)
 
     def close(self) -> None:
         self.db.close()

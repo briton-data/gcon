@@ -45,6 +45,7 @@ import grpc
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
+from cryptography.x509.oid import NameOID
 
 from gcon.persistence.control_plane import ControlPlane
 from gcon.transport import tls
@@ -85,6 +86,34 @@ def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
         return None
     value = names[0]
     return value.decode("utf-8") if isinstance(value, bytes) else value
+
+
+def _peer_org_id(context: grpc.ServicerContext) -> Optional[str]:
+    """Extract the client certificate's Organizational Unit (OU) --
+    where org_id is burned in at signing time, see tls.py's
+    sign_agent_csr -- as the TLS-authenticated org identity for this
+    connection. Unlike _peer_common_name, gRPC's auth_context()
+    doesn't expose OU directly (it only surfaces
+    "x509_common_name"), so this parses the full peer certificate
+    from "x509_pem_cert", mirroring the existing revocation-check
+    pattern in Register() below. Returns None for certs signed
+    before org-scoped enrollment existed (no OU present) or any
+    parse failure -- callers must treat None as "no attested org,"
+    never as "org confirmed empty."""
+    auth_context = context.auth_context() or {}
+    cert_der = auth_context.get("x509_pem_cert")
+    if not cert_der:
+        return None
+    try:
+        pem_bytes = cert_der[0]
+        if isinstance(pem_bytes, str):
+            pem_bytes = pem_bytes.encode()
+        cert = x509.load_pem_x509_certificate(pem_bytes)
+        ou_attrs = cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
+        return ou_attrs[0].value if ou_attrs else None
+    except Exception as e:
+        logger.warning("failed to parse peer cert for org_id: %r", e)
+        return None
 
 
 def _peer_address(context: grpc.ServicerContext) -> Optional[str]:
@@ -240,12 +269,36 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             self._sessions[request.node_id] = NodeSession(request.node_id, session_token)
 
         capabilities = dict(request.capabilities)
-        # "org_id" is a reserved capability key (see gcon_agent_daemon.py /
-        # run_worker.py), not a real hardware capability -- it's carried in
-        # the capabilities map only because the Register RPC has nowhere
-        # else to put it, and belongs on the node's own org_id column, not
-        # alongside genuine capabilities.
-        org_id = capabilities.pop("org_id", None)
+        # "org_id" used to be trusted straight out of this reserved
+        # capability key (see gcon_agent_daemon.py / run_worker.py) --
+        # but that made it 100% self-reported: any worker holding the
+        # one shared enroll token could claim any org_id it liked.
+        # Now the authoritative value is the TLS-attested one baked
+        # into the node's cert at Enroll time (see tls.py's
+        # sign_agent_csr + _peer_org_id above); the capability is
+        # still popped out (never treated as a real hardware
+        # capability) and kept ONLY as a fallback for nodes whose
+        # certs predate org-scoped enrollment (no OU present, e.g.
+        # dev certs from generate_dev_certs.py). A worker that claims
+        # a self-reported org_id disagreeing with its own attested
+        # one is logged, not trusted -- the attested value always
+        # wins when both are present.
+        self_reported_org_id = capabilities.pop("org_id", None)
+        attested_org_id = _peer_org_id(context)
+        if attested_org_id:
+            if self_reported_org_id and self_reported_org_id != attested_org_id:
+                logger.warning(
+                    "node '%s' self-reported org_id=%r does not match TLS-attested "
+                    "org_id=%r; using the attested value",
+                    request.node_id, self_reported_org_id, attested_org_id,
+                )
+            org_id = attested_org_id
+        else:
+            # No OU on this cert at all -- legacy/dev node. Fall back
+            # to the self-reported value rather than wiping an
+            # existing org_id (NodeRepository.upsert's COALESCE
+            # already protects the durable record on top of this).
+            org_id = self_reported_org_id
 
         self.control_plane.nodes.upsert(
             node_id=request.node_id,
@@ -289,13 +342,28 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         only port this actually needs to answer on). Security here
         is the shared token, not TLS client identity.
         """
-        if not _ENROLL_TOKEN or not secrets.compare_digest(request.enroll_token, _ENROLL_TOKEN):
-            return pb.EnrollResponse(accepted=False, reason="invalid or missing enroll token")
+        # Resolution order: a per-org token (persistence/repositories/
+        # enroll_tokens.py) minted for a specific customer takes
+        # priority -- this is what makes org_id an attested fact
+        # rather than a self-reported one (see _peer_org_id and the
+        # Register handler above). The single shared GCON_ENROLL_TOKEN
+        # env var is kept ONLY as a legacy/dev fallback (no org_id
+        # attached -- see generate_dev_certs.py-style single-tenant
+        # setups) so existing deployments minted before org-scoped
+        # tokens existed don't break; new deployments should issue
+        # per-org tokens via scripts/create_enroll_token.py instead of
+        # relying on this.
+        org_id = None
+        if self.control_plane is not None:
+            org_id = self.control_plane.enroll_tokens.lookup_org_id(request.enroll_token)
+        if org_id is None:
+            if not _ENROLL_TOKEN or not secrets.compare_digest(request.enroll_token, _ENROLL_TOKEN):
+                return pb.EnrollResponse(accepted=False, reason="invalid or missing enroll token")
         if not request.node_id:
             return pb.EnrollResponse(accepted=False, reason="node_id is required")
         try:
             cert_pem = tls.sign_agent_csr(
-                self.config.tls_cert_dir, request.csr_pem, request.node_id,
+                self.config.tls_cert_dir, request.csr_pem, request.node_id, org_id=org_id,
             )
         except ValueError as e:
             logger.warning("Enroll rejected for node_id=%s: %s", request.node_id, e)

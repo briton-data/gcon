@@ -547,18 +547,21 @@ class PresentationLayer:
     # Explorer views
     # ------------------------------------------------------------------
 
-    def get_receipts(self):
+    def get_receipts(self, org_id=None):
         """
-        Return all generated job receipts.
+        Return all generated job receipts, optionally filtered to
+        one org (see coordinator.get_receipts's docstring for why a
+        receipt needs an org_id passed in rather than having one of
+        its own).
         """
-        return self.coordinator.get_receipts()
+        return self.coordinator.get_receipts(org_id=org_id)
 
-    def get_receipts_page(self, verified=None, search=None, limit=50, offset=0):
+    def get_receipts_page(self, verified=None, search=None, org_id=None, limit=50, offset=0):
         """Real server-side pagination for the Receipts tab -- see
         coordinator.get_receipts_page's docstring. Returns
         (items, total_count)."""
         return self.coordinator.get_receipts_page(
-            verified=verified, search=search, limit=limit, offset=offset,
+            verified=verified, search=search, org_id=org_id, limit=limit, offset=offset,
         )
 
     def get_receipt_detail(self, receipt_id):
