@@ -1266,16 +1266,23 @@ class GCONCoordinator:
     def receive_resource_report(self, resources):
         """
         Process a resource report received from a node.
+
+        `resources` must carry node_id/running_jobs/status/timestamp;
+        cpu/memory/gpu_* are optional -- see registry.py's
+        update_node_resources docstring for why (RemoteNodeProxy
+        genuinely has no cpu/memory data of its own to report).
         """
 
         node_id = resources["node_id"]
 
         self.registry.update_node_resources(node_id, resources)
 
+        cpu = resources.get("cpu")
+        memory = resources.get("memory")
         print(
             f"Resources updated for {node_id} "
-            f"(CPU: {resources['cpu']}%, "
-            f"Memory: {resources['memory']}%, "
+            f"(CPU: {cpu if cpu is not None else 'unchanged'}%, "
+            f"Memory: {memory if memory is not None else 'unchanged'}%, "
             f"Jobs: {resources['running_jobs']})"
     )
         
