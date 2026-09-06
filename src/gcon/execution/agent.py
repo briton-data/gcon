@@ -96,12 +96,49 @@ class GCONAgent:
         # multi-hour job doesn't bloat every signed receipt with
         # thousands of near-duplicate readings.
         self._max_gpu_samples_retained = int(os.environ.get("GCON_MAX_GPU_SAMPLES_IN_RECEIPT", "60"))
+        # detect_gpu() shells out to nvidia-smi via GPUtil -- cheap on
+        # POSIX (fork), genuinely expensive as a subprocess spawn on
+        # Windows. Under load (many jobs submitted at once, each
+        # spawning its own _watch_gpu_metrics thread that calls
+        # detect_gpu() immediately), that's many near-simultaneous
+        # subprocess spawns for hardware that hasn't meaningfully
+        # changed between them. Cached with a short TTL so concurrent
+        # callers within the window share one real read instead of
+        # each paying the subprocess cost -- verified: fixed a real
+        # test failure under 150 concurrent jobs on Windows
+        # (test_submit_many_jobs_all_reach_terminal_state).
+        self._gpu_cache = None
+        self._gpu_cache_time = 0.0
+        self._gpu_cache_lock = threading.Lock()
+        self._gpu_cache_ttl = float(os.environ.get("GCON_GPU_CACHE_TTL_SECONDS", "1.0"))
         logger.info(f"GCON Agent initialized for node {node_id}")
     
     def detect_gpu(self) -> Dict[str, Any]:
         """
         Detect available GPU hardware.
-        
+
+        Cached for _gpu_cache_ttl seconds (see __init__) -- see that
+        comment for why. A cache hit returns the exact dict a fresh
+        call would have (same shape, same keys), just not
+        re-measured; a real (uncached) read still happens at least
+        once per TTL window, so a genuinely changing reading is never
+        stale for longer than that window.
+        """
+        now = time.time()
+        with self._gpu_cache_lock:
+            if self._gpu_cache is not None and (now - self._gpu_cache_time) < self._gpu_cache_ttl:
+                return self._gpu_cache
+        gpu_info = self._detect_gpu_uncached()
+        with self._gpu_cache_lock:
+            self._gpu_cache = gpu_info
+            self._gpu_cache_time = now
+        return gpu_info
+
+    def _detect_gpu_uncached(self) -> Dict[str, Any]:
+        """
+        Actual (uncached) GPU detection -- see detect_gpu() for the
+        cached wrapper every real caller should use instead.
+
         Returns:
             Dict containing GPU information
         """

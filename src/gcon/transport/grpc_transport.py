@@ -489,6 +489,18 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                         "memory_percent": hb.memory_percent,
                         "running_jobs": hb.running_jobs,
                         "timestamp": hb.timestamp,
+                        # gpu_name is "" (proto3 string default) rather
+                        # than absent when the agent has no GPU or
+                        # hasn't sampled yet -- normalized to None here
+                        # so update_node_resources' "preserve last
+                        # known reading" semantics (see registry.py)
+                        # apply the same way they do for the in-process
+                        # path, not treated as a real empty-string GPU
+                        # name.
+                        "gpu_name": hb.gpu_name or None,
+                        "gpu_memory_total": hb.gpu_memory_total,
+                        "gpu_memory_used": hb.gpu_memory_used,
+                        "gpu_utilization_percent": hb.gpu_utilization_percent,
                     },
                     )
         elif kind == "job_result":

@@ -148,6 +148,23 @@ def main():
             "running_jobs": payload["running_jobs"],
             "status": payload["status"],
             "timestamp": payload["timestamp"],
+            # Previously this Heartbeat message carried no GPU fields
+            # at all -- a remote node's real GPU reading (agent.py's
+            # detect_gpu(), same as the in-process path) had nowhere
+            # to travel to the coordinator regardless of what the
+            # agent measured. Only forwarded when the agent actually
+            # reported a name -- registry.py's update_node_resources
+            # treats an absent GPU key as "keep the last known
+            # reading," which is what we want for an agent on an
+            # older build that doesn't send these fields yet, rather
+            # than stomping a real prior reading with a fabricated
+            # zero.
+            **({
+                "gpu_name": payload["gpu_name"],
+                "gpu_memory_total": payload["gpu_memory_total"],
+                "gpu_memory_used": payload["gpu_memory_used"],
+                "gpu_utilization_percent": payload["gpu_utilization_percent"],
+            } if payload.get("gpu_name") else {}),
         })
 
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
