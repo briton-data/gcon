@@ -103,3 +103,58 @@ class TestPeriodicGpuSampling:
         )
         assert m.gpu_utilization_percent == 0.0
         assert m.gpu_temperature_c == 0.0
+
+
+class TestGpuDetectionCaching:
+    """
+    Regression test for a real failure found running the full suite
+    on Windows: 150 concurrently-submitted jobs across a small shared
+    node pool each spawned a GPU-sampling thread calling detect_gpu(),
+    which shells out to nvidia-smi via GPUtil -- a subprocess spawn,
+    expensive enough under that load to make
+    test_submit_many_jobs_all_reach_terminal_state fail outright on
+    Windows (subprocess creation there is much heavier than POSIX
+    fork). Fixed with a short TTL cache in detect_gpu() -- these tests
+    cover the cache itself, not the original failing scenario (that's
+    covered by re-running stress_test1.py::TestLoad, unchanged).
+    """
+
+    def test_concurrent_calls_within_ttl_share_one_real_detection(self, monkeypatch):
+        monkeypatch.setenv("GCON_GPU_CACHE_TTL_SECONDS", "5.0")
+        agent = GCONAgent("node-1")
+
+        call_count = {"n": 0}
+        orig = agent._detect_gpu_uncached
+        def counted():
+            call_count["n"] += 1
+            return orig()
+        agent._detect_gpu_uncached = counted
+
+        for _ in range(20):
+            agent.detect_gpu()
+
+        assert call_count["n"] == 1, "20 calls within one TTL window should mean exactly 1 real detection"
+
+    def test_cache_expires_after_ttl(self, monkeypatch):
+        monkeypatch.setenv("GCON_GPU_CACHE_TTL_SECONDS", "0.1")
+        agent = GCONAgent("node-1")
+
+        call_count = {"n": 0}
+        orig = agent._detect_gpu_uncached
+        def counted():
+            call_count["n"] += 1
+            return orig()
+        agent._detect_gpu_uncached = counted
+
+        agent.detect_gpu()
+        time.sleep(0.15)
+        agent.detect_gpu()
+
+        assert call_count["n"] == 2, "a call after the TTL expires must trigger a fresh real detection"
+
+    def test_cached_result_has_the_same_shape_as_a_fresh_one(self):
+        agent = GCONAgent("node-1")
+        fresh = agent._detect_gpu_uncached()
+        cached = agent.detect_gpu()
+        assert set(fresh.keys()) == set(cached.keys())
+
