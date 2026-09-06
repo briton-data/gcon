@@ -316,7 +316,17 @@ class AgentDaemon:
     def _heartbeat_loop(self, outbound, session_token, interval, stop_event) -> None:
         while not stop_event.is_set() and not self._stop.is_set():
             status = "busy" if self._active_jobs else "idle"
-            snapshot = self.agent.resource_snapshot() if hasattr(self.agent, "resource_snapshot") else {}
+            # Previously called self.agent.resource_snapshot(), guarded
+            # by hasattr() -- that method was never implemented
+            # anywhere in this codebase, so the guard always failed
+            # silently and every real gRPC-connected agent has always
+            # sent cpu_percent=0.0/memory_percent=0.0 in every
+            # heartbeat, regardless of the node's actual load.
+            # report_resources() (-> ResourceMonitor.collect()) is the
+            # method that actually exists and returns real data,
+            # including GPU now (see monitor.py) -- same call the
+            # in-process/local coordinator path already uses.
+            snapshot = self.agent.report_resources() if hasattr(self.agent, "report_resources") else {}
             outbound.put(
                 pb.AgentEnvelope(
                     node_id=self.node_id,
@@ -324,10 +334,14 @@ class AgentDaemon:
                     heartbeat=pb.Heartbeat(
                         sequence=self._hb_sequence.next(),
                         status=status,
-                        cpu_percent=float(snapshot.get("cpu_percent", 0.0)),
-                        memory_percent=float(snapshot.get("memory_percent", 0.0)),
+                        cpu_percent=float(snapshot.get("cpu", 0.0)),
+                        memory_percent=float(snapshot.get("memory", 0.0)),
                         running_jobs=len(self._active_jobs),
                         timestamp=_now_iso(),
+                        gpu_name=str(snapshot.get("gpu_name") or ""),
+                        gpu_memory_total=int(snapshot.get("gpu_memory_total", 0)),
+                        gpu_memory_used=int(snapshot.get("gpu_memory_used", 0)),
+                        gpu_utilization_percent=float(snapshot.get("gpu_utilization_percent", 0.0)),
                     ),
                 )
             )
