@@ -44,7 +44,7 @@ dependencies = [
     "jinja2",
     "websockets",
     "grpcio>=1.82.1",
-    "protobuf>=7.35.0",
+    "protobuf>=4.25.0",
 ]
 
  [project.optional-dependencies]
@@ -54,7 +54,7 @@ dev = [
     "black>=22.0",
     "flake8>=4.0",
     "mypy>=0.990",
-    "httpx2>=0.24.0"
+    "httpx>=0.24.0"
 ]
 docs = [
     "sphinx>=4.0",
