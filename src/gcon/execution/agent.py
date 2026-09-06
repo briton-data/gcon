@@ -48,6 +48,15 @@ class ExecutionMetrics:
     memory_percent: float
     runtime_seconds: float
     timestamp: str
+    # Previously collected by detect_gpu() (as "load"/"temperature")
+    # but silently discarded here -- neither ever reached a receipt.
+    # GPUtil reports load as a 0.0-1.0 fraction; stored here as a
+    # percentage for consistency with cpu_percent/memory_percent.
+    # Defaulted (rather than required, like the fields above) so
+    # existing callers that construct ExecutionMetrics without these
+    # two don't break.
+    gpu_utilization_percent: float = 0.0
+    gpu_temperature_c: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -74,6 +83,19 @@ class GCONAgent:
         self.monitor = ResourceMonitor(self)
         self.heartbeat_running = False
         self.heartbeat_thread = None
+        # How often to sample GPU/CPU during a running job (not just
+        # once at completion) -- see _watch_gpu_metrics. Default
+        # chosen to be frequent enough to catch a real spike-and-
+        # settle pattern without meaningfully perturbing psutil's own
+        # readings via constant polling.
+        self._gpu_sample_interval = float(os.environ.get("GCON_GPU_SAMPLE_INTERVAL_SECONDS", "2.0"))
+        # Cap on samples RETAINED in a job's result/receipt -- peak
+        # values are still computed over every sample actually taken,
+        # never just the retained tail, so a long job's peak isn't
+        # lost even once older raw samples are thinned. Bounded so a
+        # multi-hour job doesn't bloat every signed receipt with
+        # thousands of near-duplicate readings.
+        self._max_gpu_samples_retained = int(os.environ.get("GCON_MAX_GPU_SAMPLES_IN_RECEIPT", "60"))
         logger.info(f"GCON Agent initialized for node {node_id}")
     
     def detect_gpu(self) -> Dict[str, Any]:
@@ -123,17 +145,22 @@ class GCONAgent:
     
     def collect_metrics(self, job_id) -> ExecutionMetrics:
         """
-        Collect current system metrics during execution.
-        
-        Returns:
-            ExecutionMetrics object with current metrics
+        Collect current system metrics AT THIS INSTANT.
+
+        This is one point-in-time snapshot, not a claim about the
+        job's execution as a whole -- see _watch_gpu_metrics for the
+        periodic sampling that calls this repeatedly during a job's
+        run instead of once at completion.
         """
         gpu_info = self.detect_gpu()
+        load = gpu_info.get("load", 0) or 0
         metrics = ExecutionMetrics(
             job_id=job_id,
             gpu_name=gpu_info.get("gpu_name", "Unknown"),
             gpu_memory_total=gpu_info.get("memory_total", 0),
             gpu_memory_used=gpu_info.get("memory_used", 0),
+            gpu_utilization_percent=round(load * 100, 2),
+            gpu_temperature_c=gpu_info.get("temperature", 0) or 0,
             cpu_percent=psutil.cpu_percent(interval=None),
             memory_percent=psutil.virtual_memory().percent,
             runtime_seconds=time.time() - self.start_time if self.start_time else 0,
@@ -266,6 +293,15 @@ class GCONAgent:
             )
             stage_thread.start()
 
+        gpu_samples: list = []
+        gpu_stop = threading.Event()
+        gpu_thread = threading.Thread(
+            target=self._watch_gpu_metrics,
+            args=(job_id, gpu_samples, gpu_stop),
+            daemon=True,
+        )
+        gpu_thread.start()
+
         try:
             # Determine if it's a file or command
             if os.path.isfile(job_script) and job_script.endswith('.py'):
@@ -310,6 +346,7 @@ class GCONAgent:
 
             runtime = self.end_time - self.start_time
             final_metrics = self.collect_metrics(job_id)
+            metrics_dict = self._merge_gpu_samples(final_metrics.to_dict(), gpu_samples, gpu_stop, gpu_thread)
             result = {
                 "job_id": job_id,
                 "status": "success" if self.process.returncode == 0 else "failed",
@@ -317,7 +354,7 @@ class GCONAgent:
                 "runtime_seconds": runtime,
                 "stdout": stdout,
                 "stderr": stderr,
-                "metrics": final_metrics.to_dict(),
+                "metrics": metrics_dict,
                 "usage": self._read_usage_report(usage_report_path),
                 # Always a list -- possibly partial (see the timeout/
                 # error branches below) or empty (job never opted in
@@ -343,6 +380,11 @@ class GCONAgent:
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": f"Execution timeout after {timeout}s",
                 "usage": self._read_usage_report(usage_report_path),
+                # Real, genuinely-observed metrics up to the moment of
+                # the kill -- a timed-out job still produces GPU proof
+                # evidence of however far it got, not nothing just
+                # because it never reached a clean exit.
+                "metrics": self._merge_gpu_samples(None, gpu_samples, gpu_stop, gpu_thread),
                 # Whatever stages were genuinely observed before the
                 # timeout killed the process -- real partial proof of
                 # how far a long-running (e.g. training) job actually
@@ -359,6 +401,7 @@ class GCONAgent:
                 "job_id": job_id,
                 "status": "error",
                 "stages": stage_observations,
+                "metrics": self._merge_gpu_samples(None, gpu_samples, gpu_stop, gpu_thread),
                 "runtime_seconds": self.end_time - self.start_time,
                 "error": str(e),
                 "usage": self._read_usage_report(usage_report_path),
@@ -389,6 +432,95 @@ class GCONAgent:
                 os.remove(usage_report_path)
             except OSError:
                 pass
+
+    def _watch_gpu_metrics(self, job_id: str, samples: list, stop_event: "threading.Event") -> None:
+        """
+        Background thread body: while the subprocess is still
+        running, periodically call collect_metrics() and append each
+        snapshot -- this is what turns GPU proof from a single
+        post-completion reading into a real time series, so a job
+        that spikes and settles is no longer invisible to its own
+        receipt (see ROADMAP.md Section 2). Same "poll, then check
+        stop" structure as _watch_stage_reports, for the same reason:
+        one more sample after stop_event.set() rather than possibly
+        missing the state right before the process exits.
+
+        Not a @staticmethod (unlike _watch_stage_reports) because
+        collect_metrics() is itself an instance method -- it also
+        appends to self.metrics, so this shares that same running
+        list rather than duplicating collection logic.
+        """
+        while True:
+            try:
+                samples.append(self.collect_metrics(job_id).to_dict())
+            except Exception as e:
+                # A transient GPUtil/psutil read failure mid-job
+                # should never take the whole job down -- skip this
+                # sample, keep watching.
+                logger.warning(f"GPU metrics sample failed for job {job_id}: {e}")
+            if stop_event.is_set():
+                break
+            stop_event.wait(self._gpu_sample_interval)
+
+    def _merge_gpu_samples(
+        self, final_metrics: Optional[Dict[str, Any]], samples: list,
+        stop_event: "threading.Event", thread: "threading.Thread",
+    ) -> Dict[str, Any]:
+        """
+        Stop the GPU-sampling thread, then fold the full sample
+        series into a single metrics dict: the last real sample (or
+        `final_metrics`, when the caller already collected one -- see
+        execute_job's success path, which takes its own final
+        snapshot right after the process exits) provides the
+        point-in-time fields callers already expect (gpu_name,
+        current memory/utilization/cpu/memory), plus:
+
+          - gpu_memory_peak / gpu_utilization_percent_peak: the max
+            observed across every sample actually taken, computed
+            here before any trimming -- so a spike that happened
+            between two retained samples is never lost even once the
+            raw series below is bounded.
+          - gpu_samples: the raw series, thinned to at most
+            _max_gpu_samples_retained (evenly-spaced downsampling, not
+            just "keep the first/last N") so a long job's receipt
+            stays a bounded size without losing its overall shape.
+
+        This dict is what becomes execution_result["metrics"] --
+        which both run_job.py and verifier.py's create_receipt read
+        directly into generate_execution_proof's signed payload (see
+        their docstrings) -- so everything added here is automatically
+        part of what's cryptographically attested, no separate wiring
+        needed.
+
+        Returns an empty-shaped dict (peaks/samples present but
+        zeroed) rather than raising if no sample was ever taken (e.g.
+        a job that failed before the first sample interval elapsed).
+        """
+        stop_event.set()
+        thread.join(timeout=5)
+
+        base = final_metrics if final_metrics is not None else (samples[-1] if samples else {
+            "job_id": None, "gpu_name": "Unknown", "gpu_memory_total": 0,
+            "gpu_memory_used": 0, "gpu_utilization_percent": 0.0,
+            "gpu_temperature_c": 0, "cpu_percent": 0.0, "memory_percent": 0.0,
+            "runtime_seconds": 0, "timestamp": datetime.now(UTC).isoformat(),
+        })
+
+        mem_values = [s.get("gpu_memory_used", 0) for s in samples] or [base.get("gpu_memory_used", 0)]
+        util_values = [s.get("gpu_utilization_percent", 0) for s in samples] or [base.get("gpu_utilization_percent", 0)]
+
+        merged = dict(base)
+        merged["gpu_memory_peak"] = max(mem_values)
+        merged["gpu_utilization_percent_peak"] = max(util_values)
+        merged["gpu_sample_count"] = len(samples)
+
+        retained = samples
+        if len(samples) > self._max_gpu_samples_retained > 0:
+            step = len(samples) / self._max_gpu_samples_retained
+            retained = [samples[int(i * step)] for i in range(self._max_gpu_samples_retained)]
+        merged["gpu_samples"] = retained
+
+        return merged
 
     @staticmethod
     def _watch_stage_reports(path: str, observed: list, stop_event: "threading.Event") -> None:

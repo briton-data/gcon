@@ -36,11 +36,26 @@ class ResourceMonitor:
         self._process.cpu_percent(interval=None)
 
     def collect(self):
+        # GPU data is intentionally NOT gathered every collect() call
+        # (heartbeats fire frequently -- see AgentDaemon's heartbeat
+        # loop) -- detect_gpu() shells out to GPUtil/nvidia-smi under
+        # the hood, and polling that on every heartbeat tick would add
+        # real overhead for data that changes on a much slower cadence
+        # than cpu/memory does. Reuses the agent's own detect_gpu(),
+        # the same call execute_job's periodic sampling uses, so the
+        # live node-status reading and a job's own receipt draw from
+        # one code path, not two that could silently disagree.
+        gpu_info = self.agent.detect_gpu()
+        load = gpu_info.get("load", 0) or 0
         return {
             "node_id": self.agent.node_id,
             "cpu": self._process.cpu_percent(interval=None),
             "memory": self._process.memory_percent(),
             "running_jobs": 1 if self.agent.status == "busy" else 0,
             "status": self.agent.status,
-            "timestamp": datetime.now(UTC).isoformat()
+            "timestamp": datetime.now(UTC).isoformat(),
+            "gpu_name": gpu_info.get("gpu_name", "Unknown"),
+            "gpu_memory_total": gpu_info.get("memory_total", 0),
+            "gpu_memory_used": gpu_info.get("memory_used", 0),
+            "gpu_utilization_percent": round(load * 100, 2),
         }
