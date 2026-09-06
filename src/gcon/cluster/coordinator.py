@@ -2788,7 +2788,13 @@ class GCONCoordinator:
                     else info.get("last_seen", "N/A")
                 ),
                 "draining": info.get("draining", False),
+                "quarantined": info.get("quarantined", False),
+                "quarantine_reason": info.get("quarantine_reason"),
                 "org_id": info.get("org_id"),
+                "gpu_name": info.get("gpu_name"),
+                "gpu_memory_total": info.get("gpu_memory_total", 0),
+                "gpu_memory_used": info.get("gpu_memory_used", 0),
+                "gpu_utilization_percent": info.get("gpu_utilization_percent", 0.0),
             })
 
         return nodes

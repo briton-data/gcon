@@ -35,7 +35,23 @@ class NodeOut(BaseModel):
     running_jobs: int
     last_seen: object
     draining: bool
+    quarantined: bool = False
+    quarantine_reason: Optional[str] = None
     org_id: Optional[str] = None
+    gpu_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Live GPU reading, self-reported by the node's own software "
+            "(same trust level cpu/memory always had -- not a "
+            "cryptographically attested measurement). None until the "
+            "node's first resource report; distinct from the static "
+            "'gpu' capability flag used for requires={'gpu': true} "
+            "scheduling."
+        ),
+    )
+    gpu_memory_total: int = 0
+    gpu_memory_used: int = 0
+    gpu_utilization_percent: float = 0.0
 
 
 class JobOut(BaseModel):

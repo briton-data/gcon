@@ -91,6 +91,19 @@ class RemoteNodeProxy:
         separate, tracked follow-up (see run_coordinator.py's
         on_heartbeat), not something this method should paper over by
         inventing numbers it doesn't actually have.
+
+        GPU fields (gpu_name/gpu_memory_total/gpu_memory_used/
+        gpu_utilization_percent) are intentionally NOT included here
+        for the same reason: real GPU data now flows for in-process
+        nodes (see monitoring/monitor.py's ResourceMonitor.collect,
+        which calls the agent's own detect_gpu()), but a remote
+        (gRPC) node's real GPU reading has nowhere to travel yet --
+        same unwired heartbeat-vs-resource-report gap as cpu/memory
+        above, not a separate problem. update_node_resources() treats
+        an absent GPU key as "leave the last known reading in place"
+        rather than overwriting it with a fabricated zero, so omitting
+        these keys here is the correct honest choice until that
+        wiring exists, not an oversight.
         """
         return {
             "node_id": self.node_id,

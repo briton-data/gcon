@@ -56,6 +56,24 @@ class NodeRegistry:
                 "memory": 0.0,
                 "running_jobs": 0,
                 "resource_timestamp": None,
+                # Live GPU state, populated by
+                # Coordinator.receive_resource_report ->
+                # update_node_resources -- previously this dict had no
+                # GPU fields at all, so a node's live GPU state was
+                # invisible to the scheduler/dashboard/API regardless
+                # of what agent.py's detect_gpu() actually measured.
+                # Distinct from node_capabilities' static "gpu": true
+                # flag (self-reported once, at registration, used by
+                # Scheduler._satisfies for requires={"gpu": true})
+                # -- these are current readings, not a capability
+                # claim; still self-reported by the node's own
+                # software either way, see the docstring on
+                # update_node_resources for what "live" does and
+                # doesn't mean here.
+                "gpu_name": None,
+                "gpu_memory_total": 0,
+                "gpu_memory_used": 0,
+                "gpu_utilization_percent": 0.0,
                 "draining": False,
                 # Set by Coordinator._commit_receipt_verification when
                 # this node's receipts fail verification
@@ -285,6 +303,22 @@ class NodeRegistry:
     def update_node_resources(self, node_id, resources):
         """
         Update the latest resource information for a node.
+
+        `resources` is expected to carry `cpu`/`memory`/`running_jobs`/
+        `timestamp`/`status` (as before), plus optionally
+        `gpu_name`/`gpu_memory_total`/`gpu_memory_used`/
+        `gpu_utilization_percent` -- all four default to their
+        existing "no GPU data yet" values (see register() above) via
+        .get() so a caller that doesn't report GPU fields (e.g. an
+        older worker, or a genuinely GPU-less node) doesn't break or
+        get overwritten with fabricated zeros mixed in with otherwise
+        real data; it just leaves the prior GPU reading in place. This
+        is a live reading self-reported by the node's own software
+        (same trust level as cpu/memory always were) -- not a
+        cryptographically attested measurement; see
+        Scheduler._satisfies for the separate, still self-reported
+        static "gpu": true capability flag used for requires={"gpu":
+        true} scheduling.
         """
         with self._lock:
             if node_id not in self.nodes:
@@ -297,6 +331,14 @@ class NodeRegistry:
             info["running_jobs"] = resources["running_jobs"]
             info["resource_timestamp"] = resources["timestamp"]
             info["status"] = resources["status"]
+            if "gpu_name" in resources:
+                info["gpu_name"] = resources["gpu_name"]
+            if "gpu_memory_total" in resources:
+                info["gpu_memory_total"] = resources["gpu_memory_total"]
+            if "gpu_memory_used" in resources:
+                info["gpu_memory_used"] = resources["gpu_memory_used"]
+            if "gpu_utilization_percent" in resources:
+                info["gpu_utilization_percent"] = resources["gpu_utilization_percent"]
 
         print(
             f"[RESOURCE] {node_id}: "
