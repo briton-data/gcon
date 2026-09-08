@@ -20,22 +20,40 @@
                 <span class="gcon-sidebar-label">Executions</span>
             </a>
 
+            <a href="#" data-tab="workflows"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-diagram-2 me-2"></i>
+                <span class="gcon-sidebar-label">Workflows</span>
+            </a>
+
+        </div>
+
+        <h5 class="mb-2 gcon-sidebar-group-label">Cluster</h5>
+
+        <div class="list-group mb-3">
+
             <a href="#" data-tab="cluster"
                class="list-group-item list-group-item-action">
                 <i class="bi bi-diagram-3 me-2"></i>
-                <span class="gcon-sidebar-label">Cluster</span>
+                <span class="gcon-sidebar-label">Cluster Summary</span>
             </a>
 
             <a href="#" data-tab="explorer" data-explorer-default="nodes"
                class="list-group-item list-group-item-action">
                 <i class="bi bi-hdd-network me-2"></i>
-                <span class="gcon-sidebar-label">Workers</span>
+                <span class="gcon-sidebar-label">Node Explorer</span>
             </a>
 
-            <a href="#" data-tab="workflows"
+            <a href="#" data-tab="topology"
                class="list-group-item list-group-item-action">
-                <i class="bi bi-diagram-2 me-2"></i>
-                <span class="gcon-sidebar-label">Workflows</span>
+                <i class="bi bi-diagram-3 me-2"></i>
+                <span class="gcon-sidebar-label">Topology Map</span>
+            </a>
+
+            <a href="#" data-tab="monitoring"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-activity me-2"></i>
+                <span class="gcon-sidebar-label">Live Metrics</span>
             </a>
 
         </div>
@@ -61,18 +79,6 @@
         <h5 class="mb-2 gcon-sidebar-group-label">Observe</h5>
 
         <div class="list-group mb-3">
-
-            <a href="#" data-tab="monitoring"
-               class="list-group-item list-group-item-action">
-                <i class="bi bi-activity me-2"></i>
-                <span class="gcon-sidebar-label">Real-Time Monitoring</span>
-            </a>
-
-            <a href="#" data-tab="topology"
-               class="list-group-item list-group-item-action">
-                <i class="bi bi-diagram-3 me-2"></i>
-                <span class="gcon-sidebar-label">Cluster Visualization</span>
-            </a>
 
             <a href="#" data-tab="analytics"
                class="list-group-item list-group-item-action">
@@ -110,7 +116,11 @@
 
         <h5 class="mb-2 gcon-sidebar-group-label">Manage</h5>
 
-        <div class="list-group" id="tab-nav-mgmt">
+        <div id="tab-nav-mgmt">
+
+        <h6 class="mb-2 gcon-sidebar-subgroup-label text-secondary">Access</h6>
+
+        <div class="list-group mb-3">
 
             <a href="#" data-tab="organizations"
                class="list-group-item list-group-item-action">
@@ -136,11 +146,35 @@
                 <span class="gcon-sidebar-label">API Keys</span>
             </a>
 
+            <a href="#" data-tab="permissions"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-shield-lock me-2"></i>
+                <span class="gcon-sidebar-label">Permissions</span>
+            </a>
+
+        </div>
+
+        <h6 class="mb-2 gcon-sidebar-subgroup-label text-secondary">Security</h6>
+
+        <div class="list-group mb-3">
+
             <a href="#" data-tab="security"
                class="list-group-item list-group-item-action">
                 <i class="bi bi-shield-lock-fill me-2"></i>
                 <span class="gcon-sidebar-label">Security &amp; Keys</span>
             </a>
+
+            <a href="#" data-tab="audit-logs"
+               class="list-group-item list-group-item-action">
+                <i class="bi bi-journal-text me-2"></i>
+                <span class="gcon-sidebar-label">Audit Logs</span>
+            </a>
+
+        </div>
+
+        <h6 class="mb-2 gcon-sidebar-subgroup-label text-secondary">Billing</h6>
+
+        <div class="list-group mb-3">
 
             <a href="#" data-tab="staking"
                class="list-group-item list-group-item-action">
@@ -160,17 +194,11 @@
                 <span class="gcon-sidebar-label">Webhooks</span>
             </a>
 
-            <a href="#" data-tab="permissions"
-               class="list-group-item list-group-item-action">
-                <i class="bi bi-shield-lock me-2"></i>
-                <span class="gcon-sidebar-label">Permissions</span>
-            </a>
+        </div>
 
-            <a href="#" data-tab="audit-logs"
-               class="list-group-item list-group-item-action">
-                <i class="bi bi-journal-text me-2"></i>
-                <span class="gcon-sidebar-label">Audit Logs</span>
-            </a>
+        <h6 class="mb-2 gcon-sidebar-subgroup-label text-secondary">System</h6>
+
+        <div class="list-group">
 
             <a href="#" data-tab="notifications"
                class="list-group-item list-group-item-action">
@@ -184,6 +212,8 @@
                 <i class="bi bi-gear me-2"></i>
                 <span class="gcon-sidebar-label">Administration</span>
             </a>
+
+        </div>
 
         </div>
 
