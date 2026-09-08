@@ -541,6 +541,8 @@ class PresentationLayer:
                     "running_jobs": node["running_jobs"],
                     "last_seen": node["last_seen"],
                     "draining": node["draining"],
+                    "quarantined": node["quarantined"],
+                    "quarantine_reason": node["quarantine_reason"],
                 }
                 for node in nodes
             ],
