@@ -1811,6 +1811,16 @@ a { text-decoration: none; }
     letter-spacing: .07em;
 }
 
+.gcon-sidebar .gcon-sidebar-subgroup-label {
+    color: var(--muted);
+    font-size: .62rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    opacity: .7;
+    padding-left: 10px;
+}
+
 .gcon-sidebar .list-group-item {
     background: transparent;
     color: var(--text-dim);
@@ -1846,6 +1856,7 @@ a { text-decoration: none; }
 /* Collapsed sidebar: icon rail only */
 .gcon-sidebar.gcon-sidebar-collapsed { width: 58px; }
 .gcon-sidebar.gcon-sidebar-collapsed .gcon-sidebar-group-label,
+.gcon-sidebar.gcon-sidebar-collapsed .gcon-sidebar-subgroup-label,
 .gcon-sidebar.gcon-sidebar-collapsed .gcon-sidebar-label,
 .gcon-sidebar.gcon-sidebar-collapsed .gcon-sidebar-collapse-label {
     display: none;
