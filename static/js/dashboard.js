@@ -173,13 +173,13 @@ function renderFeed(containerId, events) {
 const TAB_TITLES = {
     "control-center": "Control Center",
     "executions": "Executions",
-    "cluster": "Cluster",
-    "topology": "Cluster Visualization",
+    "cluster": "Cluster Summary",
+    "topology": "Topology Map",
     "receipts": "Receipts",
     "trust-center": "Trust Center",
     "explorer": "Explorer",
     "workflows": "Workflows",
-    "monitoring": "Real-Time Monitoring",
+    "monitoring": "Live Metrics",
     "analytics": "Analytics & History",
     "events": "Events",
     "storage": "Storage",
@@ -1466,13 +1466,14 @@ function buildTopologySvg(topo, interactive) {
         const y = centerY + 140 + row * 110;
 
         const status = (node.status || "").toLowerCase();
-        const color = statusColor[status] || "#8A8F9B";
+        const isQuarantined = !!node.quarantined;
+        const color = isQuarantined ? "#F97316" : (statusColor[status] || "#8A8F9B");
         const age = nodeHeartbeatAgeSeconds(node.last_seen);
         const isFresh = age !== null && age < 15 && status !== "offline";
         const isBusy = (node.running_jobs || 0) > 0;
-        const isOffline = status === "offline";
+        const isOffline = status === "offline" && !isQuarantined;
 
-        const edgeStroke = isOffline ? "rgba(239,68,68,0.35)" : isBusy ? "#3B82F6" : "rgba(255,255,255,0.14)";
+        const edgeStroke = isOffline ? "rgba(239,68,68,0.35)" : isQuarantined ? "rgba(249,115,22,0.45)" : isBusy ? "#3B82F6" : "rgba(255,255,255,0.14)";
         const edgeDash = isBusy ? ' stroke-dasharray="6 5" class="gcon-topo-edge-active"' : "";
 
         svg += `<line x1="${centerX}" y1="${centerY + 34}" x2="${x}" y2="${y - 26}" stroke="${edgeStroke}" stroke-width="2"${edgeDash} />`;
@@ -1483,9 +1484,11 @@ function buildTopologySvg(topo, interactive) {
             svg += `<circle cx="${x}" cy="${y}" r="32" fill="none" stroke="${color}" stroke-width="2" opacity=".35" class="gcon-topo-pulse-ring" />`;
         }
 
-        svg += `<circle cx="${x}" cy="${y}" r="26" fill="${color}" ${node.draining ? 'stroke="#F59E0B" stroke-width="3"' : ""} />`;
+        svg += `<circle cx="${x}" cy="${y}" r="26" fill="${color}" ${node.draining ? 'stroke="#F59E0B" stroke-width="3"' : isQuarantined ? 'stroke="#F97316" stroke-width="3" stroke-dasharray="4 3"' : ""} />`;
 
-        if (isOffline) {
+        if (isQuarantined) {
+            svg += `<text x="${x}" y="${y + 5}" text-anchor="middle" fill="white" font-size="14" font-weight="bold">Q</text>`;
+        } else if (isOffline) {
             svg += `<text x="${x}" y="${y + 5}" text-anchor="middle" fill="white" font-size="16" font-weight="bold">!</text>`;
         } else if (isBusy) {
             svg += `
@@ -1496,7 +1499,7 @@ function buildTopologySvg(topo, interactive) {
 
         svg += `
             <text x="${x}" y="${isOffline ? y + 22 : y + 4}" text-anchor="middle" fill="white" font-size="10" font-weight="bold">${isOffline ? "" : escapeHtml(node.node_id)}</text>
-            <text x="${x}" y="${y + 44}" text-anchor="middle" fill="#8A8F9B" font-size="11">${escapeHtml(node.node_id)} · ${escapeHtml(node.status)}${node.draining ? " · draining" : ""}</text>
+            <text x="${x}" y="${y + 44}" text-anchor="middle" fill="#8A8F9B" font-size="11">${escapeHtml(node.node_id)} · ${escapeHtml(node.status)}${node.draining ? " · draining" : ""}${isQuarantined ? " · quarantined" : ""}</text>
         `;
 
         svg += `</g>`;
@@ -1513,6 +1516,7 @@ function buildTopologyLegend() {
             <span class="item"><span class="swatch" style="background:#3B82F6;"></span>Busy</span>
             <span class="item"><span class="swatch" style="background:#EF4444;"></span>Offline</span>
             <span class="item"><span class="swatch" style="border:2px solid #F59E0B;"></span>Draining</span>
+            <span class="item"><span class="swatch" style="background:#F97316;"></span>Quarantined</span>
             <span class="item"><span class="ring"></span>Fresh heartbeat</span>
         </div>
     `;
@@ -1532,6 +1536,15 @@ function openNodeTopologyDetail(node) {
                 </span>
             </div>
             ${node.draining ? `<div class="text-warning small"><i class="bi bi-exclamation-triangle me-1"></i>Draining — not accepting new jobs</div>` : ""}
+            ${node.quarantined ? `
+                <div class="text-warning small mt-2">
+                    <i class="bi bi-shield-exclamation me-1"></i>
+                    Quarantined${node.quarantine_reason ? `: ${escapeHtml(node.quarantine_reason)}` : ""} — isolated from scheduling, not removed from the fleet.
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-warning mt-2" id="node-clear-quarantine-btn">
+                    Clear Quarantine
+                </button>
+            ` : ""}
         </div>
         <div class="gcon-panel mb-3">
             <strong class="d-block mb-2">Live State</strong>
@@ -1540,9 +1553,26 @@ function openNodeTopologyDetail(node) {
             ${receiptDetailRow("Running Jobs", escapeHtml(node.running_jobs))}
             ${receiptDetailRow("Last Heartbeat", escapeHtml(node.last_seen || "-"))}
             ${receiptDetailRow("Heartbeat Age", age === null ? "--" : formatAge(age))}
+            ${node.gpu_name ? receiptDetailRow("GPU", formatGpuCell(node)) : ""}
         </div>
     `;
-    openDrawer();
+
+    const clearBtn = document.getElementById("node-clear-quarantine-btn");
+    if (clearBtn) {
+        clearBtn.addEventListener("click", async () => {
+            clearBtn.disabled = true;
+            try {
+                await opCall(
+                    `/cluster/nodes/${encodeURIComponent(node.node_id)}/clear-quarantine`,
+                    { method: "POST" },
+                    `${node.node_id} cleared from quarantine.`
+                );
+                closeDrawer();
+            } catch (err) {
+                clearBtn.disabled = false;
+            }
+        });
+    }
 }
 
 function openCoordinatorTopologyDetail(coordinator) {
@@ -2180,14 +2210,26 @@ async function openExecutionDetail(jobId) {
 // ---------------------------------------------------------------
 
 const EXPLORER_COLUMNS = {
-    nodes: ["node_id", "address", "status", "running_jobs", "cpu", "memory", "last_seen"],
+    nodes: ["node_id", "address", "status", "running_jobs", "cpu", "memory", "gpu", "last_seen"],
     artifacts: ["artifact_id", "filename", "sha256", "size", "uploaded_at"],
 };
 
 const EXPLORER_HEADERS = {
-    nodes: ["Node ID", "Address", "Status", "Running Jobs", "CPU", "Memory", "Last Seen"],
+    nodes: ["Node ID", "Address", "Status", "Running Jobs", "CPU", "Memory", "GPU", "Last Seen"],
     artifacts: ["Artifact ID", "Filename", "SHA-256", "Size (bytes)", "Uploaded"],
 };
+
+// GPU fields (gpu_name/gpu_memory_used/gpu_memory_total/gpu_utilization_percent) are
+// already tracked live by the coordinator from worker heartbeats, but were never
+// surfaced anywhere outside a completed job's receipt. This formats them into the
+// one "gpu" synthetic column above so live utilization is visible per node.
+function formatGpuCell(row) {
+    if (!row.gpu_name) return "-";
+    const pct = row.gpu_utilization_percent != null ? `${Math.round(row.gpu_utilization_percent)}%` : "-";
+    const used = row.gpu_memory_used ?? "-";
+    const total = row.gpu_memory_total ?? "-";
+    return `${escapeHtml(row.gpu_name)} &middot; ${pct} &middot; ${used}/${total} MB`;
+}
 
 const EXPLORER_BADGE_COLUMNS = new Set(["status"]);
 
@@ -2277,6 +2319,11 @@ function renderExplorerRows(rows) {
 
                 html +=
                     `<td>${statusBadge(value)}</td>`;
+
+            } else if (column === "gpu") {
+
+                html +=
+                    `<td>${formatGpuCell(row)}</td>`;
 
             } else {
 
@@ -2385,19 +2432,6 @@ async function loadMonitoring() {
                     <div class="gcon-summary-legend">
                         <span class="item"><span class="swatch" style="background:var(--info);"></span>${metrics.artifact_count ?? 0} artifact(s)</span>
                     </div>
-                </div>
-            `;
-        }
-
-        const servicesHealth = document.getElementById("sm-services-health");
-        if (servicesHealth) {
-            const svc = (healthy, onLabel, offLabel) =>
-                `<span class="gcon-service-value ${healthy ? "ok" : "bad"}">${healthy ? onLabel : offLabel}</span>`;
-            servicesHealth.innerHTML = `
-                <div class="gcon-service-list">
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ${metrics.coordinator_online ? "ok" : "bad"}"></span>Coordinator</span>${svc(metrics.coordinator_online, "Online", "Offline")}</div>
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ${metrics.scheduler_running ? "ok" : "bad"}"></span>Scheduler</span>${svc(metrics.scheduler_running, "Running", "Paused")}</div>
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot"></span>Heartbeat</span><span class="gcon-service-value muted">${formatAge(metrics.heartbeat_age_seconds)}</span></div>
                 </div>
             `;
         }
@@ -3729,6 +3763,34 @@ async function setupSecurityTab() {
             } catch (err) {
                 console.error("Failed to rotate CA:", err);
                 showToast(err.message || "Failed to rotate CA.", true);
+            }
+        });
+    }
+
+    const revokeNodeBtn = document.getElementById("security-revoke-node-btn");
+    if (revokeNodeBtn) {
+        revokeNodeBtn.addEventListener("click", async () => {
+            const nodeIdEl = document.getElementById("security-revoke-node-id");
+            const reasonEl = document.getElementById("security-revoke-reason");
+            const nodeId = (nodeIdEl?.value || "").trim();
+            if (!nodeId) {
+                showToast("Enter a node ID to revoke.", true);
+                return;
+            }
+            if (!confirm(`Revoke the mTLS certificate for node "${nodeId}"? It will be unable to reconnect to the coordinator until re-issued a certificate.`)) return;
+            try {
+                await fetchJson(`/management/keys/mtls/revoke/${encodeURIComponent(nodeId)}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ reason: (reasonEl?.value || "").trim() }),
+                });
+                showToast(`Certificate revoked for ${nodeId}.`);
+                if (nodeIdEl) nodeIdEl.value = "";
+                if (reasonEl) reasonEl.value = "";
+                await loadSecurityTab();
+            } catch (err) {
+                console.error("Failed to revoke node certificate:", err);
+                showToast(err.message || "Failed to revoke certificate.", true);
             }
         });
     }
