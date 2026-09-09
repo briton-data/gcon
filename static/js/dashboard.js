@@ -1851,6 +1851,44 @@ async function openReceiptDetail(receiptId) {
             </div>
         `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
 
+        // Usage & cost -- opt-in, job-self-reported (see receipt.usage's
+        // backend docstring), so this panel only appears when a job
+        // actually cooperated with the GCON_USAGE_REPORT_PATH convention.
+        // cost_estimate is always present (compute time alone is enough
+        // to estimate against), but rendered inline with the usage
+        // numbers since "how much did this cost" is the question both
+        // answer together.
+        const usage = r.usage || null;
+        const tokens = usage?.llm_tokens || null;
+        const cost = r.cost_estimate || null;
+        const fmtCents = (c) => c == null ? "-" : `$${(c / 100).toFixed(6)}`;
+        const usageCostPanel = (usage || cost) ? `
+            <div class="gcon-panel mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>Usage &amp; Estimated Cost</strong>
+                    <span class="text-secondary small">self-reported, unverified</span>
+                </div>
+                ${tokens ? `
+                    ${receiptDetailRow("Model", escapeHtml(tokens.model || "-"))}
+                    ${receiptDetailRow("Input Tokens", escapeHtml(tokens.input ?? "-"))}
+                    ${receiptDetailRow("Output Tokens", escapeHtml(tokens.output ?? "-"))}
+                ` : `<div class="text-secondary small mb-2">No token usage reported by this job.</div>`}
+                ${cost ? `
+                    <div class="mt-2 pt-2 border-top">
+                        ${receiptDetailRow("Compute Cost", fmtCents(cost.compute_cents))}
+                        ${cost.llm_input_cents != null ? receiptDetailRow("Input Token Cost", fmtCents(cost.llm_input_cents)) : ""}
+                        ${cost.llm_output_cents != null ? receiptDetailRow("Output Token Cost", fmtCents(cost.llm_output_cents)) : ""}
+                        ${receiptDetailRow("Estimated Total", `<strong>${fmtCents(cost.total_cents)}</strong>`)}
+                    </div>
+                    <div class="text-secondary small mt-1">
+                        Estimate at current pricing, not a billed charge -- an
+                        invoice aggregates a whole billing period and rounds once,
+                        not per job.
+                    </div>
+                ` : ""}
+            </div>
+        ` : "";
+
         body.innerHTML = `
             <div class="gcon-panel mb-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1883,6 +1921,8 @@ async function openReceiptDetail(receiptId) {
                 ${receiptDetailRow("Started", escapeHtml(r.execution.created_at || "-"))}
                 ${receiptDetailRow("Completed", escapeHtml(r.execution.completed_at || "-"))}
             </div>
+
+            ${usageCostPanel}
 
             <div class="gcon-panel mb-3">
                 <strong class="d-block mb-2">Job Output</strong>

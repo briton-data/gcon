@@ -383,12 +383,25 @@ class AgentDaemon:
                     f"gcon-stages-{job_assign.job_id}.jsonl",
                 )
 
+        # usage_report_path applies to every job kind, not just staged
+        # ones -- any job's subprocess (an AI-agent workload calling
+        # an LLM, for instance) may want to self-report usage, so this
+        # is generated unconditionally rather than gated on
+        # metadata_json/kind the way stage_report_path is above. This
+        # was previously never derived at all on this path, which
+        # meant GCONAgent.execute_job's usage_report_path parameter
+        # was permanently unreachable for every job run over gRPC too.
+        usage_report_path = os.path.join(
+            tempfile.gettempdir(), f"gcon-usage-{job_assign.job_id}.json"
+        )
+
         try:
             result = self.agent.execute_job(
                 job_assign.job_id,
                 job_assign.command,
                 timeout=timeout,
                 stage_report_path=stage_report_path,
+                usage_report_path=usage_report_path,
             )
         except Exception as exc:  # the execution engine is untouched and may itself
             # raise rather than return an error dict for unexpected failures;
