@@ -13,8 +13,8 @@ class _FakeNode:
         self._cancel_result = cancel_result
         self.executed_with = None
 
-    def execute_job(self, job_id, command, timeout=None):
-        self.executed_with = (job_id, command, timeout)
+    def execute_job(self, job_id, command, timeout=None, usage_report_path=None):
+        self.executed_with = (job_id, command, timeout, usage_report_path)
         return self._result
 
     def cancel(self):
@@ -60,7 +60,16 @@ def test_send_job_delegates_and_wraps_result():
     response = manager.send_job("node-1", "job-1", "echo hi", timeout=30)
 
     assert response == {"status": "success", "result": {"status": "success", "stdout": "hi"}}
-    assert node.executed_with == ("job-1", "echo hi", 30)
+    job_id, command, timeout, usage_report_path = node.executed_with
+    assert (job_id, command, timeout) == ("job-1", "echo hi", 30)
+    # Previously LocalTransport never generated a usage_report_path at
+    # all, so GCONAgent.execute_job's usage_report_path parameter was
+    # unreachable for every job run through LocalTransport (confirmed
+    # empirically pre-fix: a real job's receipt always had usage: null).
+    # This asserts the real fix: a real, job-specific path is now always
+    # passed, not just tolerated by a wider function signature.
+    assert usage_report_path is not None
+    assert "job-1" in usage_report_path
 
 
 def test_send_job_to_unknown_node_raises():
