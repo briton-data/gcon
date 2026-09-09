@@ -356,6 +356,14 @@ class ExecutionVerifier:
             "status": execution_result.get("status", "unknown"),
             "input_hash": input_hash,
             "output_hash": output_hash,
+            # Deliberately NOT inside "proof" below (the signed/attested
+            # payload). Unlike runtime/gpu -- which GCON measures itself,
+            # independent of what the job claims -- usage is opt-in and
+            # self-reported by the job's own subprocess (see
+            # GCONAgent.execute_job's usage_report_path docstring). Signing
+            # it into the cryptographic proof would misrepresent an
+            # unverified self-report as something GCON attests to.
+            "usage": execution_result.get("usage"),
             "proof": self.generate_execution_proof(
                 job_id=job_id,
                 gpu_name=execution_result.get("metrics", {}).get("gpu_name", "Unknown"),
