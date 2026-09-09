@@ -31,10 +31,29 @@ inherit that table's own fidelity limit (documented in
 `_evict_completed_if_over_capacity`'s docstring): only
 command/status/completed_at/result/org_id survive per row, which is
 exactly what a runtime-seconds/token-usage rollup needs anyway.
+
+Metering previously stopped at compute + LLM tokens -- Execution and
+(partially) Evidence in GCON's own pipeline terms, but nothing here
+ever counted Verification (a replicated-execution comparison actually
+run), Assurance decision (a PolicyEngine.evaluate() actually run), or
+Receipt/proof (the signed receipt itself, the actual customer-facing
+deliverable) as billable at all, even though all three are real,
+already-happening events with their own durable record. Those three
+are metered the same way as jobs above: `_receipts_for_period` reads
+`control_plane.receipts` directly (joined to `jobs` for org_id, same
+join `ReceiptRepository.search_paginated` already uses), and
+`compute_receipt_usage_totals` counts them from each receipt's
+`payload_json` -- `execution_proof`/`policy_report` keys are only
+ever set once, at receipt-creation time (coordinator.py's
+create_receipt/_run_replicated_job/policy-engine wiring), so the
+payload already IS the durable record of whether each stage ran for
+that receipt, not a separately-tracked (and separately-driftable)
+counter.
 """
 
 from __future__ import annotations
 
+import json as _json
 from typing import Any, Dict, List, Optional
 
 from gcon.billing.pricing import PricingConfig, load_pricing
@@ -87,6 +106,59 @@ def compute_usage_totals(jobs: List[Dict[str, Any]]) -> Dict[str, float]:
     }
 
 
+def _receipts_for_period(
+    control_plane: ControlPlane, org_id: str, period_start: str, period_end: str
+) -> List[Dict[str, Any]]:
+    """Uploaded receipts for this org's jobs whose uploaded_at falls
+    inside [period_start, period_end) -- joined against jobs the same
+    way ReceiptRepository.search_paginated's org_id filter already
+    does (a receipt row has no org_id column of its own -- only
+    jobs.org_id does)."""
+    rows = control_plane.db.query(
+        """
+        SELECT r.* FROM receipts r
+        JOIN jobs j ON j.job_id = r.job_id
+        WHERE j.org_id = ? AND r.uploaded_at >= ? AND r.uploaded_at < ?
+        """,
+        (org_id, period_start, period_end),
+    )
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["payload"] = _json.loads(d["payload_json"]) if d.get("payload_json") else {}
+        out.append(d)
+    return out
+
+
+def compute_receipt_usage_totals(receipts: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Metering for the three billable stages that stopped at "trust
+    signal" and were never counted as usage at all: every uploaded
+    receipt is one billable Receipt/proof deliverable
+    (`receipt_count`); one whose payload has `execution_proof` had a
+    real replicated-execution Verification comparison run
+    (`verification_count`); one whose payload has `policy_report` had
+    a real Assurance decision (PolicyEngine.evaluate()) run
+    (`assurance_decision_count`). See module docstring for why these
+    are read from payload_json rather than separate counter columns.
+    """
+    receipt_count = 0
+    verification_count = 0
+    assurance_decision_count = 0
+    for receipt in receipts:
+        receipt_count += 1
+        payload = receipt.get("payload") or {}
+        if payload.get("execution_proof") is not None:
+            verification_count += 1
+        if payload.get("policy_report") is not None:
+            assurance_decision_count += 1
+    return {
+        "receipt_count": receipt_count,
+        "verification_count": verification_count,
+        "assurance_decision_count": assurance_decision_count,
+    }
+
+
 def build_line_items(usage: Dict[str, float], pricing: PricingConfig) -> List[Dict[str, Any]]:
     items = []
     if usage["compute_seconds"] > 0:
@@ -114,6 +186,33 @@ def build_line_items(usage: Dict[str, float], pricing: PricingConfig) -> List[Di
             "quantity": usage["llm_output_tokens"],
             "unit": "token",
             "unit_price_cents": pricing.llm_output_token_cents,
+            "amount_cents": int(amount),
+        })
+    if usage.get("verification_count", 0) > 0:
+        amount = round(usage["verification_count"] * pricing.verification_check_cents)
+        items.append({
+            "description": "Verification (replicated-execution checks run)",
+            "quantity": usage["verification_count"],
+            "unit": "verification",
+            "unit_price_cents": pricing.verification_check_cents,
+            "amount_cents": int(amount),
+        })
+    if usage.get("assurance_decision_count", 0) > 0:
+        amount = round(usage["assurance_decision_count"] * pricing.assurance_decision_cents)
+        items.append({
+            "description": "Assurance decisions (policy evaluations run)",
+            "quantity": usage["assurance_decision_count"],
+            "unit": "decision",
+            "unit_price_cents": pricing.assurance_decision_cents,
+            "amount_cents": int(amount),
+        })
+    if usage.get("receipt_count", 0) > 0:
+        amount = round(usage["receipt_count"] * pricing.receipt_cents)
+        items.append({
+            "description": "Receipts issued (signed proof of execution)",
+            "quantity": usage["receipt_count"],
+            "unit": "receipt",
+            "unit_price_cents": pricing.receipt_cents,
             "amount_cents": int(amount),
         })
     if pricing.flat_fee_per_job_cents > 0 and usage["job_count"] > 0:
@@ -146,7 +245,8 @@ def generate_invoice(
     """
     pricing = pricing or load_pricing(control_plane)
     jobs = _jobs_for_period(control_plane, org_id, period_start, period_end)
-    usage = compute_usage_totals(jobs)
+    receipts = _receipts_for_period(control_plane, org_id, period_start, period_end)
+    usage = {**compute_usage_totals(jobs), **compute_receipt_usage_totals(receipts)}
     line_items = build_line_items(usage, pricing)
     return control_plane.invoices.create(
         org_id=org_id,

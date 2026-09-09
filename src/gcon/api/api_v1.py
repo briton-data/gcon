@@ -484,7 +484,16 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}},
     )
     def list_receipts(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_receipts())
+        # Same org-scoping as list_nodes/list_jobs above -- this
+        # previously returned every receipt ever issued to any company
+        # to any key with "View monitoring", not just the caller's
+        # own receipts. Receipts are the customer-facing proof
+        # artifact, so this was the sharpest version of the
+        # cross-tenant leak: any org's API key could read every other
+        # org's execution receipts.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_receipts(org_id=org_id))
 
     @app.get(
         "/artifacts",

@@ -27,10 +27,20 @@ from gcon.monitoring.health_service import HealthService
 from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
 from gcon.transport.config import TransportConfig
+from gcon.billing.pricing import load_pricing, estimate_job_cost
 
 class NotLeaderError(RuntimeError):
     """Raised by a standby coordinator (see gcon.cluster.leader_election)
     when asked to do something only the active leader may do."""
+    pass
+
+
+class PolicyRejectionError(RuntimeError):
+    """Raised by submit_job() when PolicyEngine.check_submission()
+    rejects the submission outright (see policy_engine.py's module
+    docstring for why this is a real pre-dispatch gate, distinct from
+    evaluate()'s post-hoc trust-signal check). The job is never
+    created, queued, or persisted -- there is nothing to clean up."""
     pass
 
 
@@ -557,6 +567,14 @@ class GCONCoordinator:
         attribute a flood to), only by the coordinator-wide
         _max_jobs_in_memory bound.
 
+        Raises PolicyRejectionError if PolicyEngine.check_submission()
+        rejects this submission's declared kind/requires/verify/org_id
+        against policy.json's submission-time settings (max_replicas,
+        max_requires, require_org_id) -- see policy_engine.py. This is
+        a real pre-dispatch gate: unlike the post-hoc evaluate() check
+        that annotates a completed job's receipt, this can and does
+        refuse the job outright, before it's created or queued.
+
         Raises NotLeaderError if this coordinator is running as part
         of an HA cluster (leader_elector set -- see
         gcon.cluster.leader_election) and is currently a standby, not
@@ -588,6 +606,22 @@ class GCONCoordinator:
                     "-- replication needs at least 2 independent nodes to "
                     "compare against each other."
                 )
+
+        # Real, pre-dispatch assurance gate (see policy_engine.py's
+        # module docstring) -- checks only what's knowable right now
+        # (declared kind/requires/verify/org_id), so unlike
+        # PolicyEngine.evaluate() (which runs post-hoc on a job's
+        # actual measured metrics, after it's too late to reject),
+        # this CAN and does refuse the submission outright. Runs
+        # before the job is created/queued/persisted anywhere, so a
+        # rejection leaves nothing to clean up.
+        allowed, reason = self.policy_engine.check_submission(
+            kind=kind, requires=requires, verify=verify, org_id=org_id,
+        )
+        if not allowed:
+            raise PolicyRejectionError(
+                f"Submission rejected by policy: {reason}"
+            )
 
         dataset_artifacts = dataset_artifacts or []
         for artifact_id in dataset_artifacts:
@@ -3365,6 +3399,17 @@ class GCONCoordinator:
             # docstring for why.
             "execution_proof": receipt.get("execution_proof"),
             "replicas": replicas_summary,
+            # Job-self-reported, opt-in, never independently verified by
+            # GCON (see GCONAgent.execute_job's usage_report_path
+            # docstring) -- deliberately not part of the signed "proof"
+            # below, same reasoning as execution_proof above.
+            "usage": receipt.get("usage"),
+            # Estimated using current pricing against this one job's
+            # measured runtime + reported usage -- see
+            # billing.pricing.estimate_job_cost's docstring for why
+            # this is deliberately NOT the same rounding invoicing.py
+            # uses for a real invoice line.
+            "cost_estimate": estimate_job_cost(job_result, load_pricing(self.control_plane), receipt=receipt),
             "proof": {
                 "algorithm": "HMAC-SHA256",
                 "gpu": proof.get("gpu"),

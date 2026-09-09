@@ -689,6 +689,91 @@ class TestPolicyEngine:
         assert report["trusted"] is False
 
 
+class TestPolicyEngineSubmissionGate:
+    """
+    check_submission()/evaluate_submission() -- the real, pre-dispatch
+    gate (distinct from evaluate() above, which is necessarily
+    post-hoc -- see policy_engine.py's module docstring). These check
+    a submission's declared kind/requires/verify/org_id BEFORE
+    anything runs, so unlike evaluate() they can actually reject.
+    """
+
+    def _engine_with(self, **overrides):
+        from tests.support.policy import PolicyEngine
+
+        engine = PolicyEngine(policy_file="__no_such_file__.json")  # built-in defaults
+        engine.policy.update(overrides)
+        return engine
+
+    def test_default_policy_places_no_submission_restrictions(self):
+        engine = self._engine_with()
+        allowed, reason = engine.check_submission(
+            kind="resourced", requires={"min_vram_gb": 999}, verify={"replicas": 50}, org_id=None,
+        )
+        assert allowed is True
+        assert reason is None
+
+    def test_replicas_over_max_replicas_is_rejected(self):
+        engine = self._engine_with(max_replicas=3)
+        allowed, reason = engine.check_submission(verify={"replicas": 5})
+        assert allowed is False
+        assert "max_replicas" in reason
+
+        allowed, _ = engine.check_submission(verify={"replicas": 3})
+        assert allowed is True
+
+    def test_requires_over_max_requires_ceiling_is_rejected(self):
+        engine = self._engine_with(max_requires={"min_vram_gb": 40})
+        allowed, reason = engine.check_submission(requires={"min_vram_gb": 80})
+        assert allowed is False
+        assert "min_vram_gb" in reason
+
+        allowed, _ = engine.check_submission(requires={"min_vram_gb": 40})
+        assert allowed is True
+        # A requires key with no matching max_requires entry is
+        # unrestricted -- only ceilings the operator actually
+        # configured apply.
+        allowed, _ = engine.check_submission(requires={"min_cpu_cores": 999})
+        assert allowed is True
+
+    def test_require_org_id_rejects_unattributed_submissions(self):
+        engine = self._engine_with(require_org_id=True)
+        allowed, reason = engine.check_submission(org_id=None)
+        assert allowed is False
+        assert "org_id" in reason
+
+        allowed, _ = engine.check_submission(org_id="acme")
+        assert allowed is True
+
+    def test_evaluate_submission_wraps_check_submission_as_a_report(self):
+        engine = self._engine_with(max_replicas=1)
+        report = engine.evaluate_submission(verify={"replicas": 2})
+        assert report["allowed"] is False
+        assert report["checks"][0]["passed"] is False
+        assert "max_replicas" in report["checks"][0]["message"]
+
+    def test_policy_json_missing_new_keys_still_gets_defaults(self, tmp_path):
+        """
+        A policy.json written before this feature existed (e.g. this
+        repo's own root policy.json) only sets the original 5 keys.
+        Loading it must not KeyError on the new submission-gate keys
+        -- they should fall back to their "no restriction" defaults
+        via the load-time merge, not a full replace.
+        """
+        from tests.support.policy import PolicyEngine
+
+        old_style_file = tmp_path / "policy.json"
+        old_style_file.write_text(
+            '{"version": "1.0", "max_runtime": 30.0, "max_cpu_percent": 90.0, '
+            '"max_memory_percent": 95.0, "require_gpu": false}'
+        )
+        engine = PolicyEngine(policy_file=str(old_style_file))
+        assert engine.policy["max_runtime"] == 30.0  # old key, from the file
+        assert engine.policy["max_replicas"] is None  # new key, defaulted
+        allowed, _ = engine.check_submission(verify={"replicas": 999})
+        assert allowed is True
+
+
 # =======================================================================
 # 6. SECURITY-ADJACENT DEFAULTS
 # =======================================================================
