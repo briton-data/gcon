@@ -561,6 +561,25 @@ class PresentationLayer:
         """
         return self.coordinator.get_receipts(org_id=org_id)
 
+    def get_telemetry_events(self, job_id=None, node_id=None, since=None, org_id=None, limit=200):
+        """
+        GET /telemetry/events's backing call -- see
+        gcon.telemetry's module docstring for what a telemetry event
+        actually is (a job-lifecycle trace entry, distinct from
+        cluster_events/the dashboard notification bus). Requires a
+        real control_plane (durable telemetry_events table); a
+        LocalTransport-only coordinator with no control_plane has
+        nothing durable to query here (its events only ever lived in
+        self.telemetry's in-memory ring buffer for that process's
+        lifetime) -- returns an empty list rather than raising, same
+        "no control_plane = nothing durable" shape as other read paths.
+        """
+        if self.coordinator.control_plane is None:
+            return []
+        return self.coordinator.control_plane.telemetry_events.query(
+            job_id=job_id, node_id=node_id, since=since, org_id=org_id, limit=limit,
+        )
+
     def get_receipts_page(self, verified=None, search=None, org_id=None, limit=50, offset=0):
         """Real server-side pagination for the Receipts tab -- see
         coordinator.get_receipts_page's docstring. Returns
