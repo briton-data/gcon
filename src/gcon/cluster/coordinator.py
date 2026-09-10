@@ -28,6 +28,7 @@ from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
 from gcon.transport.config import TransportConfig
 from gcon.billing.pricing import load_pricing, estimate_job_cost
+from gcon import telemetry as telemetry_module
 
 class NotLeaderError(RuntimeError):
     """Raised by a standby coordinator (see gcon.cluster.leader_election)
@@ -222,6 +223,16 @@ class GCONCoordinator:
         # LocalTransport path) pass none and simply run with no
         # persisted history, exactly as before.
         self.control_plane = control_plane
+        # Job-lifecycle telemetry (see gcon.telemetry's module
+        # docstring): trace_id minted once per job at submit_job(),
+        # threaded through dispatch/execution/verification, one
+        # queryable trace per job rather than scattered log lines.
+        # control_plane=None (see above) means events still flow
+        # through the in-memory ring buffer and drive derived_metrics()
+        # for this process's lifetime, just without surviving a
+        # restart -- same optional-durability pattern as everything
+        # else here.
+        self.telemetry = telemetry_module.TelemetryCollector(control_plane=control_plane)
         # Bonded-stake ledger (see gcon.execution.staking). Requires a
         # real control-plane DB to persist balances against, same
         # restriction as the receipt/job durability above -- a
@@ -672,6 +683,16 @@ class GCONCoordinator:
                 "dataset_artifacts": dataset_artifacts,
                 "callback_url": callback_url,
                 "verify": verify,
+                # Minted once, here, and threaded through the rest of
+                # this job's life (assign_job -> dispatch -> _run_job/
+                # _run_replicated_job -> the receipt itself as an
+                # unsigned sibling field) -- see gcon.telemetry's
+                # module docstring. Carried on the in-memory job dict,
+                # not a new jobs-table column: telemetry_events already
+                # links back to this job via job_id independently, so
+                # a durable trace_id column on jobs would just be a
+                # second, redundant place for the same fact to live.
+                "trace_id": telemetry_module.new_trace_id(),
     }
         self.queue_job(job_id)
 
@@ -696,7 +717,7 @@ class GCONCoordinator:
                         (callback_url, job_id),
                     )
             except Exception as e:
-                print(f"[PERSIST] Failed to persist job '{job_id}': {e!r}")
+                self.telemetry.warning(f"[PERSIST] Failed to persist job '{job_id}': {e!r}")
 
         self.event_bus.publish(
             Event(
@@ -713,8 +734,12 @@ class GCONCoordinator:
         },
     )
 )
-        print(f"[QUEUE] Job {job_id} queued")
-        print(f"[QUEUE] Pending jobs: {self.job_queue.qsize()}")
+        self.telemetry.emit(
+            "job_submitted", trace_id=self.jobs[job_id]["trace_id"],
+            job_id=job_id, payload={"command": command, "org_id": org_id, "kind": kind},
+        )
+        self.telemetry.info(f"[QUEUE] Job {job_id} queued")
+        self.telemetry.info(f"[QUEUE] Pending jobs: {self.job_queue.qsize()}")
     
     def assign_job(self, job_id):
         """
@@ -731,7 +756,7 @@ class GCONCoordinator:
     # with the background scheduler_loop thread, which also
     # consumes the job queue. Assigning twice would run the
     # same job on two nodes.
-            print(
+            self.telemetry.info(
                 f"[QUEUE] Job {job_id} is already '{job['status']}', "
                 "skipping re-assignment."
     )
@@ -746,11 +771,20 @@ class GCONCoordinator:
 
         if node is None:
             if job.get("requires"):
+                self.telemetry.emit(
+                    "job_dispatch_failed", trace_id=job.get("trace_id") or telemetry_module.new_trace_id(),
+                    job_id=job_id, level="WARN",
+                    payload={"reason": "no node satisfies requires", "requires": job["requires"]},
+                )
                 raise RuntimeError(
                     f"No available node satisfies job '{job_id}'s requirements "
                     f"({job['requires']}) -- either none are idle right now, or "
                     "none have matching reported capabilities."
                 )
+            self.telemetry.emit(
+                "job_dispatch_failed", trace_id=job.get("trace_id") or telemetry_module.new_trace_id(),
+                job_id=job_id, level="WARN", payload={"reason": "no available nodes"},
+            )
             raise RuntimeError("No available nodes to execute the job.")
 
     # Mark node and job as busy/running. select_node() worked from a
@@ -1409,8 +1443,12 @@ class GCONCoordinator:
             # Anything going wrong here (network error, agent crash,
             # bad response shape, etc.) must NOT leave the job
             # "running" and the node "busy" forever.
-            print(f"[ERROR] _run_job failed for '{job_id}' on "
-                  f"'{node.node_id}': {e}")
+            self.telemetry.error(
+                f"[ERROR] _run_job failed for '{job_id}' on "
+                f"'{node.node_id}': {e}",
+                event_type="job_execution_failed", trace_id=job.get("trace_id"),
+                job_id=job_id, node_id=node.node_id, payload={"error": str(e)},
+            )
 
             # Best-effort: tell the node to stop the job before freeing
             # it back to idle. Without this, a dispatch that failed
@@ -1432,9 +1470,11 @@ class GCONCoordinator:
             try:
                 self.communication.cancel_job(node.node_id, job_id)
             except Exception as cancel_error:
-                print(f"[WARN] best-effort cancel_job failed for "
-                      f"'{job_id}' on '{node.node_id}' (proceeding "
-                      f"anyway): {cancel_error}")
+                self.telemetry.warning(
+                    f"[WARN] best-effort cancel_job failed for "
+                    f"'{job_id}' on '{node.node_id}' (proceeding "
+                    f"anyway): {cancel_error}"
+                )
 
             self._advance_workflow(job_id, job, success=False)
 
@@ -1534,6 +1574,15 @@ class GCONCoordinator:
                     job_id, node.node_id, result, input_hash, output_hash,
                     attested_node_id=self._attested_node_id(node.node_id),
                 )
+                # Unsigned sibling field, same precedent as
+                # execution_proof/usage/policy_report -- lets a later
+                # validate_proof() call (see
+                # _drain_pending_receipt_verifications) look up this
+                # job's trace_id straight off the receipt itself,
+                # without a separate job_id->trace_id lookup that could
+                # go stale once a job is evicted from self.jobs (see
+                # _evict_completed_if_over_capacity).
+                receipt["trace_id"] = job.get("trace_id")
                 self.receive_receipt(job_id, receipt)
 
                 # Persist this coordinator-signed receipt so it survives
@@ -1585,6 +1634,11 @@ class GCONCoordinator:
                     failed_checks = [
                         c["message"] for c in policy_report["checks"] if not c["passed"]
                     ]
+                    self.telemetry.emit(
+                        "policy_violation", trace_id=job.get("trace_id"), level="WARN",
+                        job_id=job_id, node_id=node.node_id,
+                        payload={"failed_checks": failed_checks},
+                    )
                     self.event_bus.publish(Event(
                         timestamp=datetime.now(UTC),
                         event_type="POLICY_VIOLATION",
@@ -1596,7 +1650,10 @@ class GCONCoordinator:
                         },
                     ))
             except Exception as e:
-                print(f"[WARN] Receipt generation failed for '{job_id}': {e}")
+                self.telemetry.warning(
+                    f"[WARN] Receipt generation failed for '{job_id}': {e}",
+                    trace_id=job.get("trace_id"), job_id=job_id,
+                )
 
             self.event_bus.publish(
                 Event(
@@ -1664,14 +1721,20 @@ class GCONCoordinator:
                 )
                 result = response["result"]
             except Exception as e:
-                print(f"[ERROR] _run_replicated_job failed for '{job_id}' on "
-                      f"'{node.node_id}': {e}")
+                self.telemetry.error(
+                    f"[ERROR] _run_replicated_job failed for '{job_id}' on "
+                    f"'{node.node_id}': {e}",
+                    trace_id=job.get("trace_id"), job_id=job_id, node_id=node.node_id,
+                )
                 try:
                     self.communication.cancel_job(node.node_id, job_id)
                 except Exception as cancel_error:
-                    print(f"[WARN] best-effort cancel_job failed for "
-                          f"'{job_id}' on '{node.node_id}' (proceeding "
-                          f"anyway): {cancel_error}")
+                    self.telemetry.warning(
+                        f"[WARN] best-effort cancel_job failed for "
+                        f"'{job_id}' on '{node.node_id}' (proceeding "
+                        f"anyway): {cancel_error}",
+                        trace_id=job.get("trace_id"), job_id=job_id, node_id=node.node_id,
+                    )
 
                 node.status = "idle"
                 try:
@@ -1810,9 +1873,12 @@ class GCONCoordinator:
                     # outcome, not a bug. Scoped to just this node: the
                     # other replicas in this group are unaffected and
                     # still get their own receipts.
-                    print(
+                    self.telemetry.warning(
                         f"[WARN] Refused receipt for job '{job_id}' replica "
-                        f"'{node.node_id}': {mismatch_error}"
+                        f"'{node.node_id}': {mismatch_error}",
+                        event_type="policy_violation", trace_id=job.get("trace_id"),
+                        job_id=job_id, node_id=node.node_id,
+                        payload={"reason": "attested_node_id mismatch", "error": str(mismatch_error)},
                     )
                     self.event_bus.publish(Event(
                         timestamp=datetime.now(UTC),
@@ -1828,6 +1894,7 @@ class GCONCoordinator:
                 # Sibling to "proof", not inside it -- see replication.py's
                 # module docstring for why this is deliberately unsigned.
                 receipt["execution_proof"] = execution_proof
+                receipt["trace_id"] = job.get("trace_id")
 
                 # Policy is evaluated per-replica (each node's own
                 # reported metrics can differ -- e.g. one ran hotter or
@@ -1853,6 +1920,11 @@ class GCONCoordinator:
                     failed_checks = [
                         c["message"] for c in policy_report["checks"] if not c["passed"]
                     ]
+                    self.telemetry.emit(
+                        "policy_violation", trace_id=job.get("trace_id"), level="WARN",
+                        job_id=job_id, node_id=node.node_id,
+                        payload={"failed_checks": failed_checks},
+                    )
                     self.event_bus.publish(Event(
                         timestamp=datetime.now(UTC),
                         event_type="POLICY_VIOLATION",
@@ -1880,9 +1952,10 @@ class GCONCoordinator:
                             signature=receipt["proof"]["signature"],
                         )
                     except Exception as persist_error:
-                        print(
+                        self.telemetry.warning(
                             f"[WARN] Failed to persist replica receipt for "
-                            f"'{job_id}' node '{node.node_id}': {persist_error!r}"
+                            f"'{job_id}' node '{node.node_id}': {persist_error!r}",
+                            trace_id=job.get("trace_id"), job_id=job_id, node_id=node.node_id,
                         )
 
                 self.event_bus.publish(Event(
@@ -1897,6 +1970,11 @@ class GCONCoordinator:
                 ))
 
             if not comparison["agree"]:
+                self.telemetry.emit(
+                    "replica_disagreement", trace_id=job.get("trace_id"), level="WARN",
+                    job_id=job_id,
+                    payload={"witnesses": witnesses, "mismatches": comparison["mismatches"]},
+                )
                 self.event_bus.publish(Event(
                     timestamp=datetime.now(UTC),
                     event_type="EXECUTION_DISPUTED",
@@ -1907,8 +1985,16 @@ class GCONCoordinator:
                         "mismatches": comparison["mismatches"],
                     },
                 ))
+            else:
+                self.telemetry.emit(
+                    "verification_pass", trace_id=job.get("trace_id"),
+                    job_id=job_id, payload={"witnesses": witnesses},
+                )
         except Exception as e:
-            print(f"[WARN] Replicated receipt generation failed for '{job_id}': {e}")
+            self.telemetry.warning(
+                f"[WARN] Replicated receipt generation failed for '{job_id}': {e}",
+                trace_id=job.get("trace_id"), job_id=job_id,
+            )
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC),
@@ -3136,6 +3222,21 @@ class GCONCoordinator:
                 # _commit_receipt_verification below).
                 continue
             is_valid, _ = self.verifier.validate_proof(receipt.get("proof", {}))
+            # This is the "official" automatic verification moment for
+            # a single-node job's receipt (the replicated path's own
+            # agreement check already emits verification_pass/fail
+            # itself in _run_replicated_job -- this covers the
+            # single-node HMAC-signature-only case, which never goes
+            # through that comparison at all). trace_id comes off the
+            # receipt itself (see create_receipt call sites above),
+            # not a job_id lookup, so this still works for a receipt
+            # whose job has since been evicted from self.jobs.
+            self.telemetry.emit(
+                "verification_pass" if is_valid else "verification_fail",
+                trace_id=receipt.get("trace_id") or telemetry_module.new_trace_id(),
+                level="INFO" if is_valid else "WARN",
+                job_id=job_id, node_id=receipt.get("node_id"),
+            )
             if self._commit_receipt_verification(job_id, receipt, is_valid):
                 newly_verified.append((job_id, receipt, is_valid))
 
