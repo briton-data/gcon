@@ -35,8 +35,26 @@ print(client.get_health())
 client.submit_job("job-42", "python train.py")
 print(client.get_job("job-42"))
 
+# Resourced jobs (matched against node capabilities before dispatch)
+client.submit_job("job-gpu-1", "python train.py",
+                   kind="resourced", requires={"gpu": True, "min_vram_gb": 12})
+
+# Staged jobs (the job's own code reports progress checkpoints)
+client.submit_job("job-staged-1", "python long_pipeline.py",
+                   kind="staged", stages={"expected": 5})
+
+# Replicated/verified jobs (runs on N independent nodes, compares results)
+client.submit_job("job-verified-1", "python critical_calc.py",
+                   verify={"replicas": 2, "tolerance": 0.02})
+
 # Cancel it
 client.cancel_job("job-42")
+
+# Workflows: a DAG of jobs with dependencies between them
+client.submit_workflow("wf-1", jobs=[
+    {"job_id": "fetch", "command": "python fetch.py"},
+    {"job_id": "train", "command": "python train.py", "depends_on": ["fetch"]},
+])
 
 # Workflows, receipts, artifacts
 print(client.list_workflows())
