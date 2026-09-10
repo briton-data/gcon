@@ -18,6 +18,7 @@ The agent:
 import threading
 import time
 import os
+import tempfile
 import sys
 import signal
 import subprocess
@@ -29,6 +30,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime, UTC
 from gcon.monitoring.monitor import ResourceMonitor
+from gcon.execution import docker_executor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +81,15 @@ class GCONAgent:
         self.end_time = None
         self.metrics = []
         self.process = None
+        # Set at the top of execute_job(), read (not cleared) by
+        # cancel() -- see cancel()'s docstring for why docker mode
+        # needs the job_id to issue `docker kill` by container name,
+        # not just kill the local process. Mirrors self.process's own
+        # pattern: cancel() only ever acts on it while
+        # self.process.poll() is still None (i.e. still actually
+        # running), so a stale value here past that point is never
+        # acted on either.
+        self._current_job_id = None
         
         self.monitor = ResourceMonitor(self)
         self.heartbeat_running = False
@@ -96,6 +107,34 @@ class GCONAgent:
         # multi-hour job doesn't bloat every signed receipt with
         # thousands of near-duplicate readings.
         self._max_gpu_samples_retained = int(os.environ.get("GCON_MAX_GPU_SAMPLES_IN_RECEIPT", "60"))
+        # Sandboxed job execution (see docker_executor.py's module
+        # docstring for the full rationale) -- opt-in, off by default
+        # so existing local dev/test setups and any worker without a
+        # Docker daemon keep running jobs as raw host subprocesses
+        # exactly as before. Set on a real deployed worker that has
+        # Docker available to actually sandbox each job.
+        self.execution_backend = os.environ.get("GCON_EXECUTION_BACKEND", "subprocess")
+        if self.execution_backend not in ("subprocess", "docker"):
+            logger.warning(
+                f"Unknown GCON_EXECUTION_BACKEND={self.execution_backend!r}, "
+                f"falling back to 'subprocess'."
+            )
+            self.execution_backend = "subprocess"
+        self.docker_image = os.environ.get("GCON_JOB_DOCKER_IMAGE", "python:3.12-slim")
+        self.docker_memory_limit = os.environ.get("GCON_JOB_DOCKER_MEMORY_LIMIT")  # e.g. "2g"
+        self.docker_cpu_limit = os.environ.get("GCON_JOB_DOCKER_CPU_LIMIT")  # e.g. "1.5"
+        # Unset by default -- Docker's own default bridge network, so
+        # jobs that legitimately need network access (e.g. this repo's
+        # own "python fetch.py" workflow example) keep working. Set to
+        # "none" explicitly for stronger isolation once you've
+        # confirmed your real workloads don't need outbound network.
+        self.docker_network = os.environ.get("GCON_JOB_DOCKER_NETWORK")
+        # Unset by default -- GPU passthrough requires the
+        # nvidia-container-toolkit on the host, which this doesn't
+        # assume is present. Set to e.g. "all" once confirmed working
+        # on your actual GPU worker.
+        self.docker_gpus = os.environ.get("GCON_JOB_DOCKER_GPUS")
+
         # detect_gpu() shells out to nvidia-smi via GPUtil -- cheap on
         # POSIX (fork), genuinely expensive as a subprocess spawn on
         # Windows. Under load (many jobs submitted at once, each
@@ -225,12 +264,25 @@ class GCONAgent:
            actually reached subprocess.Popen() yet, and would then
            silently report nothing was killed even though a process
            was about to start. A short bounded wait closes that gap.
+
+        A third case, specific to GCON_EXECUTION_BACKEND=docker: killing
+        the process group above only kills the local `docker run` CLI
+        wrapper (SIGKILL can't be forwarded to the container the way a
+        graceful SIGTERM can -- same reasoning as the TimeoutExpired
+        branch in execute_job()), so this also issues a real
+        `docker kill` by container name whenever docker mode is active,
+        using self._current_job_id (set at the top of execute_job) to
+        build that name. Without this, cancelling a docker-mode job
+        would report success while the actual container kept running
+        on the host, unkilled.
         """
         deadline = time.time() + 2.0
         while self.process is None and time.time() < deadline:
             time.sleep(0.02)
 
         if self.process is not None and self.process.poll() is None:
+            if self.execution_backend == "docker" and self._current_job_id is not None:
+                docker_executor.kill_container(self._current_job_id)
             pid = self.process.pid
             try:
                 if os.name == "posix":
@@ -297,6 +349,7 @@ class GCONAgent:
         logger.info(f"Starting job execution: {job_script}")
         self.start_time = time.time()
         self.status = "busy"
+        self._current_job_id = job_id
 
         job_env = None
         if usage_report_path:
@@ -340,8 +393,38 @@ class GCONAgent:
         gpu_thread.start()
 
         try:
-            # Determine if it's a file or command
-            if os.path.isfile(job_script) and job_script.endswith('.py'):
+            # Determine execution path: docker-sandboxed, a host .py
+            # file, or a raw shell command -- in that priority order.
+            if self.execution_backend == "docker":
+                if os.path.isfile(job_script) and job_script.endswith('.py'):
+                    # The container can't see a path on THIS host's
+                    # filesystem -- rather than silently falling back
+                    # to unsandboxed host execution (a silent security
+                    # regression for whoever set GCON_EXECUTION_BACKEND
+                    # =docker expecting isolation), fail loudly so the
+                    # caller notices and switches calling conventions.
+                    raise RuntimeError(
+                        "GCON_EXECUTION_BACKEND=docker does not support "
+                        "running a host .py file path directly (the "
+                        "container can't see this host's filesystem) -- "
+                        "pass the job as a shell command string instead "
+                        "(e.g. 'python -c \"...\"'), or run this specific "
+                        "job with the subprocess backend."
+                    )
+                command = docker_executor.build_docker_run_command(
+                    job_id=job_id,
+                    job_script=job_script,
+                    image=self.docker_image,
+                    host_temp_dir=tempfile.gettempdir(),
+                    usage_report_path=usage_report_path,
+                    stage_report_path=stage_report_path,
+                    memory_limit=self.docker_memory_limit,
+                    cpu_limit=self.docker_cpu_limit,
+                    network=self.docker_network,
+                    gpus=self.docker_gpus,
+                )
+                use_shell = False
+            elif os.path.isfile(job_script) and job_script.endswith('.py'):
                 command = [sys.executable, job_script]
                 use_shell = False
             else:
@@ -407,6 +490,17 @@ class GCONAgent:
             
         except subprocess.TimeoutExpired:
             logger.error(f"Job timeout after {timeout}s")
+            if self.execution_backend == "docker":
+                # self.process.kill() below still runs (harmless -- it
+                # just kills the local `docker run` CLI wrapper), but
+                # that alone does NOT reliably stop the container: a
+                # hard SIGKILL of the CLI process can't be forwarded to
+                # the container the way a graceful SIGTERM can, so the
+                # container would otherwise be orphaned, still running
+                # on the host. Explicit `docker kill` by name is the
+                # real stop here (see docker_executor.kill_container's
+                # docstring).
+                docker_executor.kill_container(job_id)
             self.process.kill()
             self.end_time = time.time()
             self._stop_stage_watcher(stage_thread, stage_stop, stage_report_path)
