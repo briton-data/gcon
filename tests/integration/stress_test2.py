@@ -251,8 +251,15 @@ class TestManagementConcurrency:
 
         # user_has_permission() reads `.role` off a real User object, not
         # the dict shape create_user() returns — fetch the live objects.
+        #
+        # "-test@" suffix (not bare f"{role.lower()}@example.com") is
+        # deliberate: the ManagementLayer fixture auto-creates a real
+        # bootstrap owner on first boot at BOOTSTRAP_OWNER_EMAIL, which
+        # defaults to exactly "owner@example.com" -- the bare pattern
+        # collided with that for the "Owner" role specifically,
+        # failing create_user() with "already exists" every run.
         user_ids_by_role = {
-            role: management.create_user(f"{role} Tester", f"{role.lower()}@example.com", role)["user_id"]
+            role: management.create_user(f"{role} Tester", f"{role.lower()}-test@example.com", role)["user_id"]
             for role in rbac.ROLES
         }
         users_by_role = {

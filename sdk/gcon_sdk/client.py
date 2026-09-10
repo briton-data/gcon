@@ -127,9 +127,59 @@ class GconClient:
         return self._request("GET", f"/jobs/{job_id}")
 
     def submit_job(self, job_id: str, command: str,
-                    artifacts: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Submit a new job to the cluster."""
-        payload = {"job_id": job_id, "command": command, "artifacts": artifacts}
+                    artifacts: Optional[List[str]] = None,
+                    kind: Optional[str] = None,
+                    requires: Optional[Dict[str, Any]] = None,
+                    stages: Optional[Dict[str, Any]] = None,
+                    dataset_artifacts: Optional[List[str]] = None,
+                    callback_url: Optional[str] = None,
+                    verify: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Submit a new job to the cluster.
+
+        `kind`/`requires`/`stages`/`dataset_artifacts`/`callback_url`/
+        `verify` mirror the server's JobSubmitRequest exactly (see the
+        GCON API reference) -- all optional, and omitted from the
+        request body entirely when left as None so a plain command
+        job's request looks exactly as it did before these existed:
+
+            kind: "command" (default, plain/unstructured), "resourced"
+                (adds `requires`, matched against node capabilities
+                before dispatch), or "staged" (adds `stages`, a
+                per-checkpoint progress contract the job's own code
+                reports against).
+            requires: 'resourced' jobs only, e.g.
+                {"gpu": true, "min_vram_gb": 12, "min_cpu_cores": 4}.
+            stages: 'staged' jobs only, e.g. {"expected": 15}.
+            dataset_artifacts: IDs of artifacts already registered
+                with this coordinator (not filepaths) this job
+                declares as input data.
+            callback_url: if set, GCON POSTs a signed payload here on
+                job completion instead of requiring you to poll.
+            verify: dispatch to N independently-selected nodes and
+                compare their results, e.g.
+                {"replicas": 2, "tolerance": 0.02}. Orthogonal to
+                kind/requires/stages -- a resourced or staged job can
+                also ask for replication.
+
+        Raises GconAPIError with status_code=400 if the submission is
+        rejected by server-side policy (e.g. a `requires`/`verify`
+        value over a configured ceiling) -- same clean error shape as
+        any other rejected request, not a raw server error.
+        """
+        payload: Dict[str, Any] = {"job_id": job_id, "command": command, "artifacts": artifacts}
+        if kind is not None:
+            payload["kind"] = kind
+        if requires is not None:
+            payload["requires"] = requires
+        if stages is not None:
+            payload["stages"] = stages
+        if dataset_artifacts is not None:
+            payload["dataset_artifacts"] = dataset_artifacts
+        if callback_url is not None:
+            payload["callback_url"] = callback_url
+        if verify is not None:
+            payload["verify"] = verify
         return self._request("POST", "/jobs", json=payload)
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
@@ -143,6 +193,28 @@ class GconClient:
     def list_workflows(self) -> List[Dict[str, Any]]:
         """List all workflows."""
         return self._request("GET", "/workflows")
+
+    def submit_workflow(self, workflow_id: str, jobs: List[Dict[str, Any]],
+                         name: str = "") -> Dict[str, Any]:
+        """
+        Submit a DAG of jobs as one workflow.
+
+        `jobs` is a list of dicts, each shaped like:
+            {"job_id": "...", "command": "...", "depends_on": ["..."]}
+        `depends_on` is optional per job (defaults to no dependencies
+        server-side) -- a job with no `depends_on` runs as soon as the
+        coordinator has capacity; one that names other jobs in this
+        same submission waits for all of them to complete first.
+
+        Example:
+            client.submit_workflow("wf-1", jobs=[
+                {"job_id": "fetch", "command": "python fetch.py"},
+                {"job_id": "train", "command": "python train.py",
+                 "depends_on": ["fetch"]},
+            ])
+        """
+        payload = {"workflow_id": workflow_id, "name": name, "jobs": jobs}
+        return self._request("POST", "/workflows", json=payload)
 
     # ------------------------------------------------------------
     # Receipts & artifacts

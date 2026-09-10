@@ -365,4 +365,42 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_enroll_tokens_org ON enroll_tokens (org_id)",
         ],
     ),
+    Migration(
+        version=6,
+        name="telemetry_events",
+        up_sql=[
+            # Job-lifecycle trace stream -- distinct from the existing
+            # cluster_events table (transport/connection-level events
+            # only, see grpc_transport.py) and from event_types.py's
+            # in-memory notification bus (dashboard alerts like
+            # POLICY_VIOLATION/EXECUTION_DISPUTED). This is the fuller
+            # "what happened to this job, in order, across every stage"
+            # record: trace_id is minted once at submit_job() and
+            # threaded through assign_job -> dispatch -> _run_job/
+            # _run_replicated_job -> create_receipt -> validate_proof,
+            # so a job's whole lifecycle is one queryable trace instead
+            # of scattered log lines (see gcon.telemetry.TelemetryEvent).
+            # High-volume/append-only, hence {{PK}} like heartbeats/
+            # cluster_events/execution_logs above, not an
+            # application-generated TEXT id.
+            """
+            CREATE TABLE telemetry_events (
+                id           {{PK}},
+                event_id     TEXT NOT NULL,
+                trace_id     TEXT NOT NULL,
+                job_id       TEXT REFERENCES jobs (job_id) ON DELETE SET NULL,
+                node_id      TEXT REFERENCES nodes (node_id) ON DELETE SET NULL,
+                event_type   TEXT NOT NULL,
+                level        TEXT NOT NULL DEFAULT 'INFO',
+                payload_json TEXT,
+                created_at   TEXT NOT NULL,
+                UNIQUE (event_id)
+            )
+            """,
+            "CREATE INDEX idx_telemetry_events_trace ON telemetry_events (trace_id, created_at)",
+            "CREATE INDEX idx_telemetry_events_job ON telemetry_events (job_id, created_at)",
+            "CREATE INDEX idx_telemetry_events_node ON telemetry_events (node_id, created_at)",
+            "CREATE INDEX idx_telemetry_events_type_time ON telemetry_events (event_type, created_at)",
+        ],
+    ),
 ]
