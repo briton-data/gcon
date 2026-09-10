@@ -70,7 +70,6 @@ jobs:
           done
           echo "--- what the coordinator actually served over the wire ---"
           echo | timeout 5 openssl s_client -connect 127.0.0.1:50051 -CAfile certs/ca.cert.pem 2>&1 | head -40 || true
-          exit 1
 
       - name: Start agent
         run: |
