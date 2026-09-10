@@ -19,7 +19,7 @@ from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
-from gcon.cluster.coordinator import NotLeaderError
+from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
 
 
 # ---------------------------------------------------------------
@@ -391,6 +391,17 @@ def create_api_v1_app(management, presentation):
                 verify=payload.verify,
             )
         except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except PolicyRejectionError as e:
+            # Same handling as ValueError above -- a policy-rejected
+            # submission is a client-facing 400 (the request itself
+            # was fine, but policy says no), not a 500. Without this,
+            # PolicyRejectionError (a RuntimeError subclass, so not
+            # caught by `except ValueError` above) propagated as an
+            # unhandled exception straight through to a raw 500 with
+            # a full server stack trace -- confirmed live while
+            # building the SDK's error-handling path, not a
+            # hypothetical concern.
             raise HTTPException(status_code=400, detail=str(e))
         except NotLeaderError as e:
             # 503 (not 400/404): the request itself is fine, this
