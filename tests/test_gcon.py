@@ -129,7 +129,14 @@ class TestExecutionVerifier(unittest.TestCase):
         self.assertIn("signature", proof)
         self.assertEqual(proof["job_id"], "test-job-1")
         self.assertEqual(proof["gpu"], "RTX 4090")
-        self.assertTrue(proof["verified"])
+        # NOTE: proof["verified"] was removed deliberately (see
+        # verifier.py's module history) -- it was a dead field
+        # hardcoded to True at creation time, before any check ran,
+        # and excluded from the signed payload, so it was freely
+        # editable without invalidating the signature. Whether a proof
+        # is actually valid is what test_validate_proof (below) tests
+        # for real, via validate_proof() -- not a field on the proof
+        # asserting its own validity.
     
     def test_validate_proof(self):
         """Test validating execution proof."""
