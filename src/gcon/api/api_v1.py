@@ -19,7 +19,7 @@ from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
-from gcon.cluster.coordinator import NotLeaderError
+from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
 
 
 # ---------------------------------------------------------------
@@ -392,6 +392,17 @@ def create_api_v1_app(management, presentation):
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except PolicyRejectionError as e:
+            # Same handling as ValueError above -- a policy-rejected
+            # submission is a client-facing 400 (the request itself
+            # was fine, but policy says no), not a 500. Without this,
+            # PolicyRejectionError (a RuntimeError subclass, so not
+            # caught by `except ValueError` above) propagated as an
+            # unhandled exception straight through to a raw 500 with
+            # a full server stack trace -- confirmed live while
+            # building the SDK's error-handling path, not a
+            # hypothetical concern.
+            raise HTTPException(status_code=400, detail=str(e))
         except NotLeaderError as e:
             # 503 (not 400/404): the request itself is fine, this
             # coordinator process just isn't the one that should
@@ -484,7 +495,16 @@ def create_api_v1_app(management, presentation):
         responses={401: {"model": ErrorOut}},
     )
     def list_receipts(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_receipts())
+        # Same org-scoping as list_nodes/list_jobs above -- this
+        # previously returned every receipt ever issued to any company
+        # to any key with "View monitoring", not just the caller's
+        # own receipts. Receipts are the customer-facing proof
+        # artifact, so this was the sharpest version of the
+        # cross-tenant leak: any org's API key could read every other
+        # org's execution receipts.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_receipts(org_id=org_id))
 
     @app.get(
         "/artifacts",

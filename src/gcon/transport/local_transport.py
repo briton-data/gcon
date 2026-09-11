@@ -15,6 +15,8 @@ in-process. It exists so that:
 
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -61,7 +63,22 @@ class LocalTransport(Transport):
         # equivalent wiring to receive it.
         node = self.get_node(node_id)
 
-        result = node.execute_job(job_id, command, timeout=timeout)
+        # usage_report_path (unlike stage_report_path) applies to every
+        # job kind, not just "staged" -- any job's subprocess may want
+        # to self-report usage (e.g. LLM token counts from an AI-agent
+        # workload), so this is generated unconditionally rather than
+        # gated on job kind. This was previously never generated at
+        # all on this path, which meant GCONAgent.execute_job's
+        # usage_report_path parameter was permanently unreachable for
+        # any job run through LocalTransport -- confirmed empirically
+        # (a real job's receipt always came back with usage: null).
+        usage_report_path = os.path.join(
+            tempfile.gettempdir(), f"gcon-usage-{job_id}.json"
+        )
+
+        result = node.execute_job(
+            job_id, command, timeout=timeout, usage_report_path=usage_report_path
+        )
 
         return {"status": "success", "result": result}
 

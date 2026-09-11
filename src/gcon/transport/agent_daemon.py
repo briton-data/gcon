@@ -316,7 +316,17 @@ class AgentDaemon:
     def _heartbeat_loop(self, outbound, session_token, interval, stop_event) -> None:
         while not stop_event.is_set() and not self._stop.is_set():
             status = "busy" if self._active_jobs else "idle"
-            snapshot = self.agent.resource_snapshot() if hasattr(self.agent, "resource_snapshot") else {}
+            # Previously called self.agent.resource_snapshot(), guarded
+            # by hasattr() -- that method was never implemented
+            # anywhere in this codebase, so the guard always failed
+            # silently and every real gRPC-connected agent has always
+            # sent cpu_percent=0.0/memory_percent=0.0 in every
+            # heartbeat, regardless of the node's actual load.
+            # report_resources() (-> ResourceMonitor.collect()) is the
+            # method that actually exists and returns real data,
+            # including GPU now (see monitor.py) -- same call the
+            # in-process/local coordinator path already uses.
+            snapshot = self.agent.report_resources() if hasattr(self.agent, "report_resources") else {}
             outbound.put(
                 pb.AgentEnvelope(
                     node_id=self.node_id,
@@ -324,10 +334,14 @@ class AgentDaemon:
                     heartbeat=pb.Heartbeat(
                         sequence=self._hb_sequence.next(),
                         status=status,
-                        cpu_percent=float(snapshot.get("cpu_percent", 0.0)),
-                        memory_percent=float(snapshot.get("memory_percent", 0.0)),
+                        cpu_percent=float(snapshot.get("cpu", 0.0)),
+                        memory_percent=float(snapshot.get("memory", 0.0)),
                         running_jobs=len(self._active_jobs),
                         timestamp=_now_iso(),
+                        gpu_name=str(snapshot.get("gpu_name") or ""),
+                        gpu_memory_total=int(snapshot.get("gpu_memory_total", 0)),
+                        gpu_memory_used=int(snapshot.get("gpu_memory_used", 0)),
+                        gpu_utilization_percent=float(snapshot.get("gpu_utilization_percent", 0.0)),
                     ),
                 )
             )
@@ -369,12 +383,25 @@ class AgentDaemon:
                     f"gcon-stages-{job_assign.job_id}.jsonl",
                 )
 
+        # usage_report_path applies to every job kind, not just staged
+        # ones -- any job's subprocess (an AI-agent workload calling
+        # an LLM, for instance) may want to self-report usage, so this
+        # is generated unconditionally rather than gated on
+        # metadata_json/kind the way stage_report_path is above. This
+        # was previously never derived at all on this path, which
+        # meant GCONAgent.execute_job's usage_report_path parameter
+        # was permanently unreachable for every job run over gRPC too.
+        usage_report_path = os.path.join(
+            tempfile.gettempdir(), f"gcon-usage-{job_assign.job_id}.json"
+        )
+
         try:
             result = self.agent.execute_job(
                 job_assign.job_id,
                 job_assign.command,
                 timeout=timeout,
                 stage_report_path=stage_report_path,
+                usage_report_path=usage_report_path,
             )
         except Exception as exc:  # the execution engine is untouched and may itself
             # raise rather than return an error dict for unexpected failures;

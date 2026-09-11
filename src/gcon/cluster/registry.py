@@ -304,21 +304,32 @@ class NodeRegistry:
         """
         Update the latest resource information for a node.
 
-        `resources` is expected to carry `cpu`/`memory`/`running_jobs`/
-        `timestamp`/`status` (as before), plus optionally
+        `resources` must carry `running_jobs`/`timestamp`/`status` --
+        every caller (in-process ResourceMonitor.collect() and
+        RemoteNodeProxy.report_resources() alike) always knows these
+        for certain. `cpu`/`memory` are OPTIONAL, same "leave the last
+        known reading in place if absent" treatment as the GPU fields
+        below -- RemoteNodeProxy genuinely doesn't have real cpu/memory
+        data of its own (the real numbers arrive independently via the
+        agent's periodic gRPC heartbeat, see run_coordinator.py's
+        on_heartbeat), so it omits them rather than reporting a
+        fabricated 0.0 that would silently stomp the real
+        heartbeat-reported values a moment later -- which is exactly
+        what happened before this method tolerated their absence: cpu/
+        memory were required here, so RemoteNodeProxy had to invent
+        0.0 for both, and every remote job's completion reset the
+        node's real load back to zero in the registry/dashboard.
+
         `gpu_name`/`gpu_memory_total`/`gpu_memory_used`/
-        `gpu_utilization_percent` -- all four default to their
-        existing "no GPU data yet" values (see register() above) via
-        .get() so a caller that doesn't report GPU fields (e.g. an
-        older worker, or a genuinely GPU-less node) doesn't break or
-        get overwritten with fabricated zeros mixed in with otherwise
-        real data; it just leaves the prior GPU reading in place. This
-        is a live reading self-reported by the node's own software
-        (same trust level as cpu/memory always were) -- not a
-        cryptographically attested measurement; see
-        Scheduler._satisfies for the separate, still self-reported
-        static "gpu": true capability flag used for requires={"gpu":
-        true} scheduling.
+        `gpu_utilization_percent` are optional the same way -- a
+        caller that doesn't report GPU fields (an older worker, or a
+        genuinely GPU-less node) doesn't break or get its last real
+        GPU reading overwritten with fabricated zeros. This is a live
+        reading self-reported by the node's own software (same trust
+        level cpu/memory always had) -- not a cryptographically
+        attested measurement; see Scheduler._satisfies for the
+        separate, still self-reported static "gpu": true capability
+        flag used for requires={"gpu": true} scheduling.
         """
         with self._lock:
             if node_id not in self.nodes:
@@ -326,8 +337,10 @@ class NodeRegistry:
 
             info = self.nodes[node_id]
 
-            info["cpu"] = resources["cpu"]
-            info["memory"] = resources["memory"]
+            if "cpu" in resources:
+                info["cpu"] = resources["cpu"]
+            if "memory" in resources:
+                info["memory"] = resources["memory"]
             info["running_jobs"] = resources["running_jobs"]
             info["resource_timestamp"] = resources["timestamp"]
             info["status"] = resources["status"]

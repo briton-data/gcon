@@ -70,8 +70,7 @@ class RemoteNodeProxy:
         """
         Return a resource snapshot in the same shape
         GCONAgent.report_resources() (-> ResourceMonitor.collect())
-        produces: {node_id, cpu, memory, running_jobs, status,
-        timestamp}. GCONCoordinator._run_job() calls this
+        produces. GCONCoordinator._run_job() calls this
         unconditionally right after a dispatch finishes, for every
         node type -- without it, RemoteNodeProxy raised
         AttributeError here, which _run_job does not catch (only the
@@ -80,35 +79,28 @@ class RemoteNodeProxy:
         execution had already completed successfully. The job was
         left stuck "running" forever: never marked completed, no
         receipt ever generated, and the node's registry entry never
-        confirmed idle again for real work past that point.
+        confirmed idle again for real work past that point. That's
+        why this method must still return a dict, not raise or return
+        None, even though it has nothing new to report.
 
-        cpu/memory are reported as 0.0 here, NOT fabricated. The real
-        agent process already measures and sends its own live
-        cpu_percent/memory_percent on every periodic gRPC heartbeat
-        (see AgentDaemon._heartbeat_loop), but that data currently
-        only reaches receive_heartbeat() (status/timestamp), not
-        receive_resource_report() -- wiring that through is a
-        separate, tracked follow-up (see run_coordinator.py's
-        on_heartbeat), not something this method should paper over by
-        inventing numbers it doesn't actually have.
-
-        GPU fields (gpu_name/gpu_memory_total/gpu_memory_used/
-        gpu_utilization_percent) are intentionally NOT included here
-        for the same reason: real GPU data now flows for in-process
-        nodes (see monitoring/monitor.py's ResourceMonitor.collect,
-        which calls the agent's own detect_gpu()), but a remote
-        (gRPC) node's real GPU reading has nowhere to travel yet --
-        same unwired heartbeat-vs-resource-report gap as cpu/memory
-        above, not a separate problem. update_node_resources() treats
-        an absent GPU key as "leave the last known reading in place"
-        rather than overwriting it with a fabricated zero, so omitting
-        these keys here is the correct honest choice until that
-        wiring exists, not an oversight.
+        cpu/memory/gpu_* are deliberately OMITTED, not returned as
+        0.0 -- update_node_resources() (registry.py) treats an absent
+        key as "leave the last known reading in place," never a
+        fabricated zero. This proxy object genuinely has no resource
+        data of its own; the real numbers arrive independently via
+        the agent's periodic gRPC heartbeat (AgentDaemon._heartbeat_loop
+        -> grpc_transport.py's heartbeat handling -> run_coordinator.py's
+        on_heartbeat -> receive_resource_report). This method used to
+        return cpu=0.0/memory=0.0 literally, on the mistaken belief
+        that heartbeat data didn't reach receive_resource_report() yet
+        (it already did) -- that meant every remote job's completion
+        silently stomped the real, live heartbeat-reported cpu/memory
+        back to zero a moment later, every single time. Returning
+        `status`/`timestamp` (which this proxy DOES know for certain,
+        from its own local state) is correct and unaffected by this.
         """
         return {
             "node_id": self.node_id,
-            "cpu": 0.0,
-            "memory": 0.0,
             "running_jobs": 1 if self.status == "busy" else 0,
             "status": self.status,
             "timestamp": datetime.now(UTC).isoformat(),

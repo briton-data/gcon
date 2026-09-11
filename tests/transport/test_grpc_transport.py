@@ -30,6 +30,22 @@ def _start_agent(node_id, address, cert_dir, tmp_path, capabilities=None):
     old_cwd = os.getcwd()
     os.chdir(str(keys_dir))
     try:
+        # Pre-provision this node's cert directly against the CA the
+        # coordinator already generated on disk in cert_dir (via
+        # running_transport's transport.start() -> ensure_ca) --
+        # AgentDaemon._ensure_enrolled() no-ops immediately once both
+        # the agent cert and CA cert already exist, so this sidesteps
+        # the self-enrollment RPC path entirely, the same "pre-provision
+        # a cert" option _ensure_enrolled's own error message mentions.
+        # Without this, every agent in this file failed identically:
+        # no cert on disk, and no enroll_token passed to AgentDaemon
+        # below either, so _ensure_enrolled() had no path to succeed --
+        # this predates the self-enrollment system (which requires
+        # either a pre-provisioned cert or a real enroll_token) and was
+        # never updated to match once that system replaced whatever
+        # simpler bootstrap this file relied on before.
+        tls.issue_agent_cert(cert_dir, node_id)
+
         agent = GCONAgent(node_id=node_id)
         daemon = AgentDaemon(
             node_id=node_id,
