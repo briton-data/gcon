@@ -82,6 +82,14 @@ class TestTraceIdLifecycle:
         assert job_trace_id  # minted, not None/empty
 
         # The receipt itself carries the SAME trace_id, not a fresh one.
+        # Receipt persistence is a separate step slightly after the job's
+        # status flips to "completed" (same real timing gap already
+        # hardened against elsewhere, e.g. test_coordinator_full.py's
+        # _wait_for(lambda: job_id in coordinator.receipts)) - waiting on
+        # status alone is not enough here.
+        deadline = time.time() + 5
+        while "job-trace-1" not in coordinator.receipts and time.time() < deadline:
+            time.sleep(0.05)
         receipt = coordinator.receipts["job-trace-1"]
         assert receipt["trace_id"] == job_trace_id
 
