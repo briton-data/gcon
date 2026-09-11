@@ -88,6 +88,7 @@ class TestFullJobPipelineStory:
         status = coordinator.get_job_status("job-story-1")
         assert status["status"] == "completed"
 
+        assert _wait_for(lambda: "job-story-1" in coordinator.receipts)
         receipt = coordinator.receipts["job-story-1"]
         assert "signature" in receipt["proof"]
         assert receipt["trace_id"] == coordinator.jobs["job-story-1"]["trace_id"]
@@ -292,6 +293,7 @@ class TestReceiptsJobsAndMetrics:
         coordinator, node = coordinator_with_node
         coordinator.submit_job("job-r1", "echo hi")
         assert _wait_for_job(coordinator, "job-r1")
+        assert _wait_for(lambda: "job-r1" in coordinator.receipts)
         assert len(coordinator.get_receipts()) >= 1
         items, total = coordinator.get_receipts_page(limit=10, offset=0)
         assert total >= 1
@@ -316,6 +318,11 @@ class TestReceiptsJobsAndMetrics:
         coordinator, node = coordinator_with_node
         coordinator.submit_job("job-r3", "echo hi")
         assert _wait_for_job(coordinator, "job-r3")
+        # Under full-suite CPU load, there's a brief real gap between a
+        # job's status turning "completed" and its receipt actually
+        # landing in self.receipts -- wait for the receipt itself, not
+        # just the job status.
+        assert _wait_for(lambda: "job-r3" in coordinator.receipts)
         receipt_id = coordinator.receipts["job-r3"]["receipt_id"]
         detail = coordinator.get_receipt_detail(receipt_id)
         assert detail["job_id"] == "job-r3"
