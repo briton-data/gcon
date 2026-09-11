@@ -40,7 +40,7 @@ def _seed(control_plane, job_id="job-restore-1", node_id="node-restore-1"):
 
 def test_no_control_plane_means_no_restore_and_no_crash():
     # Existing behavior for every local-only coordinator (most tests,
-    # tests/stages/*, LocalTransport) must be completely unaffected.
+    # LocalTransport) must be completely unaffected.
     coordinator = GCONCoordinator()
     assert coordinator.jobs == {}
     assert coordinator.receipts == {}
