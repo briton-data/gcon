@@ -219,9 +219,9 @@ class GCONCoordinator:
 
         # Durable control-plane handle (jobs/nodes/receipts survive a
         # restart in its DB, see gcon.persistence). Optional: local-only
-        # coordinators (most existing tests, tests/stages/*, the default
-        # LocalTransport path) pass none and simply run with no
-        # persisted history, exactly as before.
+        # coordinators (most existing tests, the default LocalTransport
+        # path) pass none and simply run with no persisted history,
+        # exactly as before.
         self.control_plane = control_plane
         # Job-lifecycle telemetry (see gcon.telemetry's module
         # docstring): trace_id minted once per job at submit_job(),
