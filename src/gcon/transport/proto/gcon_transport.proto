@@ -103,6 +103,18 @@ message Heartbeat {
   double memory_percent = 4;
   int32 running_jobs = 5;
   string timestamp = 6;
+  // Live GPU reading, self-reported by the agent's own software (see
+  // agent.py's detect_gpu(), cached -- GCON_GPU_CACHE_TTL_SECONDS --
+  // so a fast heartbeat interval doesn't mean a subprocess spawn to
+  // nvidia-smi on every single beat). Same trust level cpu_percent/
+  // memory_percent above always had, not a cryptographically
+  // attested measurement. Previously this message had no GPU fields
+  // at all, so a remote node's live GPU state had no way to reach
+  // the coordinator regardless of what the agent measured.
+  string gpu_name = 7;
+  int64 gpu_memory_total = 8;
+  int64 gpu_memory_used = 9;
+  double gpu_utilization_percent = 10;
 }
 
 message JobAssign {

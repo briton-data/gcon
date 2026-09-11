@@ -12,6 +12,7 @@ from gcon.persistence.repositories.billing import InvoiceRepository
 from gcon.persistence.repositories.webhooks import WebhookRepository
 from gcon.persistence.repositories.leases import LeaseRepository
 from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
+from gcon.persistence.repositories.telemetry import TelemetryRepository
 
 __all__ = [
     "EnrollTokenRepository",
@@ -28,4 +29,5 @@ __all__ = [
     "InvoiceRepository",
     "WebhookRepository",
     "LeaseRepository",
+    "TelemetryRepository",
 ]

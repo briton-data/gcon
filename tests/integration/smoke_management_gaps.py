@@ -13,7 +13,15 @@ from gcon.dashboard.web_server import WebServer
 from gcon.management.rate_limit import MAX_ATTEMPTS
 
 
-OWNER_EMAIL = "nyongesabriton620@gmail.com"  # BOOTSTRAP_OWNER_EMAIL default (module-level, resolved at import)
+OWNER_EMAIL = "owner@example.com"  # BOOTSTRAP_OWNER_EMAIL's real default
+# (management_layer.py: `os.environ.get("GCON_OWNER_EMAIL", "owner@example.com")`)
+# -- the previous constant here, "nyongesabriton620@gmail.com", was simply
+# wrong: it matched someone's personal GCON_OWNER_EMAIL setting in whatever
+# environment this was originally written/run in, not the actual hardcoded
+# default in source. Every test in this file logs in as the bootstrap
+# owner via login()/OWNER_EMAIL, so a wrong constant here failed all nine
+# of them identically with a 401 the moment this ran anywhere that env var
+# wasn't set to that exact value -- diagnosed and fixed together.
 
 
 @pytest.fixture

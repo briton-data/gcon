@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - develop
+      - staging
 
   pull_request:
     branches:
@@ -42,7 +42,7 @@ jobs:
         if [ -f requirements.txt ]; then
           pip install -r requirements.txt
         fi
-        pip install -e .
+        pip install -e ".[dev]"
 
     - name: Verify Python syntax
       run: |
