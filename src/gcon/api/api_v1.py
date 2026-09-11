@@ -517,6 +517,35 @@ def create_api_v1_app(management, presentation):
         return jsonable_encoder(presentation.get_artifacts())
 
     # ------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------
+
+    @app.get(
+        "/telemetry/events",
+        tags=["Telemetry"],
+        summary="List job-lifecycle telemetry events",
+        responses={401: {"model": ErrorOut}},
+    )
+    def list_telemetry_events(
+        job_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 200,
+        auth=Depends(require_scope("View monitoring")),
+    ):
+        # Same org-scoping as list_receipts/list_jobs above - a
+        # telemetry_events row has no org_id column of its own, so
+        # TelemetryRepository.query() joins through jobs.org_id itself
+        # (see its docstring); this was simply never wired to a route
+        # at all before, so presentation.get_telemetry_events()'s
+        # already-correct org_id handling was unreachable from the API.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_telemetry_events(
+            job_id=job_id, node_id=node_id, since=since, org_id=org_id, limit=limit,
+        ))
+
+    # ------------------------------------------------------------
     # Whoami
     # ------------------------------------------------------------
 
