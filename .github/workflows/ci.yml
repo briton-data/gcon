@@ -52,12 +52,5 @@ jobs:
       run: |
         pytest tests/
 
-    - name: Run Stage Integration Tests
-      run: |
-        for f in tests/stages/*_test.py; do
-          echo "Running $f"
-          python "$f"
-        done
-
     - name: Success
       run: echo "All GCON validation tests passed."
