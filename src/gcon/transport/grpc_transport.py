@@ -40,6 +40,7 @@ import uuid
 from concurrent import futures
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional, Callable
+from urllib.parse import unquote
 
 import grpc
 
@@ -68,11 +69,24 @@ logger = logging.getLogger(__name__)
 # a per-node identity (the CSR's keypair is that). Rotate by
 # changing this env var + redeploying; already-enrolled workers are
 # unaffected since they never present this again after Enroll.
-_ENROLL_TOKEN = os.environ.get("GCON_ENROLL_TOKEN", "")
-logger.info(
-    "GCON_ENROLL_TOKEN loaded: length=%d, first4=%r, last4=%r",
-    len(_ENROLL_TOKEN), _ENROLL_TOKEN[:4], _ENROLL_TOKEN[-4:],
-)  # TEMP debug line -- remove once the token mismatch is confirmed fixed
+def _enroll_token() -> str:
+    """Read live rather than a module-level constant -- the exact
+    same test-isolation bug class as management_layer.py's
+    BOOTSTRAP_OWNER_EMAIL/NAME (see that fix's comment for the full
+    story): a module-level `_ENROLL_TOKEN = os.environ.get(...)`
+    resolved once at first import of this module would silently
+    freeze to whatever was in the environment at that moment for the
+    rest of the process -- including start()'s decision of whether
+    to open the plaintext enroll port at all, which made it
+    effectively impossible to test the self-enrollment path in a
+    process where grpc_transport had already been imported (by any
+    other fixture/module) before a test tried to set
+    GCON_ENROLL_TOKEN. Also drops the "TEMP debug line -- remove once
+    confirmed fixed" logging that was living here as leftover
+    debugging cruft; it never actually got removed after whatever it
+    was diagnosing was resolved.
+    """
+    return os.environ.get("GCON_ENROLL_TOKEN", "")
 
 
 def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
@@ -133,8 +147,18 @@ def _peer_address(context: grpc.ServicerContext) -> Optional[str]:
         return None
 
     if peer.startswith("ipv6:"):
-        # "ipv6:[2001:db8::1]:54321" -> "2001:db8::1"
-        rest = peer[len("ipv6:"):]
+        # "ipv6:[2001:db8::1]:54321" -> "2001:db8::1" on Linux/macOS.
+        # On Windows, gRPC's Python implementation percent-encodes the
+        # brackets instead: "ipv6:%5B::1%5D:10250" (%5B/%5D = [/]) --
+        # confirmed on a real Windows run, where the unencoded-only
+        # check below silently fell through and returned the whole
+        # garbled "%5B::1%5D:10250" string as if it were an IP. This
+        # means node addresses tracked via IPv6 loopback on Windows
+        # were already wrong before this fix; nothing had asserted on
+        # the exact value precisely enough to catch it until
+        # node_enrollment_audit's source_ip did. unquote() is a
+        # harmless no-op on the already-literal Linux/macOS form.
+        rest = unquote(peer[len("ipv6:"):])
         if rest.startswith("[") and "]" in rest:
             return rest[1:rest.index("]")]
         return rest
@@ -353,13 +377,36 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         # tokens existed don't break; new deployments should issue
         # per-org tokens via scripts/create_enroll_token.py instead of
         # relying on this.
+        source_ip = _peer_address(context)
         org_id = None
+        enroll_token_id = None
         if self.control_plane is not None:
-            org_id = self.control_plane.enroll_tokens.lookup_org_id(request.enroll_token)
+            token_row = self.control_plane.enroll_tokens.get_by_token(request.enroll_token)
+            if token_row is not None and token_row.get("revoked_at") is None:
+                org_id = token_row["org_id"]
+                enroll_token_id = token_row["token_id"]
         if org_id is None:
-            if not _ENROLL_TOKEN or not secrets.compare_digest(request.enroll_token, _ENROLL_TOKEN):
+            enroll_token = _enroll_token()
+            if not enroll_token or not secrets.compare_digest(request.enroll_token, enroll_token):
+                # Durable audit trail for a REJECTED attempt too -- see
+                # migrations/registry.py version 7's docstring. This is
+                # useful security signal on its own (repeated bad-token
+                # attempts from one IP), not just a record of who
+                # succeeded.
+                if self.control_plane is not None:
+                    self.control_plane.node_enrollment_audit.record(
+                        node_id=request.node_id or "(unknown)",
+                        accepted=False, source_ip=source_ip,
+                        reason="invalid or missing enroll token",
+                    )
                 return pb.EnrollResponse(accepted=False, reason="invalid or missing enroll token")
         if not request.node_id:
+            if self.control_plane is not None:
+                self.control_plane.node_enrollment_audit.record(
+                    node_id="(unknown)", accepted=False, org_id=org_id,
+                    enroll_token_id=enroll_token_id, source_ip=source_ip,
+                    reason="node_id is required",
+                )
             return pb.EnrollResponse(accepted=False, reason="node_id is required")
         try:
             cert_pem = tls.sign_agent_csr(
@@ -367,13 +414,26 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             )
         except ValueError as e:
             logger.warning("Enroll rejected for node_id=%s: %s", request.node_id, e)
+            if self.control_plane is not None:
+                self.control_plane.node_enrollment_audit.record(
+                    node_id=request.node_id, accepted=False, org_id=org_id,
+                    enroll_token_id=enroll_token_id, source_ip=source_ip, reason=str(e),
+                )
             return pb.EnrollResponse(accepted=False, reason=str(e))
 
         ca_cert_path = os.path.join(self.config.tls_cert_dir, tls.CA_CERT_FILE)
         with open(ca_cert_path, "rb") as f:
             ca_cert_pem = f.read()
 
-        logger.info("Enrolled new node via CSR: node_id=%s", request.node_id)
+        if self.control_plane is not None:
+            self.control_plane.node_enrollment_audit.record(
+                node_id=request.node_id, accepted=True, org_id=org_id,
+                enroll_token_id=enroll_token_id, source_ip=source_ip,
+            )
+        logger.info(
+            "Enrolled new node via CSR: node_id=%s org_id=%s from %s",
+            request.node_id, org_id, source_ip,
+        )
         return pb.EnrollResponse(accepted=True, cert_pem=cert_pem, ca_cert_pem=ca_cert_pem)
 
     # -------------------------------------------------------- control stream
@@ -633,7 +693,7 @@ class GrpcTransport(Transport):
         # token is configured, so an operator who hasn't opted into
         # self-enrollment doesn't get an unauthenticated port opened
         # on their coordinator for nothing.
-        if _ENROLL_TOKEN:
+        if _enroll_token():
             self._enroll_server = grpc.server(
                 futures.ThreadPoolExecutor(max_workers=4),
             )
