@@ -26,6 +26,7 @@ from gcon.persistence.repositories import (
     LeaseRepository,
     EnrollTokenRepository,
     TelemetryRepository,
+    NodeEnrollmentAuditRepository,
 )
 
 
@@ -48,6 +49,7 @@ class ControlPlane:
         self.leases = LeaseRepository(self.db)
         self.enroll_tokens = EnrollTokenRepository(self.db)
         self.telemetry_events = TelemetryRepository(self.db)
+        self.node_enrollment_audit = NodeEnrollmentAuditRepository(self.db)
 
     def close(self) -> None:
         self.db.close()

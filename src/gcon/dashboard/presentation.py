@@ -51,7 +51,32 @@ class PresentationLayer:
         """
 
         return self.coordinator.get_nodes(org_id=org_id)
-    
+
+    def get_node_enrollment_history(self, node_id):
+        """
+        Durable "who/where brought this worker online" trail for one
+        node -- every Enroll RPC attempt (accepted or rejected) ever
+        made under this node_id, most recent first: which enroll
+        token was presented (enroll_token_id, None for the legacy
+        shared-token dev path), which real source IP made the
+        request, and whether it was accepted.
+
+        Previously this information only ever reached a single
+        log.info() line in grpc_transport.py's Enroll() handler --
+        gone once that line rotates out of the log, and never
+        queryable at all from the dashboard/API. See
+        migrations/registry.py version 7 and
+        persistence/repositories/node_enrollment_audit.py.
+
+        Returns [] (not an error) for a node_id with no enrollment
+        history -- e.g. a node whose control_plane predates this
+        feature, or a purely LocalTransport/dev node that was never
+        enrolled via the Enroll RPC at all.
+        """
+        if self.coordinator.control_plane is None:
+            return []
+        return self.coordinator.control_plane.node_enrollment_audit.list_for_node(node_id)
+
     def get_jobs(self, status=None, limit=None, org_id=None):
         """
         Return information about all jobs, newest first.

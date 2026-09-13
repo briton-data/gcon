@@ -323,6 +323,25 @@ def create_api_v1_app(management, presentation):
         # with this id exists somewhere in the cluster.
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found.")
 
+    @app.get(
+        "/nodes/{node_id}/enrollment-history",
+        tags=["Nodes"],
+        summary="Durable audit trail of Enroll RPC attempts for this node_id",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def get_node_enrollment_history(node_id: str, auth=Depends(require_scope("View monitoring"))):
+        # Same org-scoping + same-404-either-way pattern as get_node()
+        # above -- an org-scoped key can only pull enrollment history
+        # (source IPs, which enroll_token_id was used) for nodes that
+        # are actually theirs, and gets the same 404 for "doesn't
+        # exist" vs "belongs to a different company" so this can't be
+        # used to probe which node_ids exist elsewhere in the cluster.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not any(n["node_id"] == node_id for n in presentation.get_nodes(org_id=org_id)):
+            raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found.")
+        return jsonable_encoder(presentation.get_node_enrollment_history(node_id))
+
     # ------------------------------------------------------------
     # Jobs
     # ------------------------------------------------------------

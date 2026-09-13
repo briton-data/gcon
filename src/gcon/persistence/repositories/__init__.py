@@ -13,9 +13,11 @@ from gcon.persistence.repositories.webhooks import WebhookRepository
 from gcon.persistence.repositories.leases import LeaseRepository
 from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
 from gcon.persistence.repositories.telemetry import TelemetryRepository
+from gcon.persistence.repositories.node_enrollment_audit import NodeEnrollmentAuditRepository
 
 __all__ = [
     "EnrollTokenRepository",
+    "NodeEnrollmentAuditRepository",
     "NodeRepository",
     "NodeCapabilityRepository",
     "JobRepository",

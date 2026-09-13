@@ -403,4 +403,53 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_telemetry_events_type_time ON telemetry_events (event_type, created_at)",
         ],
     ),
+    Migration(
+        version=7,
+        name="node_enrollment_audit",
+        up_sql=[
+            # Durable "who/where brought this worker online" audit
+            # trail. Deliberately its own table, NOT extra columns on
+            # `nodes` and NOT a row in `cluster_events`/
+            # `telemetry_events`: those two both FK-reference
+            # nodes(node_id), which doesn't exist yet at Enroll() time
+            # (a node's row is only created later, at Register() -- see
+            # grpc_transport.py). node_id here is a plain TEXT column
+            # for that reason, not a foreign key.
+            #
+            # Before this, grpc_transport.py's Enroll() handler already
+            # *knew* the presented enroll_token and the caller's real
+            # source IP (context.peer()) -- see the Enroll RPC's own
+            # logger.info() call -- but only ever put them in a log
+            # line, never anywhere durable/queryable. An operator
+            # asking "which credential and which IP actually brought
+            # this worker online" had no way to answer that once the
+            # log line scrolled past or rotated out.
+            #
+            # Append-only / one row per enrollment attempt (not one row
+            # per node_id) on purpose, same audit philosophy as
+            # enroll_tokens' own revoked-not-deleted rows: a node that
+            # gets re-enrolled (new cert after rotation, moved to a new
+            # host, etc.) keeps its full enrollment history instead of
+            # overwriting the only record of the first one.
+            # enroll_token_id is nullable because the legacy single
+            # shared GCON_ENROLL_TOKEN dev/fallback path (see Enroll())
+            # has no per-org token row to point to. accepted/reason
+            # also capture REJECTED enrollment attempts (bad/unknown
+            # token), which is itself useful security signal that
+            # previously wasn't even reaching the log line above.
+            """
+            CREATE TABLE node_enrollment_audit (
+                id               {{PK}},
+                node_id          TEXT NOT NULL,
+                org_id           TEXT,
+                enroll_token_id  TEXT,
+                source_ip        TEXT,
+                accepted         INTEGER NOT NULL,
+                reason           TEXT,
+                created_at       TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_node_enrollment_audit_node ON node_enrollment_audit (node_id, created_at)",
+        ],
+    ),
 ]
