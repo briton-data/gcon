@@ -168,4 +168,62 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_reset_tokens_user ON password_reset_tokens (user_id)",
         ],
     ),
+    Migration(
+        version=4,
+        name="customer_accounts",
+        up_sql=[
+            # Customer-facing accounts, deliberately a completely
+            # separate table from staff `users` -- not a shared
+            # login surface, no RBAC role (Owner/Administrator/
+            # Operator/Developer/Viewer are staff-only permission
+            # concepts that don't apply to a customer; every customer
+            # user has the same full access to their own org's data,
+            # no internal hierarchy). org_id is the one thread tying
+            # a customer account to everything else in the system --
+            # jobs, nodes, receipts, and the internal staff console's
+            # Clients panel are already all org_id-scoped, so a new
+            # signup is automatically visible to staff with zero
+            # extra wiring, simply by using the same org_id.
+            """
+            CREATE TABLE IF NOT EXISTS customer_users (
+                customer_user_id TEXT PRIMARY KEY,
+                org_id           TEXT NOT NULL,
+                name             TEXT NOT NULL,
+                email            TEXT NOT NULL,
+                password_hash    TEXT NOT NULL,
+                status           TEXT NOT NULL,
+                created_at       TEXT NOT NULL,
+                last_active      TEXT
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_users_email ON customer_users (email)",
+            "CREATE INDEX IF NOT EXISTS idx_customer_users_org ON customer_users (org_id)",
+            # Same shape as the staff `sessions` table (see
+            # auth.SessionManager) but its own table -- a customer
+            # session token and a staff session token must never be
+            # interchangeable, even though the code that manages them
+            # is the same generic class.
+            """
+            CREATE TABLE IF NOT EXISTS customer_sessions (
+                token             TEXT PRIMARY KEY,
+                customer_user_id  TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                expires_at        TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_customer_sessions_user ON customer_sessions (customer_user_id)",
+            # Same shape/purpose as password_reset_tokens above, for
+            # the customer-facing forgot-password flow.
+            """
+            CREATE TABLE IF NOT EXISTS customer_password_reset_tokens (
+                token             TEXT PRIMARY KEY,
+                customer_user_id  TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                expires_at        TEXT NOT NULL,
+                used_at           TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_customer_reset_tokens_user ON customer_password_reset_tokens (customer_user_id)",
+        ],
+    ),
 ]

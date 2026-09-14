@@ -244,3 +244,100 @@ class ResetTokenManager:
             "WHERE user_id = ? AND used_at IS NULL",
             (now, user_id),
         )
+
+
+# ---------------------------------------------------------------
+# Customer-facing equivalents. Same logic as SessionManager/
+# ResetTokenManager above (session TTL, PBKDF2, single-use expiring
+# tokens) but pointed at customer_sessions/customer_password_reset_tokens
+# -- separate tables, not shared with staff, on purpose: a customer
+# session token and a staff session token must never be
+# interchangeable, even though the underlying mechanism is
+# identical. See storage/migrations.py's version 4 and
+# management/customers.py for the account side of this.
+# ---------------------------------------------------------------
+
+CUSTOMER_SESSION_COOKIE_NAME = "gcon_customer_session"
+
+
+class CustomerSessionManager:
+    def __init__(self, db, ttl_hours=SESSION_TTL_HOURS):
+        self.db = db
+        self.ttl_hours = ttl_hours
+
+    def create_session(self, customer_user_id):
+        token = secrets.token_urlsafe(32)
+        created_at = datetime.now(UTC)
+        expires_at = created_at + timedelta(hours=self.ttl_hours)
+        self.db.execute(
+            "INSERT INTO customer_sessions (token, customer_user_id, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (token, customer_user_id, created_at.isoformat(), expires_at.isoformat()),
+        )
+        return token
+
+    def get_customer_user_id(self, token):
+        if not token:
+            return None
+        row = self.db.query_one(
+            "SELECT customer_user_id, expires_at FROM customer_sessions WHERE token = ?", (token,)
+        )
+        if row is None:
+            return None
+        if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]):
+            self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (token,))
+            return None
+        return row["customer_user_id"]
+
+    def destroy_session(self, token):
+        self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (token,))
+
+    def destroy_all_for_user(self, customer_user_id):
+        self.db.execute(
+            "DELETE FROM customer_sessions WHERE customer_user_id = ?", (customer_user_id,)
+        )
+
+
+class CustomerResetTokenManager:
+    def __init__(self, db, ttl_minutes=RESET_TOKEN_TTL_MINUTES):
+        self.db = db
+        self.ttl_minutes = ttl_minutes
+
+    def create_token(self, customer_user_id):
+        token = secrets.token_urlsafe(32)
+        created_at = datetime.now(UTC)
+        expires_at = created_at + timedelta(minutes=self.ttl_minutes)
+        self.db.execute(
+            "INSERT INTO customer_password_reset_tokens "
+            "(token, customer_user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, customer_user_id, created_at.isoformat(), expires_at.isoformat()),
+        )
+        return token
+
+    def get_customer_user_id(self, token):
+        if not token:
+            return None
+        row = self.db.query_one(
+            "SELECT customer_user_id, expires_at, used_at FROM customer_password_reset_tokens "
+            "WHERE token = ?",
+            (token,),
+        )
+        if row is None or row["used_at"] is not None:
+            return None
+        if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]):
+            return None
+        return row["customer_user_id"]
+
+    def consume_token(self, token):
+        self.db.execute(
+            "UPDATE customer_password_reset_tokens SET used_at = ? WHERE token = ?",
+            (datetime.now(UTC).isoformat(), token),
+        )
+
+    def invalidate_all_for_user(self, customer_user_id):
+        now = datetime.now(UTC).isoformat()
+        self.db.execute(
+            "UPDATE customer_password_reset_tokens SET used_at = ? "
+            "WHERE customer_user_id = ? AND used_at IS NULL",
+            (now, customer_user_id),
+        )

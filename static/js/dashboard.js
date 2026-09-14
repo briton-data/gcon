@@ -720,7 +720,7 @@ function renderExecutionsByCompany(companies) {
     companies = companies || [];
 
     if (companies.length === 0) {
-        list.innerHTML = `<div class="text-muted small px-1 py-2">No organizations yet.</div>`;
+        list.innerHTML = `<div class="text-muted small px-1 py-2">No clients yet.</div>`;
         return;
     }
 
@@ -876,6 +876,7 @@ function renderHomeDashboard(data) {
         renderExecutionsByCompany(data.companies);
         renderCompaniesTable(data.companies);
         companiesData = data.companies;
+        if (openClientDrawerOrgId) openClientDetail(openClientDrawerOrgId, true);
     }
     if (data.trust) setText("metric-trust-score", data.trust.trust_score);
     if (data.metrics) {
@@ -1982,6 +1983,14 @@ let execPage = 1;
 const EXEC_PAGE_SIZE = 25;
 let execTotalCount = 0;
 let companiesData = [];
+// Which client's detail drawer is currently open, if any -- set by
+// openClientDetail(), cleared by closeDrawer(). Lets renderHomeDashboard()
+// (called on every /ws tick, see its own comment) keep an open client
+// drawer genuinely live instead of the one-time snapshot every drawer
+// in this dashboard previously was: nothing here re-rendered an
+// already-open drawer's content, ever, even though the underlying
+// data (companiesData) was already being refreshed every tick.
+let openClientDrawerOrgId = null;
 
 function debounce(fn, delayMs) {
     let timer = null;
@@ -2349,7 +2358,10 @@ function renderExplorerRows(rows) {
 
     rows.forEach(row => {
 
-        html += "<tr>";
+        const isNodeRow = explorerView === "nodes";
+        html += isNodeRow
+            ? `<tr class="gcon-node-row" data-node-id="${escapeHtml(row.node_id)}" style="cursor:pointer;">`
+            : "<tr>";
 
         columns.forEach(column => {
 
@@ -2378,6 +2390,12 @@ function renderExplorerRows(rows) {
     });
 
     body.innerHTML = html;
+
+    if (explorerView === "nodes") {
+        body.querySelectorAll(".gcon-node-row").forEach(row => {
+            row.addEventListener("click", () => openNodeDetail(row.dataset.nodeId));
+        });
+    }
 }
 
 async function loadExplorer() {
@@ -2563,7 +2581,7 @@ async function loadAnalytics() {
         if (companiesTbody) {
             const companies = analytics.companies || [];
             companiesTbody.innerHTML = companies.length === 0
-                ? `<tr><td colspan="7" class="text-secondary text-center py-4">No organizations yet.</td></tr>`
+                ? `<tr><td colspan="7" class="text-secondary text-center py-4">No clients yet.</td></tr>`
                 : companies.map(c => `
                     <tr>
                         <td>${escapeHtml(c.name)}</td>
@@ -4440,22 +4458,54 @@ function renderSearchResults(data) {
 }
 
 // ---------------------------------------------------------------
-// Company drill-in (Overview + Usage, from the real org usage
-// rollup already cached in companiesData -- no extra fetch, and
-// no per-company Workers/Receipts sub-view here since neither
-// receipts nor the Explorer table currently expose enough to build
-// a real one beyond what "View Executions"/"View Workers" already
-// jump to.)
+// Client drill-in (Overview + Usage + live current-jobs list, from
+// the real org usage rollup cached in companiesData for the summary
+// half, plus an on-demand fetch of this client's recent jobs -
+// annotated server-side with a real orchestration/execution/
+// verification/assurance/proof pipeline stage, see
+// ManagementLayer.get_client_recent_jobs's docstring - for the
+// current-jobs half. Kept live while open: renderHomeDashboard()
+// re-invokes this on every /ws tick for whichever org's drawer is
+// currently open, see openClientDrawerOrgId.)
 // ---------------------------------------------------------------
 
-function openCompanyDetail(orgId) {
+function stageBadge(stage) {
+    const labels = {
+        orchestration: "Orchestration", execution: "Execution",
+        verification: "Verification", "verification failed": "Verification Failed",
+        assurance: "Assurance", proof: "Proof",
+        failed: "Failed", cancelled: "Cancelled",
+    };
+    const classes = {
+        orchestration: "bg-secondary", execution: "bg-primary",
+        verification: "bg-info text-dark", "verification failed": "bg-danger",
+        assurance: "bg-warning text-dark", proof: "bg-success",
+        failed: "bg-danger", cancelled: "bg-secondary",
+    };
+    const label = labels[stage] || stage;
+    const cls = classes[stage] || "bg-secondary";
+    return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+}
+
+async function openClientDetail(orgId, isRefresh) {
     const company = companiesData.find(c => c.org_id === orgId);
     if (!company) return;
 
-    setText("drawer-title", "Company");
+    openClientDrawerOrgId = orgId;
+    setText("drawer-title", "Client");
     const body = document.getElementById("drawer-body");
 
     const hasUsage = company.usage.jobs_reporting_usage > 0;
+
+    // On first open, show the summary immediately (no flash of
+    // emptiness while the jobs list loads); a live-refresh tick
+    // already has content on screen, so no need to blank it either.
+    let jobsSectionHtml = isRefresh
+        ? document.getElementById("client-current-jobs-section")?.outerHTML
+        : `<div id="client-current-jobs-section" class="gcon-panel mb-3">
+               <strong class="d-block mb-2">Current Jobs</strong>
+               <div class="text-secondary small">Loading...</div>
+           </div>`;
 
     body.innerHTML = `
         <div class="gcon-panel mb-3">
@@ -4479,6 +4529,8 @@ function openCompanyDetail(orgId) {
                 : `<div class="text-secondary small">No job on this account has reported LLM token usage yet.</div>`
             }
         </div>
+
+        ${jobsSectionHtml}
 
         <button class="btn btn-sm btn-outline-light w-100 mb-2" id="company-view-executions-btn">
             <i class="bi bi-play-circle me-1"></i>View Executions
@@ -4518,7 +4570,125 @@ function openCompanyDetail(orgId) {
         });
     }
 
+    if (!isRefresh) openDrawer();
+
+    // Current-jobs list: on-demand fetch (not baked into every poll's
+    // shared bootstrap payload, which would mean fetching every
+    // client's full job list every tick regardless of whether
+    // anyone's looking) - same pattern as openReceiptDetail's fetch.
+    try {
+        const jobs = await fetchJson(`/management/organizations/${encodeURIComponent(orgId)}/jobs?limit=10`);
+        // The drawer may have been closed, or switched to a
+        // different client, while this fetch was in flight.
+        if (openClientDrawerOrgId !== orgId) return;
+
+        const section = document.getElementById("client-current-jobs-section");
+        if (!section) return;
+        section.innerHTML = jobs.length === 0
+            ? `<strong class="d-block mb-2">Current Jobs</strong>
+               <div class="text-secondary small">No jobs yet.</div>`
+            : `<strong class="d-block mb-2">Current Jobs</strong>
+               <table class="table table-sm gcon-table mb-0">
+                   <thead><tr><th>Job</th><th>Stage</th><th>Node</th></tr></thead>
+                   <tbody>
+                       ${jobs.map(j => `
+                           <tr>
+                               <td class="text-truncate" style="max-width:140px;" title="${escapeHtml(j.job_id)}">${escapeHtml(j.job_id)}</td>
+                               <td>${stageBadge(j.stage)}</td>
+                               <td class="text-secondary small">${escapeHtml(j.node_id || "-")}</td>
+                           </tr>`).join("")}
+                   </tbody>
+               </table>`;
+    } catch (e) {
+        const section = document.getElementById("client-current-jobs-section");
+        if (section && openClientDrawerOrgId === orgId) {
+            section.innerHTML = `<strong class="d-block mb-2">Current Jobs</strong>
+                <div class="text-danger small">Could not load jobs.</div>`;
+        }
+    }
+}
+
+async function openNodeDetail(nodeId) {
+    const node = explorerData.find(n => n.node_id === nodeId);
+    if (!node) return;
+
+    setText("drawer-title", "Node");
+    const body = document.getElementById("drawer-body");
+
+    body.innerHTML = `
+        <div class="gcon-panel mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong class="text-truncate" style="max-width:70%;" title="${escapeHtml(nodeId)}">${escapeHtml(nodeId)}</strong>
+                ${statusBadge(node.status)}
+            </div>
+            ${receiptDetailRow("Address", node.address || "-")}
+            ${receiptDetailRow("Running jobs", node.running_jobs)}
+            ${receiptDetailRow("CPU", node.cpu !== undefined && node.cpu !== null ? `${node.cpu}%` : "-")}
+            ${receiptDetailRow("Memory", node.memory !== undefined && node.memory !== null ? `${node.memory}%` : "-")}
+            ${receiptDetailRow("GPU", formatGpuCell(node))}
+            ${receiptDetailRow("Last seen", node.last_seen || "-")}
+        </div>
+
+        <div id="node-enrollment-history-section" class="gcon-panel mb-3">
+            <strong class="d-block mb-2">Enrollment History</strong>
+            <div class="text-secondary small">Loading...</div>
+        </div>
+
+        <button class="btn btn-sm btn-outline-light w-100" id="node-manage-security-btn">
+            <i class="bi bi-shield-lock me-1"></i>Manage in Security
+        </button>
+    `;
+
+    const securityBtn = document.getElementById("node-manage-security-btn");
+    if (securityBtn) {
+        securityBtn.addEventListener("click", () => {
+            closeDrawer();
+            const tabLink = document.querySelector('#tab-nav a[data-tab="security"]');
+            if (tabLink) tabLink.click();
+            const nodeIdField = document.getElementById("security-revoke-node-id");
+            if (nodeIdField) nodeIdField.value = nodeId;
+        });
+    }
+
     openDrawer();
+
+    // Durable "who/where enrolled this worker" trail -- see
+    // migrations/registry.py version 7 and
+    // persistence/repositories/node_enrollment_audit.py. On-demand
+    // fetch, same pattern as openReceiptDetail/openClientDetail.
+    try {
+        const history = await fetchJson(`/nodes/${encodeURIComponent(nodeId)}/enrollment-history`);
+        const section = document.getElementById("node-enrollment-history-section");
+        if (!section) return;
+        section.innerHTML = history.length === 0
+            ? `<strong class="d-block mb-2">Enrollment History</strong>
+               <div class="text-secondary small">No enrollment record for this node (predates this feature, or never enrolled via the Enroll RPC -- e.g. a local/dev node).</div>`
+            : `<strong class="d-block mb-2">Enrollment History</strong>
+               <table class="table table-sm gcon-table mb-0">
+                   <thead><tr><th>When</th><th>Result</th><th>Source IP</th><th>Detail</th></tr></thead>
+                   <tbody>
+                       ${history.map(h => `
+                           <tr>
+                               <td class="text-secondary small">${escapeHtml(h.created_at || "-")}</td>
+                               <td>${h.accepted
+                                   ? '<span class="badge bg-success">Accepted</span>'
+                                   : '<span class="badge bg-danger">Rejected</span>'}</td>
+                               <td class="text-secondary small">${escapeHtml(h.source_ip || "-")}</td>
+                               <td class="text-secondary small">${
+                                   h.accepted
+                                       ? (h.org_id ? `org: ${escapeHtml(h.org_id)}` : "legacy shared token")
+                                       : escapeHtml(h.reason || "-")
+                               }</td>
+                           </tr>`).join("")}
+                   </tbody>
+               </table>`;
+    } catch (e) {
+        const section = document.getElementById("node-enrollment-history-section");
+        if (section) {
+            section.innerHTML = `<strong class="d-block mb-2">Enrollment History</strong>
+                <div class="text-danger small">Could not load enrollment history.</div>`;
+        }
+    }
 }
 
 function renderCompaniesTable(companies) {
@@ -4529,7 +4699,7 @@ function renderCompaniesTable(companies) {
     if (companies.length === 0) {
         body.innerHTML = `
             <div class="text-muted small px-2 py-3">
-                No organizations yet. Add one from Management &rarr; Organizations.
+                No clients yet. Add one from Management &rarr; Organizations.
             </div>`;
         return;
     }
@@ -4560,7 +4730,7 @@ function renderCompaniesTable(companies) {
         <table class="table table-sm gcon-table" id="companies-table">
             <thead>
                 <tr>
-                    <th>Company</th>
+                    <th>Client</th>
                     <th class="text-center">Nodes</th>
                     <th class="text-center">Pending</th>
                     <th class="text-center">Running</th>
@@ -4585,7 +4755,7 @@ function renderCompaniesTable(companies) {
 
 function setupCompaniesTable() {
     document.querySelectorAll(".gcon-company-row").forEach(row => {
-        row.addEventListener("click", () => openCompanyDetail(row.dataset.orgId));
+        row.addEventListener("click", () => openClientDetail(row.dataset.orgId));
     });
 }
 
@@ -4601,6 +4771,7 @@ function openDrawer() {
 function closeDrawer() {
     document.getElementById("detail-drawer").classList.remove("gcon-drawer-open");
     document.getElementById("drawer-backdrop").classList.add("d-none");
+    openClientDrawerOrgId = null;
 }
 
 function setupDrawer() {

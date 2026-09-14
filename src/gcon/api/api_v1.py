@@ -436,11 +436,44 @@ def create_api_v1_app(management, presentation):
         response_model=JobCancelResponse,
         tags=["Jobs"],
         summary="Cancel a running job",
-        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def cancel_job(job_id: str, auth=Depends(require_scope("Submit workflows"))):
+        # SECURITY FIX: this route previously called
+        # presentation.cancel_job(job_id) with no org check at all --
+        # any authenticated key from ANY org could cancel ANY job in
+        # the whole system just by knowing/guessing its job_id, a
+        # real cross-tenant authorization bypass. Same org-ownership
+        # check as get_job() above, and same reasoning: 404 (not 403)
+        # for "doesn't exist" and "belongs to a different company" so
+        # this can't be used to probe which job_ids exist elsewhere.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
         try:
             result = presentation.cancel_job(job_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return jsonable_encoder(result)
+
+    @app.post(
+        "/jobs/{job_id}/retry",
+        tags=["Jobs"],
+        summary="Retry a failed or stuck-pending job",
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def retry_job(job_id: str, auth=Depends(require_scope("Submit workflows"))):
+        # Backend (coordinator.retry_job/presentation.retry_job) was
+        # already fully built and tested; this route simply never
+        # existed. Same org-ownership check as cancel_job above --
+        # written correctly from the start this time.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+        try:
+            result = presentation.retry_job(job_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return jsonable_encoder(result)

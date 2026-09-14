@@ -116,7 +116,7 @@ class WebServer:
                 return RedirectResponse(url="/login")
 
             dashboard_data = self.presentation.get_dashboard()
-            # Per-company node/job/usage rollup for the Companies panel
+            # Per-client node/job/usage rollup for the Clients panel
             # -- lives in ManagementLayer (not PresentationLayer) since
             # it needs both the coordinator's live node/job state AND
             # the organization registry, and joining those two is
@@ -124,7 +124,10 @@ class WebServer:
             # get_user_stats). Merged into the same `dashboard` context
             # dict every other panel already reads from, so
             # companies.html can use `dashboard.companies` like every
-            # other panel uses `dashboard.node_summary` etc.
+            # other panel uses `dashboard.node_summary` etc. (template
+            # file/variable names kept as `companies` -- only the
+            # user-facing "Client" label changed, not the internal
+            # data shape/naming, to keep this change contained.)
             dashboard_data["companies"] = self.management.get_org_usage_summary()
 
             return self.templates.TemplateResponse(
@@ -144,6 +147,17 @@ class WebServer:
         @self.app.get("/nodes")
         def nodes(user=Depends(self.current_user)):
             return self.presentation.get_nodes()
+
+        @self.app.get("/nodes/{node_id}/enrollment-history")
+        def node_enrollment_history(node_id: str, user=Depends(self.current_user)):
+            # Internal staff console's own session-authed route for
+            # the durable "who/where enrolled this worker" audit
+            # trail (see migrations/registry.py version 7 and
+            # persistence/repositories/node_enrollment_audit.py).
+            # api_v1.py has the equivalent org-scoped customer-facing
+            # route; this one has no org filter since staff can see
+            # any node, same as this file's own /nodes above.
+            return self.presentation.get_node_enrollment_history(node_id)
         
         @self.app.get("/jobs")
         def jobs(
@@ -587,6 +601,16 @@ class WebServer:
                 return self.management.get_organization(org_id)
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.get("/management/organizations/{org_id}/jobs")
+        def mgmt_get_organization_jobs(org_id: str, limit: int = 10, user=Depends(self.current_user)):
+            # Backs the client detail drawer's "current jobs" list
+            # (dashboard.js's openClientDetail) -- see
+            # ManagementLayer.get_client_recent_jobs's docstring for
+            # the stage derivation. Internal staff console's own
+            # session-authed route; api_v1.py has the equivalent
+            # org-scoped customer-facing one.
+            return self.management.get_client_recent_jobs(org_id, limit=limit)
 
         @self.app.get("/management/teams")
         def mgmt_teams(user=Depends(self.current_user)):
