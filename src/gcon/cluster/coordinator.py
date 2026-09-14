@@ -2894,7 +2894,7 @@ class GCONCoordinator:
         defaults so a missing field never crashes the endpoint.
 
         `org_id` optionally filters down to nodes belonging to a
-        single company -- used by the dashboard's Companies panel and
+        single client -- used by the dashboard's Clients panel and
         by an org-scoped API key's view of its own fleet.
         """
         nodes = []
@@ -3015,7 +3015,7 @@ class GCONCoordinator:
         per-user usage metrics instead of a permanently-zero counter.
 
         `org_id` optionally filters down to jobs submitted for a
-        single company -- used by the dashboard's Companies panel and
+        single client -- used by the dashboard's Clients panel and
         by an org-scoped API key's view of its own jobs.
 
         `status` optionally filters to a single job status (e.g.

@@ -22,9 +22,10 @@ import secrets
 from datetime import datetime, UTC
 
 from . import rbac
-from .auth import SessionManager, ResetTokenManager
+from .auth import SessionManager, ResetTokenManager, CustomerSessionManager, CustomerResetTokenManager
 from .users import UserRegistry, bootstrap_owner_account
 from .organizations import OrganizationRegistry
+from .customers import CustomerUserRegistry, _CustomerOwnerView
 from .api_keys import APIKeyManager
 from .audit_log import AuditLogger
 
@@ -78,6 +79,13 @@ class ManagementLayer:
         self.notification_center = NotificationCenter(db=self.db)
         self.session_manager = SessionManager(db=self.db)
         self.reset_token_manager = ResetTokenManager(db=self.db)
+
+        # Customer-facing accounts -- deliberately separate registries/
+        # session stores from the staff ones above. See customers.py's
+        # module docstring for why.
+        self.customer_registry = CustomerUserRegistry(db=self.db)
+        self.customer_session_manager = CustomerSessionManager(db=self.db)
+        self.customer_reset_token_manager = CustomerResetTokenManager(db=self.db)
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -243,11 +251,29 @@ class ManagementLayer:
         except ValueError:
             owner = None
 
+        # A key created via customer signup/self-service (see
+        # signup_customer()/create_customer_api_key() below) has an
+        # owner_user_id that only resolves in the CUSTOMER registry,
+        # never the staff one above -- api_keys.owner_user_id has no
+        # FK constraint precisely so it can point into either. Every
+        # api_v1.py route only ever reads owner.organization_id/
+        # .status/.user_id off whatever comes back, so a CustomerUser
+        # (which has the same three, just organization_id spelled
+        # org_id -- see the property below) is a safe drop-in without
+        # touching a single existing route.
+        if owner is None:
+            customer = self.customer_registry.users.get(key.owner_user_id)
+            if customer is not None:
+                owner = _CustomerOwnerView(customer)
+
         if owner is not None and owner.status != "Active":
             raise ValueError("Invalid or expired API key.")
 
         self.api_key_manager.mark_used(key)
-        if owner is not None:
+        if isinstance(owner, _CustomerOwnerView):
+            self.customer_registry.users[owner.user_id].last_active = datetime.now(UTC)
+            self.customer_registry._persist(self.customer_registry.users[owner.user_id])
+        elif owner is not None:
             self.user_registry.increment_stat(owner.user_id, "api_requests")
 
         return key, owner   
@@ -567,9 +593,102 @@ class ManagementLayer:
         data["team_count"] = len(self.org_registry.list_teams(org.org_id))
         return data
 
+    def get_client_recent_jobs(self, org_id, limit=10):
+        """
+        This client's most recent jobs, each annotated with a
+        `stage` derived entirely from real, already-recorded fields
+        -- never a separate tracked-and-drifting status of its own.
+        Backs the client detail drawer's "current jobs" list (see
+        GET /management/organizations/{org_id}/jobs in web_server.py
+        and the customer-facing sibling in api_v1.py).
+
+        Stage mapping, grounded in the pipeline this project actually
+        uses (orchestration -> execution -> evidence/verification ->
+        assurance -> receipt/proof -- see gcon-strategy notes):
+          - "orchestration": job queued, not yet dispatched to a node
+            (status == "pending")
+          - "execution": actively running on a node
+            (status == "running")
+          - "verification": finished, but either has no receipt yet
+            (a real, brief gap between completion and receipt
+            persistence -- see coordinator.py's own comments on this)
+            or has one whose signature hasn't been confirmed valid
+          - "verification failed": has a receipt whose signature
+            check genuinely failed -- a real anomaly (tampering or
+            corruption), surfaced plainly rather than folded into
+            "verification" so it doesn't read as still-in-progress
+          - "assurance": signature verified, but no policy_report has
+            been attached yet (evaluate() runs post-hoc, see
+            coordinator.py's _run_job -- there is a real window where
+            this is true for an otherwise-finished job)
+          - "proof": signature verified AND a policy_report is
+            attached -- fully attested, end state
+          - "failed" / "cancelled": the job's own real status,
+            reported as-is rather than forced into a pipeline stage
+            that assumes success
+        """
+        jobs = self.coordinator.get_jobs(org_id=org_id, limit=limit) if self.coordinator else []
+        if not jobs:
+            return []
+
+        job_ids = [j["job_id"] for j in jobs]
+        verified_by_job = {
+            r["job_id"]: r["verified"]
+            for r in self.coordinator.get_receipts(org_id=org_id)
+            if r["job_id"] in job_ids
+        }
+
+        result = []
+        for job in jobs:
+            status = job.get("status")
+            if status == "pending":
+                stage = "orchestration"
+            elif status == "running":
+                stage = "execution"
+            elif status in ("failed", "cancelled"):
+                stage = status
+            else:  # "completed"
+                is_valid = verified_by_job.get(job["job_id"])
+                if is_valid is None:
+                    stage = "verification"  # no receipt yet -- see docstring
+                elif is_valid is False:
+                    stage = "verification failed"
+                else:
+                    # Real receipt/job dicts, not the get_receipts()/
+                    # get_jobs() summary shapes -- neither of those
+                    # summaries includes policy_report at all (see
+                    # both methods' own field lists). Same fallback
+                    # get_receipt_detail() already uses and for the
+                    # same reason: the single-node dispatch path
+                    # (_run_job) only ever attaches policy_report to
+                    # the JOB dict, not the receipt -- only the
+                    # replicated path (_run_replicated_job) attaches
+                    # it to both. Checking receipt-only (or the
+                    # get_jobs() summary, which has neither) would
+                    # silently show every ordinary (non-replicated)
+                    # job stuck at "assurance" forever, even once real
+                    # policy evaluation has actually happened.
+                    receipt = self.coordinator.receipts.get(job["job_id"], {})
+                    raw_job = self.coordinator.jobs.get(job["job_id"], {})
+                    policy_report = receipt.get("policy_report", raw_job.get("policy_report"))
+                    stage = "proof" if policy_report is not None else "assurance"
+
+            result.append({
+                "job_id": job["job_id"],
+                "status": status,
+                "stage": stage,
+                "node_id": job.get("node_id"),
+                "created_at": job.get("created_at"),
+                "completed_at": job.get("completed_at"),
+                "runtime_seconds": job.get("runtime_seconds"),
+                "receipt_id": job.get("receipt_id"),
+            })
+        return result
+
+
     def get_org_usage_summary(self):
         """
-        Per-company rollup for the dashboard's Companies panel: which
+        Per-client rollup for the dashboard's Clients panel: which
         organizations have nodes online right now, and the status
         breakdown of their jobs (pending/running/completed/failed/
         cancelled), plus whatever compute/token usage those jobs
@@ -590,7 +709,7 @@ class ManagementLayer:
         api_v1.py's submit_job route) -- rows submitted before this
         feature existed, or through a path that doesn't yet resolve an
         org, will have org_id = None and simply won't be attributed to
-        any company here.
+        any client here.
         """
         if self.coordinator is None:
             return []
@@ -1018,6 +1137,103 @@ class ManagementLayer:
     def revoke_api_key(self, key_id):
         key = self.api_key_manager.revoke_key(key_id)
         self.audit_logger.log("Admin", "revoked API key", key.name)
+        return key.to_dict()
+
+    # ------------------------------------------------------------
+    # Customer accounts (signup/login/self-service API keys)
+    # ------------------------------------------------------------
+
+    def signup_customer(self, org_name, name, email, password, plan="Standard"):
+        """
+        Full self-signup: a brand-new organization, its first
+        (and, for now, only) customer user, and an initial API key
+        ready to submit jobs with immediately -- no separate
+        "now go create a key" step. The secret is only ever revealed
+        here, at creation time, same convention as
+        create_api_key()/the bootstrap owner password above.
+
+        Raises ValueError if the email is already registered
+        (CustomerUserRegistry.add_user's own check) -- surfaced
+        as-is, a signup form is expected to show that directly.
+        """
+        org = self.org_registry.add_organization(org_name, plan=plan)
+        customer = self.customer_registry.add_user(name, email, org.org_id, password)
+        key = self.api_key_manager.create_key(
+            f"{org_name} - default", customer.customer_user_id,
+            scopes=["Submit workflows", "View monitoring"],
+        )
+        self.audit_logger.log("System", "customer signed up", org_name)
+        return {
+            "organization": org.to_dict(),
+            "customer_user": customer.to_dict(),
+            "api_key": key.to_dict(reveal_secret=True),
+        }
+
+    def customer_login(self, email, password):
+        """Returns (session_token, customer_user_dict) on success --
+        same order as login() above, raises ValueError on any
+        failure (unknown email, wrong password, disabled account) --
+        one generic message, same anti-enumeration reasoning."""
+        customer = self.customer_registry.authenticate(email, password)
+        if customer is None:
+            raise ValueError("Invalid email or password.")
+        token = self.customer_session_manager.create_session(customer.customer_user_id)
+        return token, customer.to_dict()
+
+    def customer_signup_and_login(self, org_name, name, email, password, plan="Standard"):
+        """signup_customer() + an immediate session, for a signup
+        form that logs the new customer straight into their new
+        dashboard rather than making them log in again right after."""
+        result = self.signup_customer(org_name, name, email, password, plan)
+        token = self.customer_session_manager.create_session(
+            result["customer_user"]["customer_user_id"]
+        )
+        result["session_token"] = token
+        return result
+
+    def get_customer_session_user(self, token):
+        """Returns the CustomerUser dict for a valid session token,
+        or None. Mirrors current_user()'s shape in web_server.py for
+        the staff console."""
+        customer_user_id = self.customer_session_manager.get_customer_user_id(token)
+        if customer_user_id is None:
+            return None
+        try:
+            return self.customer_registry.get_user(customer_user_id).to_dict()
+        except ValueError:
+            return None
+
+    def list_customer_api_keys(self, org_id):
+        """Every API key belonging to ANY customer user in this org
+        -- keys are an org-level resource (any teammate at 'Platform
+        Z' can see/manage the keys their whole org submits jobs
+        with), not private to whichever individual created them."""
+        member_ids = {u.customer_user_id for u in self.customer_registry.list_for_org(org_id)}
+        return [
+            k.to_dict() for k in self.api_key_manager.list_keys()
+            if k.owner_user_id in member_ids
+        ]
+
+    def create_customer_api_key(self, org_id, customer_user_id, name):
+        """customer_user_id is who created it (for audit purposes
+        only) -- see list_customer_api_keys's note on keys being an
+        org-level, not per-user, resource."""
+        key = self.api_key_manager.create_key(
+            name, customer_user_id, scopes=["Submit workflows", "View monitoring"],
+        )
+        self.audit_logger.log(f"Customer:{org_id}", "generated API key", key.name)
+        return key.to_dict(reveal_secret=True)
+
+    def revoke_customer_api_key(self, org_id, key_id):
+        """Raises ValueError if key_id doesn't exist OR belongs to a
+        different org -- same message either way, so this can't be
+        used to probe which key_ids exist elsewhere."""
+        member_ids = {u.customer_user_id for u in self.customer_registry.list_for_org(org_id)}
+        key = self.api_key_manager.get_key(key_id)
+        if key.owner_user_id not in member_ids:
+            raise ValueError(f"API key '{key_id}' does not exist.")
+        key = self.api_key_manager.revoke_key(key_id)
+        self.audit_logger.log(f"Customer:{org_id}", "revoked API key", key.name)
         return key.to_dict()
 
     def regenerate_api_key(self, key_id):

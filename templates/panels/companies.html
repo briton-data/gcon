@@ -1,7 +1,7 @@
 <div class="gcon-panel h-100">
 
     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Companies</h5>
+        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Clients</h5>
         <a href="#" class="gcon-panel-link" data-tab="organizations">Manage &rarr;</a>
     </div>
 
@@ -9,13 +9,13 @@
 
         {% if not dashboard.companies %}
         <div class="text-muted small px-2 py-3">
-            No organizations yet. Add one from Management &rarr; Organizations.
+            No clients yet. Add one from Management &rarr; Organizations.
         </div>
         {% else %}
         <table class="table table-sm gcon-table" id="companies-table">
             <thead>
                 <tr>
-                    <th>Company</th>
+                    <th>Client</th>
                     <th class="text-center">Nodes</th>
                     <th class="text-center">Pending</th>
                     <th class="text-center">Running</th>
