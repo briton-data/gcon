@@ -192,6 +192,39 @@ class ErrorOut(BaseModel):
     detail: str
 
 
+class CustomerSignupIn(BaseModel):
+    org_name: str
+    name: str
+    email: str
+    password: str
+
+
+class CustomerLoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class CustomerAuthOut(BaseModel):
+    """
+    Response for /auth/signup and /auth/login. `api_key` is only
+    present on signup (the secret is revealed exactly once, same
+    convention as ManagementLayer.create_api_key() everywhere else --
+    it cannot be retrieved again after this response). A separate
+    frontend calling this API stores `api_key.secret` (signup) or
+    asks the customer to supply an existing key (login returns
+    account info only, not a new key) and sends it as a Bearer token
+    on every subsequent /api/v1 request -- the same authentication
+    every other endpoint in this file already uses. No session
+    cookie is involved anywhere in this file.
+    """
+    organization: dict = None
+    customer_user: dict = None
+    api_key: dict = None
+
+    class Config:
+        extra = "allow"
+
+
 def create_api_v1_app(management, presentation):
     """
     Build the /api/v1 sub-application. `management` is the shared
@@ -247,6 +280,67 @@ def create_api_v1_app(management, presentation):
             return {"key": key, "owner": owner}
 
         return dependency
+
+    # ------------------------------------------------------------
+    # Auth
+    #
+    # These two routes are deliberately the only ones in this file
+    # that do NOT require an API key -- that's the point, they're how
+    # a customer gets one in the first place. A separate frontend
+    # (its own repo/deploy, not part of gcon-rebuild) calls these
+    # directly: /auth/signup returns a usable API key immediately
+    # (same one-time-reveal convention as every other key creation in
+    # this codebase), /auth/login confirms credentials and returns
+    # the account's org_id/name so the frontend can display it --  it
+    # deliberately does NOT mint or return a new key on every login,
+    # since a customer's existing key(s) (managed via
+    # list/create/revoke_customer_api_key, not yet exposed here) are
+    # what the frontend should already be holding and sending as a
+    # Bearer token on every other call in this file. No session
+    # cookie, no server-rendered page -- pure JSON in, JSON out.
+    # ------------------------------------------------------------
+
+    @app.post(
+        "/auth/signup",
+        response_model=CustomerAuthOut,
+        tags=["Auth"],
+        summary="Create a new organization and customer account",
+        responses={400: {"model": ErrorOut}},
+    )
+    def auth_signup(payload: CustomerSignupIn):
+        try:
+            result = management.signup_customer(
+                payload.org_name, payload.name, payload.email, payload.password,
+            )
+        except ValueError as e:
+            # signup_customer's own duplicate-email check (see its
+            # docstring) -- surfaced as-is, a signup form is expected
+            # to show this directly to the customer.
+            raise HTTPException(status_code=400, detail=str(e))
+        return result
+
+    @app.post(
+        "/auth/login",
+        response_model=CustomerAuthOut,
+        tags=["Auth"],
+        summary="Verify customer credentials",
+        responses={401: {"model": ErrorOut}},
+    )
+    def auth_login(payload: CustomerLoginIn):
+        # Deliberately calls customer_registry.authenticate() directly
+        # rather than management.customer_login() -- the latter also
+        # creates a session row via CustomerSessionManager for the
+        # cookie-based flow this file does not use, which would just
+        # be silently orphaned (created, never read, never expired
+        # until its TTL) on every single login call. This checks the
+        # same password (same PBKDF2 verification underneath) without
+        # that waste, since a separate frontend authenticates every
+        # subsequent request with the customer's own API key, not a
+        # session token.
+        customer = management.customer_registry.authenticate(payload.email, payload.password)
+        if customer is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        return {"customer_user": customer.to_dict()}
 
     # ------------------------------------------------------------
     # Cluster

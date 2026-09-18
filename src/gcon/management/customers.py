@@ -172,3 +172,9 @@ class _CustomerOwnerView:
         self.user_id = customer_user.customer_user_id
         self.organization_id = customer_user.org_id
         self.status = customer_user.status
+        # Added after a real end-to-end test caught GET /whoami
+        # (an existing, otherwise-untouched route) raising
+        # AttributeError on owner.name for any customer-authenticated
+        # request -- this adapter never exposed it, and no customer
+        # key had exercised that route before now.
+        self.name = customer_user.name

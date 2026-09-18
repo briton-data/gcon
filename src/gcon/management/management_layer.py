@@ -752,6 +752,13 @@ class ManagementLayer:
                     llm_input_tokens += int(tokens.get("input", 0) or 0)
                     llm_output_tokens += int(tokens.get("output", 0) or 0)
 
+            org_receipts = (
+                self.coordinator.get_receipts(org_id=org.org_id)
+                if self.coordinator is not None else []
+            )
+            verified_count = sum(1 for r in org_receipts if r.get("verified"))
+            receipts_total = len(org_receipts)
+
             summaries.append({
                 "org_id": org.org_id,
                 "name": org.name,
@@ -765,6 +772,23 @@ class ManagementLayer:
                     "llm_input_tokens": llm_input_tokens,
                     "llm_output_tokens": llm_output_tokens,
                     "compute_seconds": compute_seconds,
+                },
+                # Same aggregate this org's slice of the Verify/Evidence
+                # pillars would show, scoped to this one client - not a
+                # third concept, just this org's numbers instead of the
+                # whole cluster's. Assure is deliberately NOT included
+                # here: per-org policy compliance would need the same
+                # kind of running counter the global Assure pillar uses,
+                # split per org_id, which does not exist yet - adding a
+                # second non-persistent counter felt like more surface
+                # than this round should take on; flagged, not built.
+                "receipts": {
+                    "total": receipts_total,
+                    "verified": verified_count,
+                    "unverified": receipts_total - verified_count,
+                    "completed_jobs_missing_receipt": max(
+                        0, job_status_counts["completed"] - receipts_total
+                    ),
                 },
             })
 
