@@ -1,0 +1,110 @@
+<!--
+    GCON Control Plane — the five pillars.
+
+    This is the internal dashboard's primary view. It answers
+    "what is GCON doing right now?" in aggregate only: counts per
+    pillar, never a per-job or per-receipt list. Individual job and
+    receipt detail belongs to the customer-facing product, not to
+    internal staff operations.
+
+    Every value here is filled live by dashboard.js's renderPillars()
+    from the same bootstrap/websocket payload the rest of the Overview
+    uses, so there is one data path, not a second one.
+-->
+<div class="gcon-panel" id="pillars-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-columns-gap me-2"></i>GCON Control Plane</h5>
+        <span class="text-secondary small">Orchestrate &rarr; Execute &rarr; Verify &rarr; Assure &rarr; Evidence</span>
+    </div>
+
+    <div class="gcon-panel-body" style="min-height:auto;">
+        <div class="row g-3">
+
+            <div class="col-lg col-md-4 col-6">
+                <div class="gcon-pillar" id="pillar-orchestrate">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-diagram-2 me-1"></i>Orchestrate
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="pillar-orch-queued">--</span><span class="l">queued</span></div>
+                        <div class="stat"><span class="n" id="pillar-orch-cancelled">--</span><span class="l">cancelled</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg col-md-4 col-6">
+                <div class="gcon-pillar" id="pillar-execute">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-cpu me-1"></i>Execute
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="pillar-exec-workers">--</span><span class="l">workers active</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-running">--</span><span class="l">running</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-failures">--</span><span class="l">execution failures</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg col-md-4 col-6">
+                <div class="gcon-pillar" id="pillar-verify">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-patch-check me-1"></i>Verify
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="pillar-verify-verified">--</span><span class="l">verified</span></div>
+                        <div class="stat"><span class="n" id="pillar-verify-pending">--</span><span class="l">unverified</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg col-md-4 col-6">
+                <div class="gcon-pillar" id="pillar-assure">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-shield-check me-1"></i>Assure
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="pillar-assure-compliant">--</span><span class="l">compliant</span></div>
+                        <div class="stat"><span class="n" id="pillar-assure-exceptions">--</span><span class="l">policy exceptions</span></div>
+                    </div>
+                    <!-- Assure counts are per-process running totals:
+                         policy_report is attached to an in-memory
+                         receipt and has no persisted column, so these
+                         cannot be rebuilt from the DB after a restart.
+                         renderPillars() shows "--" rather than 0 when
+                         nothing has been evaluated yet, so an empty
+                         counter is never mistaken for a clean result. -->
+                </div>
+            </div>
+
+            <div class="col-lg col-md-4 col-6">
+                <!--
+                    Named "Evidence", not "Prove": what GCON generates
+                    today is an HMAC-signed receipt bound to the
+                    submitting node's mTLS identity -- integrity and
+                    authenticity of a RECORD. That is not the same
+                    claim as a cryptographic proof of correct
+                    computation (a ZK proof) or a hardware-attested
+                    execution environment (a TEE) -- neither is built.
+                    See gcon/execution/replication.py's own docstring:
+                    ZK was ruled out as intractable for real training
+                    workloads, TEE as needing confidential-computing
+                    hardware this fleet doesn't have. Calling this
+                    pillar "Prove" would claim a guarantee the system
+                    does not make.
+                -->
+                <div class="gcon-pillar" id="pillar-evidence">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-file-earmark-lock me-1"></i>Evidence
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="pillar-evidence-generated">--</span><span class="l">receipts generated</span></div>
+                        <div class="stat"><span class="n" id="pillar-evidence-awaiting">--</span><span class="l">completed jobs missing a receipt</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+</div>

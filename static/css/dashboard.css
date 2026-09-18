@@ -2283,3 +2283,74 @@ a { text-decoration: none; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------------------------------------------------------
+   GCON Control Plane pillars (Overview)
+
+   Orchestrate / Execute / Verify / Assure / Prove. Aggregate
+   counts only -- this is the internal staff view, so the pillars
+   deliberately carry no per-job or per-receipt rows.
+
+   Every colour here is a CSS variable already defined in :root and
+   re-declared under [data-bs-theme="dark"], so these follow the
+   light/dark toggle automatically -- no literal hex values, and no
+   second place to update when the palette changes.
+   --------------------------------------------------------------- */
+
+.gcon-pillar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    height: 100%;
+    padding: 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+
+.gcon-pillar-title {
+    font-size: .82rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.gcon-pillar-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.gcon-pillar-stats .stat {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.gcon-pillar-stats .stat .n {
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    /* Tabular figures so the numbers don't jitter horizontally as
+       they tick up on every websocket refresh. */
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
+.gcon-pillar-stats .stat .l {
+    font-size: .78rem;
+    color: var(--muted);
+}
+
+/* Per-pillar accent on the heading only: enough to tell the five
+   apart at a glance without colour-coding the numbers themselves,
+   which would imply a severity they don't carry. */
+#pillar-orchestrate .gcon-pillar-title { color: var(--info); }
+#pillar-execute     .gcon-pillar-title { color: var(--primary); }
+#pillar-verify      .gcon-pillar-title { color: var(--success); }
+#pillar-assure      .gcon-pillar-title { color: var(--warning); }
+#pillar-evidence    .gcon-pillar-title { color: var(--violet); }

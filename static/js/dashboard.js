@@ -9,7 +9,7 @@
 
 
 let currentTab = "control-center";
-let explorerView = "nodes";
+let explorerView = "artifacts";
 let explorerData = [];
 let isPaused = false;
 // How often the dashboard re-polls REST endpoints (cluster state,
@@ -311,13 +311,8 @@ function setupTabNav() {
 function loadActiveTab() {
     if (currentTab === "control-center") loadControlCenter();
     else if (currentTab === "cluster") loadControlCenter();
-    else if (currentTab === "executions") loadExecutionsTab();
-    else if (currentTab === "topology") loadTopology();
-    else if (currentTab === "receipts") loadReceiptsTab();
     else if (currentTab === "trust-center") loadTrustCenter();
     else if (currentTab === "explorer") loadExplorer();
-    else if (currentTab === "monitoring") loadMonitoring();
-    else if (currentTab === "analytics") loadAnalytics();
     else if (currentTab === "events") loadEventsTab();
     else if (currentTab === "workflows") loadWorkflowsTab();
     else if (currentTab === "storage") loadControlCenter();
@@ -436,12 +431,8 @@ async function loadCluster() {
     try {
         const cluster = await fetchJson("/cluster");
         setText("metric-total-nodes", cluster.total_nodes);
-        setText("metric-running-jobs", cluster.running_jobs);
-        setText("metric-completed-jobs", cluster.completed_jobs);
-        setText("metric-failed-jobs", cluster.failed_jobs);
         setText("overview-registered-nodes", cluster.total_nodes);
         setText("overview-active-jobs", cluster.running_jobs);
-        setText("cc-node-summary", `${cluster.total_nodes} nodes · ${cluster.idle_nodes} idle`);
     } catch (err) {
         console.error("Failed to load cluster state:", err);
         setConnectionStatus(false);
@@ -589,7 +580,7 @@ function setupEventsTab() {
 
 async function loadControlCenter() {
 
-    const [, nodes, jobs] = await Promise.all([
+    await Promise.all([
         loadCluster(),
         loadNodes(),
         loadJobs(),
@@ -598,8 +589,6 @@ async function loadControlCenter() {
         loadTopologyMini(),
         loadHaStatus(),
     ]);
-
-    populateOperationsSelectors(nodes, jobs);
 
 }
 
@@ -881,9 +870,90 @@ function renderHomeDashboard(data) {
     if (data.trust) setText("metric-trust-score", data.trust.trust_score);
     if (data.metrics) {
         setText("metric-total-nodes", data.metrics.total_nodes);
-        setText("metric-running-jobs", data.metrics.running_jobs);
-        setText("metric-completed-jobs", data.metrics.completed_jobs);
-        setText("metric-failed-jobs", data.metrics.failed_jobs);
+    }
+    renderPillars(data);
+}
+
+// ---------------------------------------------------------------
+// GCON Control Plane pillars — Orchestrate / Execute / Verify /
+// Assure / Prove. Aggregate counts only: this is the internal
+// staff view, so it deliberately shows no per-job or per-receipt
+// row. Every figure below comes from the same payload the rest of
+// the Overview renders from, so there is one data path.
+//
+// Anything without a real server-side aggregate is left as "--"
+// rather than derived from data.jobs, which is capped at 50 by
+// get_dashboard() and would therefore under-report at any real
+// volume.
+// ---------------------------------------------------------------
+
+function renderPillars(data) {
+    if (!data) return;
+
+    const metrics = data.metrics || {};
+    const nodeSummary = data.node_summary || {};
+    const receipts = data.receipts_summary || {};
+
+    // Orchestrate — scheduling-stage outcomes: what's queued and what
+    // got cancelled before it ran. NOT "running" — that's work
+    // actually being performed, which is Execute's question, not
+    // Orchestrate's ("what should run, where, when").
+    setText("pillar-orch-queued", metrics.pending_jobs ?? "--");
+    setText("pillar-orch-cancelled", metrics.cancelled_jobs ?? "--");
+
+    // Execute — who is actually doing work, what's running, and what broke.
+    const active = (nodeSummary.idle ?? 0) + (nodeSummary.busy ?? 0);
+    setText("pillar-exec-workers", nodeSummary.total === undefined ? "--" : active);
+    setText("pillar-exec-running", metrics.running_jobs ?? "--");
+    setText("pillar-exec-failures", metrics.failed_jobs ?? "--");
+
+    // Verify — does an EXISTING receipt's signature actually check out?
+    // Two real fields only: receipts_summary has no third "failed"
+    // bucket distinct from "unverified" (that was a phantom stat
+    // that always rendered "--" before this fix).
+    setText("pillar-verify-verified", receipts.verified ?? "--");
+    setText("pillar-verify-pending", receipts.unverified ?? "--");
+
+    // Evidence — not "Prove". What's generated is an HMAC-signed
+    // receipt bound to the submitting node's mTLS identity: proof of
+    // a record's integrity and authorship, not a cryptographic proof
+    // of correct computation (no ZK) or a hardware-attested execution
+    // environment (no TEE) -- neither is built anywhere in this
+    // codebase. This is coverage, a different question from Verify:
+    // did a completed job get a receipt generated for it AT ALL?
+    // (Receipt persistence is best-effort elsewhere in the codebase —
+    // a job can finish COMPLETED with no receipt — so this is a real
+    // gap to surface, not a hypothetical one.) Using the same
+    // verified/unverified split here would just relabel Verify's own
+    // numbers, which is the bug this replaces.
+    //
+    // Known imprecision, stated rather than hidden: a job submitted
+    // with verify={replicas:N} produces one receipt PER REPLICA, so
+    // receipts.total can exceed completed_jobs on a cluster using
+    // replicated verification. This is a simple completed-vs-total
+    // comparison, not a per-job join — it under-counts the gap for
+    // that subset of jobs rather than over-counting it, so it never
+    // shows a false alarm, but it can under-report a real one there.
+    const completed = metrics.completed_jobs ?? 0;
+    const generated = receipts.total ?? 0;
+    setText("pillar-evidence-generated", receipts.total ?? "--");
+    setText(
+        "pillar-evidence-awaiting",
+        receipts.total === undefined ? "--" : Math.max(0, completed - generated)
+    );
+
+    // Assure — policy evaluation outcomes. These are per-process
+    // running totals (policy_report is not persisted), so `evaluated`
+    // tells us whether a zero means "all clean" or "nothing evaluated
+    // since this coordinator started". Showing "--" in the latter case
+    // avoids reporting an empty counter as a clean bill of health.
+    const policy = data.policy_summary;
+    if (policy && policy.evaluated > 0) {
+        setText("pillar-assure-compliant", policy.compliant);
+        setText("pillar-assure-exceptions", policy.exceptions);
+    } else {
+        setText("pillar-assure-compliant", "--");
+        setText("pillar-assure-exceptions", "--");
     }
 }
 
@@ -914,68 +984,17 @@ function renderTrustCenter(data) {
         }
     }
 
-    // Signature validation summary
-    const sigEl = document.getElementById("tc-signature-summary");
-    if (sigEl) {
-        const summary = data.receipts_summary || {};
-        sigEl.innerHTML = `
-            <div class="gcon-stat-list">
-                <div class="cell"><div class="text-secondary small">Total Receipts</div><div class="fw-bold">${summary.total ?? 0}</div></div>
-                <div class="cell"><div class="text-secondary small">Verified</div><div class="fw-bold text-success">${summary.verified ?? 0}</div></div>
-                <div class="cell"><div class="text-secondary small">Unverified</div><div class="fw-bold text-danger">${summary.unverified ?? 0}</div></div>
-                <div class="cell"><div class="text-secondary small">Verification Rate</div><div class="fw-bold">${trust.verification_rate ?? "--"}%</div></div>
-            </div>
-        `;
-    }
-
-    // Verification failures
-    const failuresList = document.getElementById("tc-failures-list");
-    const failuresCount = document.getElementById("tc-failures-count");
-    if (failuresCount) failuresCount.textContent = (data.verification_failures || []).length;
-    if (failuresList) {
-        const failures = data.verification_failures || [];
-        failuresList.innerHTML = failures.length === 0
-            ? `<div class="text-secondary text-center py-3"><i class="bi bi-check-circle-fill text-success me-1"></i>No verification failures.</div>`
-            : failures.map(r => `
-                <div class="gcon-activity-item">
-                    <div class="gcon-activity-time"><i class="bi bi-shield-x text-danger me-1"></i>${escapeHtml(r.receipt_id)}</div>
-                    <div class="gcon-activity-message">Job ${escapeHtml(r.job_id)} on ${escapeHtml(r.node_id || "unassigned")}</div>
-                </div>
-            `).join("");
-    }
-
-    // Node trust status
-    const nodeTrustBody = document.getElementById("tc-node-trust-body");
-    if (nodeTrustBody) {
-        const nodes = data.node_trust || [];
-        nodeTrustBody.innerHTML = nodes.length === 0
-            ? `<tr><td colspan="4" class="text-center text-secondary">No registered nodes.</td></tr>`
-            : nodes.map(n => `
-                <tr>
-                    <td>${escapeHtml(n.node_id)}</td>
-                    <td>${statusBadge(n.status)}</td>
-                    <td>${n.trusted ? '<i class="bi bi-shield-check text-success"></i> Trusted' : '<i class="bi bi-shield-x text-danger"></i> Untrusted'}</td>
-                    <td class="text-secondary small">${escapeHtml(n.last_seen || "-")}</td>
-                </tr>
-            `).join("");
-    }
-
-    // Verification timeline (recent receipt/verification-related events)
-    const timelineEl = document.getElementById("tc-verification-timeline");
-    if (timelineEl) {
-        const events = (data.verification_timeline || []).filter(e =>
-            (e.event_type || "").toLowerCase().includes("receipt") ||
-            (e.event_type || "").toLowerCase().includes("health")
-        );
-        timelineEl.innerHTML = events.length === 0
-            ? `<div class="text-secondary text-center py-3">No verification activity yet.</div>`
-            : events.slice(0, 15).map(e => `
-                <div class="gcon-activity-item">
-                    <div class="gcon-activity-time">${new Date(e.timestamp).toLocaleString()}</div>
-                    <div class="gcon-activity-message">${escapeHtml(e.event_type)} &middot; ${escapeHtml(e.source || "")}</div>
-                </div>
-            `).join("");
-    }
+    // Signature validation summary lived here — removed as a
+    // confirmed duplicate of the Overview's Verify pillar (identical
+    // total/verified/unverified/rate fields, same receipts_summary
+    // source). Trust Score/Verification Rate/Node Trust Rate/
+    // Verification Failures/Trust History above are NOT duplicates —
+    // none of those appear in the pillars — so they stay.
+    // Verification Failures is set as the Trust Score card's fourth
+    // metric earlier in this function (tc-verification-failures) -
+    // this used to also update a badge (tc-failures-count) belonging
+    // to a per-item failures list panel that was removed last round;
+    // that badge no longer exists, so this was writing to nothing.
 }
 
 async function loadTrustCenter() {
@@ -1016,76 +1035,14 @@ function bootstrapHomeDashboard() {
     }
 }
 
-function populateOperationsSelectors(nodes, jobs) {
-
-    if (nodes !== undefined) {
-
-        const nodeSelect = document.getElementById("op-node-select");
-
-        if (nodeSelect) {
-
-            const current = nodeSelect.value;
-
-            nodeSelect.innerHTML =
-                `<option value="">Select node…</option>` +
-                nodes.map(n =>
-                    `<option value="${escapeHtml(n.node_id)}">
-                        ${escapeHtml(n.node_id)}
-                        (${escapeHtml(n.status)})
-                    </option>`
-                ).join("");
-
-            if (nodes.some(n => n.node_id === current)) {
-                nodeSelect.value = current;
-            }
-
-        }
-
-    }
-
-    if (jobs !== undefined) {
-
-        const jobSelect = document.getElementById("op-job-select");
-
-        if (jobSelect) {
-
-            const current = jobSelect.value;
-
-            const running =
-                jobs.filter(j => j.status === "running");
-
-            jobSelect.innerHTML =
-                `<option value="">Select running job…</option>` +
-                running.map(j =>
-                    `<option value="${escapeHtml(j.job_id)}">
-                        ${escapeHtml(j.job_id)}
-                        (${escapeHtml(j.node_id || "-")})
-                    </option>`
-                ).join("");
-
-            if (running.some(j => j.job_id === current)) {
-                jobSelect.value = current;
-            }
-
-        }
-
-    }
-
-}
 
 function setOpResult(message, isError) {
-
-    const el = document.getElementById("op-result");
-
-    if (!el) return;
-
-    el.textContent = message;
-
-    el.className =
-        isError
-            ? "mt-3 small text-danger"
-            : "mt-3 small text-success";
-
+    // The old #op-result element lived in the Control Center's
+    // operations panel, which was removed when the internal dashboard
+    // became aggregate-only. The Administration tab still calls
+    // opCall(), so feedback now goes to the global toast instead of a
+    // panel-local line that no longer exists.
+    showToast(message, isError);
 }
 
 async function opCall(url, options, successMessage) {
@@ -1111,311 +1068,11 @@ async function opCall(url, options, successMessage) {
     }
 }
 
-function setupOperationsPanel() {
-
-    const bind = (id, handler) => {
-
-        const ids = Array.isArray(id) ? id : [id];
-
-        ids.forEach(elId => {
-            const btn = document.getElementById(elId);
-            if (btn) {
-                btn.addEventListener("click", () =>
-                    handler().catch(() => {})
-                );
-            }
-        });
-
-    };
-
-    bind(
-        "op-pause-scheduler-btn",
-        () => opCall(
-            "/cluster/scheduler/pause",
-            { method: "POST" },
-            "Scheduler paused — no new jobs will be assigned."
-        )
-    );
-
-    bind(
-        "op-resume-scheduler-btn",
-        () => opCall(
-            "/cluster/scheduler/resume",
-            { method: "POST" },
-            "Scheduler resumed."
-        )
-    );
-
-    bind(
-        ["op-refresh-cluster-btn", "op-refresh-cluster-btn-inline"],
-        () => opCall(
-            "/cluster",
-            {},
-            "Cluster state refreshed."
-        )
-    );
-
-    bind(
-        "op-emergency-stop-btn",
-        async () => {
-
-            if (
-                !confirm(
-                    "Emergency stop: pause the scheduler and cancel every running job?"
-                )
-            ) {
-                return;
-            }
-
-            await opCall(
-                "/cluster/emergency-stop",
-                { method: "POST" },
-                "Emergency stop triggered."
-            );
-
-        }
-    );
-
-    bind(
-        "op-drain-node-btn",
-        async () => {
-
-            const nodeId =
-                document.getElementById("op-node-select").value;
-
-            if (!nodeId) {
-
-                setOpResult("Select a node first.", true);
-
-                return;
-
-            }
-
-            await opCall(
-                `/cluster/nodes/${encodeURIComponent(nodeId)}/drain`,
-                { method: "POST" },
-                `Node ${nodeId} is draining.`
-            );
-
-        }
-    );
-
-    bind(
-        "op-restart-worker-btn",
-        async () => {
-
-            const nodeId =
-                document.getElementById("op-node-select").value;
-
-            if (!nodeId) {
-
-                setOpResult("Select a node first.", true);
-
-                return;
-
-            }
-
-            await opCall(
-                `/cluster/nodes/${encodeURIComponent(nodeId)}/restart`,
-                { method: "POST" },
-                `Node ${nodeId} restarted.`
-            );
-
-        }
-    );
-
-    bind(
-        "op-stop-worker-btn",
-        async () => {
-
-            const nodeId =
-                document.getElementById("op-node-select").value;
-
-            if (!nodeId) {
-
-                setOpResult("Select a node first.", true);
-
-                return;
-
-            }
-
-            if (
-                !confirm(
-                    `Stop and remove node ${nodeId} from the cluster?`
-                )
-            ) {
-                return;
-            }
-
-            await opCall(
-                `/cluster/nodes/${encodeURIComponent(nodeId)}/stop`,
-                { method: "POST" },
-                `Node ${nodeId} stopped and removed.`
-            );
-
-        }
-    );
-
-    bind(
-        "op-cancel-job-btn",
-        async () => {
-
-            const jobId =
-                document.getElementById("op-job-select").value;
-
-            if (!jobId) {
-
-                setOpResult("Select a running job first.", true);
-
-                return;
-
-            }
-
-            if (!confirm(`Cancel job ${jobId}?`)) {
-                return;
-            }
-
-            await opCall(
-                `/jobs/${encodeURIComponent(jobId)}/cancel`,
-                {
-                    method: "POST",
-                },
-                `Job ${jobId} cancelled.`
-            );
-
-        }
-    );
-
-    bind(
-        "op-clear-queue-btn",
-        async () => {
-
-            if (!confirm("Remove every job still waiting in the queue?")) {
-                return;
-            }
-
-            await opCall(
-                "/cluster/queue/clear",
-                { method: "POST" },
-                "Queue cleared."
-            );
-
-        }
-    );
-
-    bind(
-        "op-retry-failed-btn",
-        () => opCall(
-            "/jobs/retry-failed",
-            { method: "POST" },
-            "Failed jobs re-queued."
-        )
-    );
-
-    bind(
-        "op-clear-failed-btn",
-        async () => {
-
-            if (!confirm("Permanently drop every currently failed job? This cannot be undone.")) {
-                return;
-            }
-
-            await opCall(
-                "/jobs/clear-failed",
-                { method: "POST" },
-                "Failed jobs cleared."
-            );
-
-        }
-    );
-
-    bind(
-        "op-verify-receipts-btn",
-        () => opCall(
-            "/receipts/verify-all",
-            {
-                method: "POST",
-            },
-            "Receipt verification started."
-        )
-    );
-
-    bind(
-        "op-export-logs-btn",
-        () => {
-
-            window.open(
-                "/logs/export",
-                "_blank"
-            );
-
-            setOpResult(
-                "Export started.",
-                false
-            );
-
-            return Promise.resolve();
-
-        }
-    );
-
-    bind(
-        "op-export-metrics-btn",
-        () => {
-
-            window.open(
-                "/metrics/export",
-                "_blank"
-            );
-
-            setOpResult(
-                "Export started.",
-                false
-            );
-
-            return Promise.resolve();
-
-        }
-    );
-
-    bind(
-        "op-snapshot-btn",
-        () => {
-
-            window.open(
-                "/cluster/snapshot",
-                "_blank"
-            );
-
-            setOpResult(
-                "Snapshot generated.",
-                false
-            );
-
-            return Promise.resolve();
-
-        }
-    );
-}
 
 // ---------------------------------------------------------------
 // Cluster Visualization (Topology)
 // ---------------------------------------------------------------
 
-async function loadTopology() {
-    const container = document.getElementById("topology-container");
-    if (!container) return;
-
-    try {
-        const topo = await fetchJson("/topology");
-        container.innerHTML = buildTopologySvg(topo, true) + buildTopologyLegend();
-        attachTopologyHandlers(container, topo);
-    } catch (err) {
-        console.error("Failed to load topology:", err);
-        setConnectionStatus(false);
- 
-    }
-}
 
 function nodeHeartbeatAgeSeconds(lastSeen) {
     if (!lastSeen || lastSeen === "N/A") return null;
@@ -1510,112 +1167,9 @@ function buildTopologySvg(topo, interactive) {
     return svg;
 }
 
-function buildTopologyLegend() {
-    return `
-        <div class="gcon-topo-legend">
-            <span class="item"><span class="swatch" style="background:#10B981;"></span>Idle</span>
-            <span class="item"><span class="swatch" style="background:#3B82F6;"></span>Busy</span>
-            <span class="item"><span class="swatch" style="background:#EF4444;"></span>Offline</span>
-            <span class="item"><span class="swatch" style="border:2px solid #F59E0B;"></span>Draining</span>
-            <span class="item"><span class="swatch" style="background:#F97316;"></span>Quarantined</span>
-            <span class="item"><span class="ring"></span>Fresh heartbeat</span>
-        </div>
-    `;
-}
 
-function openNodeTopologyDetail(node) {
-    setText("drawer-title", "Node Inspector");
-    const body = document.getElementById("drawer-body");
-    const age = nodeHeartbeatAgeSeconds(node.last_seen);
 
-    body.innerHTML = `
-        <div class="gcon-panel mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <strong>${escapeHtml(node.node_id)}</strong>
-                <span class="badge ${node.status === "offline" ? "bg-danger" : node.status === "busy" ? "bg-primary" : "bg-success"}">
-                    ${escapeHtml(node.status)}
-                </span>
-            </div>
-            ${node.draining ? `<div class="text-warning small"><i class="bi bi-exclamation-triangle me-1"></i>Draining — not accepting new jobs</div>` : ""}
-            ${node.quarantined ? `
-                <div class="text-warning small mt-2">
-                    <i class="bi bi-shield-exclamation me-1"></i>
-                    Quarantined${node.quarantine_reason ? `: ${escapeHtml(node.quarantine_reason)}` : ""} — isolated from scheduling, not removed from the fleet.
-                </div>
-                <button type="button" class="btn btn-sm btn-outline-warning mt-2" id="node-clear-quarantine-btn">
-                    Clear Quarantine
-                </button>
-            ` : ""}
-        </div>
-        <div class="gcon-panel mb-3">
-            <strong class="d-block mb-2">Live State</strong>
-            ${receiptDetailRow("CPU", escapeHtml(node.cpu))}
-            ${receiptDetailRow("Memory", escapeHtml(node.memory))}
-            ${receiptDetailRow("Running Jobs", escapeHtml(node.running_jobs))}
-            ${receiptDetailRow("Last Heartbeat", escapeHtml(node.last_seen || "-"))}
-            ${receiptDetailRow("Heartbeat Age", age === null ? "--" : formatAge(age))}
-            ${node.gpu_name ? receiptDetailRow("GPU", formatGpuCell(node)) : ""}
-        </div>
-    `;
 
-    const clearBtn = document.getElementById("node-clear-quarantine-btn");
-    if (clearBtn) {
-        clearBtn.addEventListener("click", async () => {
-            clearBtn.disabled = true;
-            try {
-                await opCall(
-                    `/cluster/nodes/${encodeURIComponent(node.node_id)}/clear-quarantine`,
-                    { method: "POST" },
-                    `${node.node_id} cleared from quarantine.`
-                );
-                closeDrawer();
-            } catch (err) {
-                clearBtn.disabled = false;
-            }
-        });
-    }
-}
-
-function openCoordinatorTopologyDetail(coordinator) {
-    setText("drawer-title", "Coordinator Inspector");
-    const body = document.getElementById("drawer-body");
-
-    body.innerHTML = `
-        <div class="gcon-panel mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <strong>${escapeHtml(coordinator.id)}</strong>
-                <span class="badge ${coordinator.online ? "bg-success" : "bg-danger"}">
-                    ${coordinator.online ? "Online" : "Offline"}
-                </span>
-            </div>
-        </div>
-        <div class="gcon-panel mb-3">
-            <strong class="d-block mb-2">State</strong>
-            ${receiptDetailRow("Scheduler", coordinator.scheduler_running ? "Running" : "Paused")}
-            ${receiptDetailRow("Started", escapeHtml(coordinator.started_at || "-"))}
-            ${receiptDetailRow("Registered Nodes", escapeHtml(coordinator.total_nodes))}
-            ${receiptDetailRow("Running Jobs", escapeHtml(coordinator.running_jobs))}
-        </div>
-    `;
-    openDrawer();
-}
-
-function attachTopologyHandlers(container, topo) {
-    const nodesById = {};
-    (topo.nodes || []).forEach(n => { nodesById[n.node_id] = n; });
-
-    container.querySelectorAll(".gcon-topo-node").forEach(el => {
-        el.addEventListener("click", () => {
-            const node = nodesById[el.dataset.nodeId];
-            if (node) openNodeTopologyDetail(node);
-        });
-    });
-
-    const coordEl = container.querySelector(".gcon-topo-coordinator");
-    if (coordEl) {
-        coordEl.addEventListener("click", () => openCoordinatorTopologyDetail(topo.coordinator || {}));
-    }
-}
 
 // always the live result from /receipts (HMAC re-check), never a
 // cached flag; detail comes from /receipts/{id}, which stitches
@@ -1623,139 +1177,11 @@ function attachTopologyHandlers(container, topo) {
 // artifacts that job produced.
 // ---------------------------------------------------------------
 
-let receiptVerifiedFilter = "";
-let receiptSearchQuery = "";
-let receiptPage = 1;
-const RECEIPT_PAGE_SIZE = 24;
-let receiptTotalCount = 0;
 
-function renderReceiptSummaryTiles(summary) {
-    setText("receipts-tab-total", summary.total);
-    setText("receipts-tab-verified", summary.verified);
-    setText("receipts-tab-unverified", summary.unverified);
-}
 
-async function renderReceiptCards() {
-    const grid = document.getElementById("receipts-grid");
-    if (!grid) return;
 
-    const offset = (receiptPage - 1) * RECEIPT_PAGE_SIZE;
-    const qs = new URLSearchParams({ limit: RECEIPT_PAGE_SIZE, offset });
-    if (receiptVerifiedFilter) qs.set("verified", receiptVerifiedFilter);
-    if (receiptSearchQuery) qs.set("search", receiptSearchQuery);
 
-    let receipts = [];
-    try {
-        const { data, headers } = await fetchJsonWithHeaders(`/receipts?${qs.toString()}`);
-        receipts = data;
-        receiptTotalCount = parseInt(headers.get("X-Total-Count") || "0", 10);
-    } catch (err) {
-        console.error("Failed to load receipts page:", err);
-        setConnectionStatus(false);
-        grid.innerHTML = `<div class="text-secondary text-center py-4">Failed to load receipts.</div>`;
-        return;
-    }
 
-    const totalPages = Math.max(1, Math.ceil(receiptTotalCount / RECEIPT_PAGE_SIZE));
-    if (receiptPage > totalPages) {
-        receiptPage = totalPages;
-    }
-
-    if (receipts.length === 0) {
-        grid.innerHTML = `<div class="text-secondary text-center py-4">No receipts match this filter.</div>`;
-    } else {
-        grid.innerHTML = receipts.map(r => `
-            <div class="gcon-receipt-card" data-receipt-id="${escapeHtml(r.receipt_id)}">
-                <div class="d-flex justify-content-between align-items-start">
-                    <span class="gcon-receipt-id" title="${escapeHtml(r.receipt_id)}">${escapeHtml(r.receipt_id)}</span>
-                    <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
-                        <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
-                    </span>
-                </div>
-                <div class="gcon-receipt-meta">
-                    <span><i class="bi bi-braces me-1"></i>${escapeHtml(r.job_id || "-")}</span>
-                    ${statusBadge(r.status)}
-                </div>
-                <div class="gcon-receipt-meta text-secondary small">
-                    <i class="bi bi-clock-history me-1"></i>${escapeHtml(r.created_at || "-")}
-                </div>
-                <button class="btn btn-sm btn-outline-light w-100 mt-2 gcon-receipt-inspect-btn" data-receipt-id="${escapeHtml(r.receipt_id)}">
-                    <i class="bi bi-search me-1"></i>Inspect
-                </button>
-            </div>
-        `).join("");
-
-        grid.querySelectorAll(".gcon-receipt-inspect-btn").forEach(btn => {
-            btn.addEventListener("click", () => openReceiptDetail(btn.dataset.receiptId));
-        });
-    }
-
-    const rangeStart = receiptTotalCount === 0 ? 0 : offset + 1;
-    const rangeEnd = Math.min(offset + RECEIPT_PAGE_SIZE, receiptTotalCount);
-    setText("receipts-page-info", `${rangeStart}-${rangeEnd} of ${receiptTotalCount}`);
-
-    const prevBtn = document.getElementById("receipts-prev-page");
-    const nextBtn = document.getElementById("receipts-next-page");
-    if (prevBtn) prevBtn.disabled = receiptPage <= 1;
-    if (nextBtn) nextBtn.disabled = receiptPage >= totalPages;
-}
-
-async function loadReceiptsTab() {
-    try {
-        const summary = await fetchJson("/receipts-summary");
-        renderReceiptSummaryTiles(summary);
-    } catch (err) {
-        console.error("Failed to load receipts summary:", err);
-    }
-    await renderReceiptCards();
-}
-
-const debouncedReceiptsSearch = debounce((value) => {
-    receiptSearchQuery = value;
-    receiptPage = 1;
-    renderReceiptCards();
-}, 300);
-
-function setupReceiptsTab() {
-    const search = document.getElementById("receipts-search");
-    if (search) {
-        search.addEventListener("input", () => debouncedReceiptsSearch(search.value));
-    }
-
-    document.querySelectorAll("#receipts-verified-filter button").forEach(btn => {
-        btn.addEventListener("click", () => {
-            document.querySelectorAll("#receipts-verified-filter button").forEach(b => b.classList.remove("active"));
-            btn.classList.add("active");
-            receiptVerifiedFilter = btn.dataset.verified;
-            receiptPage = 1;
-            renderReceiptCards();
-        });
-    });
-
-    const prevBtn = document.getElementById("receipts-prev-page");
-    if (prevBtn) prevBtn.addEventListener("click", () => { receiptPage -= 1; renderReceiptCards(); });
-
-    const nextBtn = document.getElementById("receipts-next-page");
-    if (nextBtn) nextBtn.addEventListener("click", () => { receiptPage += 1; renderReceiptCards(); });
-
-    const verifyBtn = document.getElementById("receipts-tab-verify-all-btn");
-    if (verifyBtn) {
-        verifyBtn.addEventListener("click", async () => {
-            verifyBtn.disabled = true;
-            const originalHtml = verifyBtn.innerHTML;
-            verifyBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Verifying...`;
-            try {
-                await opCall("/receipts/verify-all", { method: "POST" }, "Receipt verification started.");
-                await loadReceiptsTab();
-            } catch (err) {
-                // opCall already surfaced the failure via setOpResult
-            } finally {
-                verifyBtn.disabled = false;
-                verifyBtn.innerHTML = originalHtml;
-            }
-        });
-    }
-}
 
 function receiptDetailRow(label, value, mono) {
     return `
@@ -1776,212 +1202,7 @@ function copyableValue(value) {
     `;
 }
 
-async function openReceiptDetail(receiptId) {
-    try {
-        const r = await fetchJson(`/receipts/${encodeURIComponent(receiptId)}`);
 
-        setText("drawer-title", "Receipt Inspector");
-        const body = document.getElementById("drawer-body");
-
-        const metricsRows = Object.entries(r.proof.metrics || {})
-            .filter(([k]) => k !== "stages")
-            .map(([k, v]) => receiptDetailRow(k, escapeHtml(v)))
-            .join("") || `<div class="text-secondary small">No additional metrics recorded.</div>`;
-
-        const kindLabels = { command: "Command", resourced: "Resourced", staged: "Staged" };
-        const kindLabel = kindLabels[r.kind] || r.kind || "Command";
-
-        const stages = r.proof.stages || [];
-        const expected = (r.stages_expected ?? null);
-        const stageRows = stages.map(s => `
-            <div class="gcon-kv-row">
-                <span class="gcon-kv-label">Stage ${escapeHtml(s.stage ?? "-")}</span>
-                <span class="gcon-kv-value mono small">${escapeHtml(JSON.stringify(s.metrics || {}))} &middot; ${escapeHtml(s.observed_at || "")}</span>
-            </div>
-        `).join("");
-        const stagesPanel = r.kind === "staged" ? `
-            <div class="gcon-panel mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <strong>Stages</strong>
-                    <span class="text-secondary small">${stages.length}${expected ? ` / ${expected}` : ""} observed</span>
-                </div>
-                ${stageRows || `<div class="text-secondary small">No stage checkpoints observed yet -- either the job hasn't reported one, or it doesn't call the GCON_STAGE_REPORT_PATH convention.</div>`}
-            </div>
-        ` : "";
-
-        // Replicated-execution verification (see gcon.execution.replication) --
-        // only present when this job was submitted with `verify`. Shows every
-        // witness node's own signed receipt, not just this one, so the full
-        // agreement trail is visible from any single replica's inspector view.
-        const executionProof = r.execution_proof || null;
-        const replicaRows = (r.replicas || []).map(replica => `
-            <div class="gcon-kv-row">
-                <span class="gcon-kv-label">${escapeHtml(replica.node_id || "-")}</span>
-                <span class="gcon-kv-value mono small">
-                    ${copyableValue(replica.receipt_id)}
-                    ${replica.receipt_id === r.receipt_id ? `<span class="badge bg-secondary ms-1">this receipt</span>` : ""}
-                </span>
-            </div>
-        `).join("");
-        const mismatchRows = (executionProof?.mismatches || []).map(m => `
-            <div class="gcon-kv-row">
-                <span class="gcon-kv-label">${escapeHtml(m.field || "replica count")}</span>
-                <span class="gcon-kv-value small">${escapeHtml(m.reason || `deviation ${m.deviation ?? "-"} (tolerance ${m.tolerance ?? "-"})`)}</span>
-            </div>
-        `).join("");
-        const replicatedPanel = executionProof ? `
-            <div class="gcon-panel mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <strong>Replicated Execution</strong>
-                    <span class="badge ${executionProof.agreement ? "bg-success" : "bg-danger"}">
-                        <i class="bi ${executionProof.agreement ? "bi-check-circle" : "bi-exclamation-triangle"} me-1"></i>${executionProof.agreement ? "Replicas Agree" : "Disputed"}
-                    </span>
-                </div>
-                <div class="text-secondary small mb-2">
-                    ${(executionProof.witnesses || []).length} witnesses &middot; compared ${(executionProof.compared_fields || []).join(", ") || "-"} &middot; max deviation ${typeof executionProof.max_deviation === "number" ? executionProof.max_deviation.toFixed(4) : "-"}
-                </div>
-                ${replicaRows || `<div class="text-secondary small">No other replica receipts recorded.</div>`}
-                ${mismatchRows ? `<div class="mt-2 pt-2 border-top">${mismatchRows}</div>` : ""}
-            </div>
-        ` : "";
-
-        const artifactRows = (r.artifacts || []).map(a => `
-            <div class="gcon-kv-row">
-                <span class="gcon-kv-label">${escapeHtml(a.filename)}</span>
-                <span class="gcon-kv-value mono small">${escapeHtml(a.sha256.slice(0, 16))}&hellip; &middot; ${formatBytes(a.size)}</span>
-            </div>
-        `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
-
-        // Usage & cost -- opt-in, job-self-reported (see receipt.usage's
-        // backend docstring), so this panel only appears when a job
-        // actually cooperated with the GCON_USAGE_REPORT_PATH convention.
-        // cost_estimate is always present (compute time alone is enough
-        // to estimate against), but rendered inline with the usage
-        // numbers since "how much did this cost" is the question both
-        // answer together.
-        const usage = r.usage || null;
-        const tokens = usage?.llm_tokens || null;
-        const cost = r.cost_estimate || null;
-        const fmtCents = (c) => c == null ? "-" : `$${(c / 100).toFixed(6)}`;
-        const usageCostPanel = (usage || cost) ? `
-            <div class="gcon-panel mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <strong>Usage &amp; Estimated Cost</strong>
-                    <span class="text-secondary small">self-reported, unverified</span>
-                </div>
-                ${tokens ? `
-                    ${receiptDetailRow("Model", escapeHtml(tokens.model || "-"))}
-                    ${receiptDetailRow("Input Tokens", escapeHtml(tokens.input ?? "-"))}
-                    ${receiptDetailRow("Output Tokens", escapeHtml(tokens.output ?? "-"))}
-                ` : `<div class="text-secondary small mb-2">No token usage reported by this job.</div>`}
-                ${cost ? `
-                    <div class="mt-2 pt-2 border-top">
-                        ${receiptDetailRow("Compute Cost", fmtCents(cost.compute_cents))}
-                        ${cost.llm_input_cents != null ? receiptDetailRow("Input Token Cost", fmtCents(cost.llm_input_cents)) : ""}
-                        ${cost.llm_output_cents != null ? receiptDetailRow("Output Token Cost", fmtCents(cost.llm_output_cents)) : ""}
-                        ${receiptDetailRow("Estimated Total", `<strong>${fmtCents(cost.total_cents)}</strong>`)}
-                    </div>
-                    <div class="text-secondary small mt-1">
-                        Estimate at current pricing, not a billed charge -- an
-                        invoice aggregates a whole billing period and rounds once,
-                        not per job.
-                    </div>
-                ` : ""}
-            </div>
-        ` : "";
-
-        body.innerHTML = `
-            <div class="gcon-panel mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <strong>Verification</strong>
-                    <div>
-                        <span class="badge bg-secondary me-1">${escapeHtml(kindLabel)}</span>
-                        <span class="badge ${r.verified ? "bg-success" : "bg-danger"}">
-                            <i class="bi ${r.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${r.verified ? "Verified" : "Unverified"}
-                        </span>
-                    </div>
-                </div>
-                <div class="text-secondary small">${escapeHtml(r.verification_message)}</div>
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Signature</strong>
-                ${receiptDetailRow("Algorithm", escapeHtml(r.proof.algorithm), true)}
-                ${receiptDetailRow("Signature", copyableValue(r.proof.signature), true)}
-                ${receiptDetailRow("Input Hash", copyableValue(r.input_hash), true)}
-                ${receiptDetailRow("Output Hash", copyableValue(r.output_hash), true)}
-                ${receiptDetailRow("Timestamp", escapeHtml(r.proof.timestamp))}
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Execution Details</strong>
-                ${receiptDetailRow("Job ID", copyableValue(r.job_id), true)}
-                ${receiptDetailRow("Node", escapeHtml(r.execution.node_id || "-"))}
-                ${receiptDetailRow("GPU", escapeHtml(r.proof.gpu || "-"))}
-                ${receiptDetailRow("Runtime", `${escapeHtml(r.proof.runtime_seconds ?? "-")}s`)}
-                ${receiptDetailRow("Started", escapeHtml(r.execution.created_at || "-"))}
-                ${receiptDetailRow("Completed", escapeHtml(r.execution.completed_at || "-"))}
-            </div>
-
-            ${usageCostPanel}
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Job Output</strong>
-                ${r.output
-                    ? `<pre class="gcon-receipt-output mono small mb-0">${escapeHtml(r.output)}</pre>`
-                    : `<div class="text-secondary small">No output captured for this execution.</div>`}
-            </div>
-
-            ${stagesPanel}
-
-            ${replicatedPanel}
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Metrics</strong>
-                ${metricsRows}
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Artifacts</strong>
-                ${artifactRows}
-            </div>
-
-            <button class="btn btn-sm btn-outline-light w-100" id="receipt-export-btn">
-                <i class="bi bi-download me-1"></i>Export Receipt (JSON)
-            </button>
-        `;
-
-        document.getElementById("receipt-export-btn").addEventListener("click", () => {
-            const blob = new Blob([JSON.stringify(r, null, 2)], { type: "application/json" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${r.receipt_id}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-        });
-
-        openDrawer();
-    } catch (err) {
-        console.error("Failed to load receipt detail:", err);
-        setOpResult("Could not load that receipt.", true);
-    }
-}
-
-// ---------------------------------------------------------------
-// Executions — visualizes each job's real lifecycle. The list view
-// uses only fields already on /jobs (no live crypto check per row,
-// per poll); the detail drawer fetches /jobs/{id} for the one-off
-// live receipt verification, the same pattern the Receipt Explorer
-// uses.
-// ---------------------------------------------------------------
-
-let execStatusFilter = "";
-let execCompanyFilter = "";
-let execSearchQuery = "";
-let execPage = 1;
-const EXEC_PAGE_SIZE = 25;
-let execTotalCount = 0;
 let companiesData = [];
 // Which client's detail drawer is currently open, if any -- set by
 // openClientDetail(), cleared by closeDrawer(). Lets renderHomeDashboard()
@@ -2008,251 +1229,12 @@ function formatDuration(seconds) {
     return `${m}m ${s}s`;
 }
 
-function buildLifecycleStepper(job) {
-    const terminal = ["completed", "failed", "cancelled"].includes(job.status);
-    const running = job.status === "running" || terminal;
 
-    const outcomeLabel = job.status === "failed" ? "Failed"
-        : job.status === "cancelled" ? "Cancelled"
-        : job.status === "completed" ? "Completed"
-        : "Outcome";
 
-    const outcomeState = !terminal ? "pending"
-        : job.status === "completed" ? "done"
-        : "failed";
 
-    const steps = [
-        { label: "Submitted", state: "done" },
-        { label: "Running", state: running ? "done" : (terminal ? "skipped" : "current") },
-        { label: outcomeLabel, state: outcomeState },
-        { label: "Receipt", state: job.receipt_id ? "done" : (terminal && job.status === "completed" ? "current" : "skipped") },
-    ];
 
-    return `
-        <div class="gcon-stepper">
-            ${steps.map((s, i) => `
-                <div class="gcon-step ${s.state}">
-                    <span class="gcon-step-dot"></span>
-                    <span class="gcon-step-label">${escapeHtml(s.label)}</span>
-                </div>
-                ${i < steps.length - 1 ? `<span class="gcon-step-connector ${s.state === "done" ? "done" : ""}"></span>` : ""}
-            `).join("")}
-        </div>
-    `;
-}
 
-async function renderExecutionsTable() {
-    const tbody = document.getElementById("executions-tbody");
-    if (!tbody) return;
 
-    const offset = (execPage - 1) * EXEC_PAGE_SIZE;
-    const qs = new URLSearchParams({
-        paginate: "true",
-        limit: EXEC_PAGE_SIZE,
-        offset,
-    });
-    if (execStatusFilter) qs.set("status", execStatusFilter);
-    if (execCompanyFilter) qs.set("org_id", execCompanyFilter);
-    if (execSearchQuery) qs.set("search", execSearchQuery);
-
-    let pageRows = [];
-    try {
-        const { data, headers } = await fetchJsonWithHeaders(`/jobs?${qs.toString()}`);
-        pageRows = data;
-        execTotalCount = parseInt(headers.get("X-Total-Count") || "0", 10);
-    } catch (err) {
-        console.error("Failed to load executions page:", err);
-        setConnectionStatus(false);
-        tbody.innerHTML = `<tr><td colspan="5" class="text-secondary text-center py-4">Failed to load executions.</td></tr>`;
-        return;
-    }
-
-    const totalPages = Math.max(1, Math.ceil(execTotalCount / EXEC_PAGE_SIZE));
-    if (execPage > totalPages) {
-        // The filter/search just changed out from under a page number
-        // that no longer exists (e.g. was on page 5, search now only
-        // matches 1 page) -- snap back rather than showing an empty
-        // page with working-looking pagination controls.
-        execPage = totalPages;
-    }
-
-    if (pageRows.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-secondary text-center py-4">No executions match this filter.</td></tr>`;
-    } else {
-        tbody.innerHTML = pageRows.map(job => `
-            <tr class="gcon-exec-row" data-job-id="${escapeHtml(job.job_id)}" style="cursor:pointer;">
-                <td class="mono small">${escapeHtml(job.job_id)}</td>
-                <td>${statusBadge(job.status)}</td>
-                <td>${escapeHtml(job.node_id || "unassigned")}</td>
-                <td class="text-secondary small">${escapeHtml(job.created_at || "-")}</td>
-                <td class="text-secondary small">${formatDuration(job.runtime_seconds)}</td>
-            </tr>
-        `).join("");
-
-        tbody.querySelectorAll(".gcon-exec-row").forEach(row => {
-            row.addEventListener("click", () => openExecutionDetail(row.dataset.jobId));
-        });
-    }
-
-    const rangeStart = execTotalCount === 0 ? 0 : offset + 1;
-    const rangeEnd = Math.min(offset + EXEC_PAGE_SIZE, execTotalCount);
-    setText("executions-page-info", `${rangeStart}-${rangeEnd} of ${execTotalCount}`);
-
-    const prevBtn = document.getElementById("executions-prev-page");
-    const nextBtn = document.getElementById("executions-next-page");
-    if (prevBtn) prevBtn.disabled = execPage <= 1;
-    if (nextBtn) nextBtn.disabled = execPage >= totalPages;
-}
-
-async function renderExecutionSummaryTiles() {
-    try {
-        const counts = await fetchJson("/jobs/status-counts");
-        setText("exec-tab-total", counts.total);
-        setText("exec-tab-queued", counts.queued);
-        setText("exec-tab-running", counts.running);
-        setText("exec-tab-completed", counts.completed);
-        setText("exec-tab-failed", counts.failed);
-    } catch (err) {
-        console.error("Failed to load execution status counts:", err);
-    }
-}
-
-async function loadExecutionsTab() {
-    await Promise.all([
-        renderExecutionSummaryTiles(),
-        renderExecutionsTable(),
-    ]);
-}
-
-const debouncedExecutionsSearch = debounce((value) => {
-    execSearchQuery = value;
-    execPage = 1;
-    renderExecutionsTable();
-}, 300);
-
-function setupExecutionsTab() {
-    const search = document.getElementById("executions-search");
-    if (search) {
-        search.addEventListener("input", () => debouncedExecutionsSearch(search.value));
-    }
-
-    const companyFilter = document.getElementById("executions-company-filter");
-    if (companyFilter) {
-        companyFilter.addEventListener("change", () => {
-            execCompanyFilter = companyFilter.value;
-            execPage = 1;
-            renderExecutionsTable();
-        });
-    }
-
-    document.querySelectorAll("#executions-status-filter button").forEach(btn => {
-        btn.addEventListener("click", () => {
-            document.querySelectorAll("#executions-status-filter button").forEach(b => b.classList.remove("active"));
-            btn.classList.add("active");
-            execStatusFilter = btn.dataset.status;
-            execPage = 1;
-            renderExecutionsTable();
-        });
-    });
-
-    const prevBtn = document.getElementById("executions-prev-page");
-    if (prevBtn) prevBtn.addEventListener("click", () => { execPage -= 1; renderExecutionsTable(); });
-
-    const nextBtn = document.getElementById("executions-next-page");
-    if (nextBtn) nextBtn.addEventListener("click", () => { execPage += 1; renderExecutionsTable(); });
-}
-
-async function openExecutionDetail(jobId) {
-    try {
-        const j = await fetchJson(`/jobs/${encodeURIComponent(jobId)}`);
-
-        setText("drawer-title", "Execution Inspector");
-        const body = document.getElementById("drawer-body");
-
-        const artifactRows = (j.artifacts || []).map(a => `
-            <div class="gcon-kv-row">
-                <span class="gcon-kv-label">${escapeHtml(a.filename)}</span>
-                <span class="gcon-kv-value mono small">${escapeHtml(a.sha256.slice(0, 16))}&hellip; &middot; ${formatBytes(a.size)}</span>
-            </div>
-        `).join("") || `<div class="text-secondary small">No artifacts recorded for this execution.</div>`;
-
-        const isRetryable = j.status === "failed" || j.status === "pending";
-
-        body.innerHTML = `
-            <div class="gcon-panel mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <strong>${escapeHtml(j.job_id)}</strong>
-                    ${statusBadge(j.status)}
-                </div>
-                ${buildLifecycleStepper(j)}
-                ${isRetryable ? `
-                    <button class="btn btn-sm btn-outline-light w-100 mt-3" id="exec-retry-btn">
-                        <i class="bi bi-arrow-counterclockwise me-1"></i>Retry This Job
-                    </button>
-                ` : ""}
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Execution Details</strong>
-                ${receiptDetailRow("Node", escapeHtml(j.node_id || "unassigned"))}
-                ${receiptDetailRow("Created", escapeHtml(j.created_at || "-"))}
-                ${receiptDetailRow("Completed", escapeHtml(j.completed_at || "-"))}
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Receipt</strong>
-                ${j.receipt_id
-                    ? `
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <span class="gcon-kv-value mono small">${escapeHtml(j.receipt_id)}</span>
-                            <span class="badge ${j.verified ? "bg-success" : "bg-danger"}">
-                                <i class="bi ${j.verified ? "bi-shield-check" : "bi-shield-x"} me-1"></i>${j.verified ? "Verified" : "Unverified"}
-                            </span>
-                        </div>
-                        <div class="text-secondary small">${escapeHtml(j.verification_message || "")}</div>
-                        <button class="btn btn-sm btn-outline-light w-100 mt-2" id="exec-view-receipt-btn">
-                            <i class="bi bi-patch-check me-1"></i>Open in Receipt Explorer
-                        </button>
-                    `
-                    : `<div class="text-secondary small">No receipt generated yet for this execution.</div>`
-                }
-            </div>
-
-            <div class="gcon-panel mb-3">
-                <strong class="d-block mb-2">Artifacts</strong>
-                ${artifactRows}
-            </div>
-        `;
-
-        const viewReceiptBtn = document.getElementById("exec-view-receipt-btn");
-        if (viewReceiptBtn) {
-            viewReceiptBtn.addEventListener("click", () => openReceiptDetail(j.receipt_id));
-        }
-
-        const retryBtn = document.getElementById("exec-retry-btn");
-        if (retryBtn) {
-            retryBtn.addEventListener("click", async () => {
-                retryBtn.disabled = true;
-                retryBtn.textContent = "Retrying…";
-                try {
-                    await fetchJson(`/jobs/${encodeURIComponent(j.job_id)}/retry`, { method: "POST" });
-                    showToast(`'${j.job_id}' re-queued for another attempt.`, false);
-                    await loadExecutionsTab();
-                    await openExecutionDetail(j.job_id);
-                } catch (err) {
-                    showToast(err.message || "Retry failed.", true);
-                    retryBtn.disabled = false;
-                    retryBtn.innerHTML = `<i class="bi bi-arrow-counterclockwise me-1"></i>Retry This Job`;
-                }
-            });
-        }
-
-        openDrawer();
-    } catch (err) {
-        console.error("Failed to load execution detail:", err);
-        setOpResult("Could not load that execution.", true);
-    }
-}
 
 // ---------------------------------------------------------------
 // Explorer
@@ -2439,171 +1421,12 @@ async function loadExplorer() {
 // Real-Time Monitoring
 // ---------------------------------------------------------------
 
-async function loadMonitoring() {
-
-    try {
-
-        const [metrics, events] = await Promise.all([
-            fetchJson("/system-metrics"),
-            fetchJson("/events"),
-        ]);
-
-        setText("sm-avg-cpu", `${metrics.avg_cpu}%`);
-        setText("sm-avg-memory", `${metrics.avg_memory}%`);
-        setText("sm-queued", metrics.queued_jobs);
-        setText("sm-running", metrics.running_jobs);
-        setText("sm-event-count", metrics.event_count);
-        setText("sm-uptime", formatUptime(metrics.uptime_seconds));
-
-        const connBadge = document.getElementById("sm-connection");
-        if (connBadge) {
-            connBadge.textContent = "Live";
-            connBadge.classList.remove("bg-danger");
-            connBadge.classList.add("bg-success");
-        }
-
-        const nodeHealth = document.getElementById("sm-node-health");
-        if (nodeHealth) {
-            const ns = metrics.node_summary || {};
-            nodeHealth.innerHTML = `
-                <div class="gcon-service-list">
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Idle</span><span class="gcon-service-value">${ns.idle ?? 0}</span></div>
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Busy</span><span class="gcon-service-value">${ns.busy ?? 0}</span></div>
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot warn"></span>Draining</span><span class="gcon-service-value muted">${ns.draining ?? 0}</span></div>
-                    <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot bad"></span>Offline</span><span class="gcon-service-value bad">${ns.offline ?? 0}</span></div>
-                </div>
-            `;
-        }
-
-        const storageHealth = document.getElementById("sm-storage-health");
-        if (storageHealth) {
-            const pct = metrics.disk_remaining_pct;
-            storageHealth.innerHTML = `
-                <div class="gcon-summary-widget">
-                    <div class="gcon-summary-headline">
-                        <span class="value">${pct === null || pct === undefined ? "--" : pct + "%"}</span>
-                        <span class="label">disk free</span>
-                    </div>
-                    <div class="gcon-summary-bar">
-                        <div class="seg" style="width:${pct === null || pct === undefined ? 0 : (100 - pct)}%; background: var(--info);"></div>
-                    </div>
-                    <div class="gcon-summary-legend">
-                        <span class="item"><span class="swatch" style="background:var(--info);"></span>${metrics.artifact_count ?? 0} artifact(s)</span>
-                    </div>
-                </div>
-            `;
-        }
-
-        renderFeed(
-            "monitoring-activity-feed",
-            events
-        );
-    } catch (err) {
-
-        console.error(
-            "Failed to load monitoring:",
-            err
-        );
-        setConnectionStatus(false);
-        const connBadge = document.getElementById("sm-connection");
-        if (connBadge) {
-            connBadge.textContent = "Down";
-            connBadge.classList.remove("bg-success");
-            connBadge.classList.add("bg-danger");
-        }
-    }
-}
 
 // ---------------------------------------------------------------
 // Analytics & History
 // ---------------------------------------------------------------
 
-function renderBarChart(totals) {
-    const container = document.getElementById("analytics-bars");
-    if (!container) return;
 
-    const max = Math.max(1, ...Object.values(totals));
-    const colors = { completed: "#10B981", failed: "#EF4444", running: "#3B82F6", pending: "#F59E0B" };
-
-    let html = `<div class="gcon-bars-row">`;
-    for (const [key, value] of Object.entries(totals)) {
-        const heightPct = Math.round((value / max) * 100);
-        html += `
-            <div class="gcon-bar-col">
-                <div class="gcon-bar-track">
-                    <div class="gcon-bar-fill" style="height:${heightPct}%; background:${colors[key] || "#8A8F9B"}"></div>
-                </div>
-                <div class="gcon-bar-label">${escapeHtml(key)}</div>
-                <div class="gcon-bar-value">${escapeHtml(value)}</div>
-            </div>
-        `;
-    }
-    html += `</div>`;
-    container.innerHTML = html;
-}
-
-async function loadAnalytics() {
-
-    try {
-
-        const analytics =
-            await fetchJson("/analytics");
-
-        setText(
-            "an-success-rate",
-            `${analytics.success_rate}%`
-        );
-
-        setText(
-            "an-completed",
-            analytics.totals.completed
-        );
-
-        setText(
-            "an-failed",
-            analytics.totals.failed
-        );
-
-        setText(
-            "an-pending",
-            analytics.totals.pending
-        );
-
-        renderBarChart(
-            analytics.totals
-        );
-        renderFeed(
-            "analytics-timeline",
-            analytics.timeline
-        );
-
-        const companiesTbody = document.getElementById("analytics-companies-tbody");
-        if (companiesTbody) {
-            const companies = analytics.companies || [];
-            companiesTbody.innerHTML = companies.length === 0
-                ? `<tr><td colspan="7" class="text-secondary text-center py-4">No clients yet.</td></tr>`
-                : companies.map(c => `
-                    <tr>
-                        <td>${escapeHtml(c.name)}</td>
-                        <td>${c.nodes_online}/${c.nodes_total}</td>
-                        <td>${c.jobs.running}</td>
-                        <td>${c.jobs.completed}</td>
-                        <td>${c.jobs.failed}</td>
-                        <td class="text-secondary small">${formatDuration(c.usage.compute_seconds)}</td>
-                        <td class="text-secondary small">${(c.usage.llm_input_tokens + c.usage.llm_output_tokens).toLocaleString()}</td>
-                    </tr>
-                `).join("");
-        }
-
-    } catch (err) {
-        console.error(
-            "Failed to load analytics:",
-            err
-        );
-        setConnectionStatus(false);
-    }
-
-}
 
 // ---------------------------------------------------------------
 // Administration
@@ -2720,14 +1543,15 @@ function setupControls() {
     // channels anyway (see the isPaused check in connectLiveSocket's
     // onmessage), which made it misleading about what "paused" meant.
 
-    ["cc-scale-up-btn", "admin-scale-up-btn"].forEach(id => {
+    // Scale controls live only in Administration now; the Control
+    // Center copies (cc-scale-*) went with the operations panel.
+    ["admin-scale-up-btn"].forEach(id => {
         const btn = document.getElementById(id);
         if (btn) btn.addEventListener("click", () => triggerScale("up"));
     });
-    ["cc-scale-down-btn", "admin-scale-down-btn"].forEach(id => {
+    ["admin-scale-down-btn"].forEach(id => {
         const btn = document.getElementById(id);
         if (btn) btn.addEventListener("click", () => triggerScale("down"));
-  
     });
 
     const rediscoverBtn = document.getElementById("admin-rediscover-nodes-btn");
@@ -2740,8 +1564,6 @@ function setupControls() {
             ).catch(() => {})
         );
     }
-
-    setupOperationsPanel();
 
     const inspectorBtn =
         document.getElementById("open-health-inspector-btn");
@@ -4461,31 +3283,12 @@ function renderSearchResults(data) {
 // Client drill-in (Overview + Usage + live current-jobs list, from
 // the real org usage rollup cached in companiesData for the summary
 // half, plus an on-demand fetch of this client's recent jobs -
-// annotated server-side with a real orchestration/execution/
-// verification/assurance/proof pipeline stage, see
-// ManagementLayer.get_client_recent_jobs's docstring - for the
-// current-jobs half. Kept live while open: renderHomeDashboard()
-// re-invokes this on every /ws tick for whichever org's drawer is
-// currently open, see openClientDrawerOrgId.)
+// Client drawer aggregates (Orchestrate/Execute counts, Usage,
+// Verify/Evidence). Kept live while open: renderHomeDashboard()
+// re-invokes openClientDetail() on every /ws tick for whichever
+// org's drawer is currently open, see openClientDrawerOrgId.
 // ---------------------------------------------------------------
 
-function stageBadge(stage) {
-    const labels = {
-        orchestration: "Orchestration", execution: "Execution",
-        verification: "Verification", "verification failed": "Verification Failed",
-        assurance: "Assurance", proof: "Proof",
-        failed: "Failed", cancelled: "Cancelled",
-    };
-    const classes = {
-        orchestration: "bg-secondary", execution: "bg-primary",
-        verification: "bg-info text-dark", "verification failed": "bg-danger",
-        assurance: "bg-warning text-dark", proof: "bg-success",
-        failed: "bg-danger", cancelled: "bg-secondary",
-    };
-    const label = labels[stage] || stage;
-    const cls = classes[stage] || "bg-secondary";
-    return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
-}
 
 async function openClientDetail(orgId, isRefresh) {
     const company = companiesData.find(c => c.org_id === orgId);
@@ -4498,15 +3301,7 @@ async function openClientDetail(orgId, isRefresh) {
     const hasUsage = company.usage.jobs_reporting_usage > 0;
 
     // On first open, show the summary immediately (no flash of
-    // emptiness while the jobs list loads); a live-refresh tick
-    // already has content on screen, so no need to blank it either.
-    let jobsSectionHtml = isRefresh
-        ? document.getElementById("client-current-jobs-section")?.outerHTML
-        : `<div id="client-current-jobs-section" class="gcon-panel mb-3">
-               <strong class="d-block mb-2">Current Jobs</strong>
-               <div class="text-secondary small">Loading...</div>
-           </div>`;
-
+    const receipts = company.receipts || {};
     body.innerHTML = `
         <div class="gcon-panel mb-3">
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -4530,82 +3325,29 @@ async function openClientDetail(orgId, isRefresh) {
             }
         </div>
 
-        ${jobsSectionHtml}
+        <div class="gcon-panel mb-3">
+            <strong class="d-block mb-2">Verify / Evidence</strong>
+            ${receiptDetailRow("Verified", receipts.verified ?? "--")}
+            ${receiptDetailRow("Unverified", receipts.unverified ?? "--")}
+            ${receiptDetailRow("Receipts generated", receipts.total ?? "--")}
+            ${receiptDetailRow("Completed jobs missing a receipt", receipts.completed_jobs_missing_receipt ?? "--")}
+        </div>
 
-        <button class="btn btn-sm btn-outline-light w-100 mb-2" id="company-view-executions-btn">
-            <i class="bi bi-play-circle me-1"></i>View Executions
-        </button>
         <button class="btn btn-sm btn-outline-light w-100" id="company-view-workers-btn">
             <i class="bi bi-hdd-network me-1"></i>View Workers
         </button>
     `;
 
-    const execBtn = document.getElementById("company-view-executions-btn");
-    if (execBtn) {
-        execBtn.addEventListener("click", () => {
-            closeDrawer();
-            const tabLink = document.querySelector('#tab-nav a[data-tab="executions"]');
-            if (tabLink) tabLink.click();
-            const filter = document.getElementById("executions-company-filter");
-            if (filter) {
-                filter.value = orgId;
-                execCompanyFilter = orgId;
-                execPage = 1;
-                renderExecutionsTable();
-            }
-        });
-    }
-
     const workersBtn = document.getElementById("company-view-workers-btn");
     if (workersBtn) {
         workersBtn.addEventListener("click", () => {
             closeDrawer();
-            const tabLink = document.querySelector('#tab-nav a[data-tab="explorer"][data-explorer-default="nodes"]');
+            const tabLink = document.querySelector('#tab-nav a[data-tab="cluster"]');
             if (tabLink) tabLink.click();
-            const search = document.getElementById("explorer-search");
-            if (search) {
-                search.value = orgId;
-                search.dispatchEvent(new Event("input"));
-            }
         });
     }
 
     if (!isRefresh) openDrawer();
-
-    // Current-jobs list: on-demand fetch (not baked into every poll's
-    // shared bootstrap payload, which would mean fetching every
-    // client's full job list every tick regardless of whether
-    // anyone's looking) - same pattern as openReceiptDetail's fetch.
-    try {
-        const jobs = await fetchJson(`/management/organizations/${encodeURIComponent(orgId)}/jobs?limit=10`);
-        // The drawer may have been closed, or switched to a
-        // different client, while this fetch was in flight.
-        if (openClientDrawerOrgId !== orgId) return;
-
-        const section = document.getElementById("client-current-jobs-section");
-        if (!section) return;
-        section.innerHTML = jobs.length === 0
-            ? `<strong class="d-block mb-2">Current Jobs</strong>
-               <div class="text-secondary small">No jobs yet.</div>`
-            : `<strong class="d-block mb-2">Current Jobs</strong>
-               <table class="table table-sm gcon-table mb-0">
-                   <thead><tr><th>Job</th><th>Stage</th><th>Node</th></tr></thead>
-                   <tbody>
-                       ${jobs.map(j => `
-                           <tr>
-                               <td class="text-truncate" style="max-width:140px;" title="${escapeHtml(j.job_id)}">${escapeHtml(j.job_id)}</td>
-                               <td>${stageBadge(j.stage)}</td>
-                               <td class="text-secondary small">${escapeHtml(j.node_id || "-")}</td>
-                           </tr>`).join("")}
-                   </tbody>
-               </table>`;
-    } catch (e) {
-        const section = document.getElementById("client-current-jobs-section");
-        if (section && openClientDrawerOrgId === orgId) {
-            section.innerHTML = `<strong class="d-block mb-2">Current Jobs</strong>
-                <div class="text-danger small">Could not load jobs.</div>`;
-        }
-    }
 }
 
 async function openNodeDetail(nodeId) {
@@ -4938,8 +3680,6 @@ setupTeamsTab();
 setupGlobalSearch();
 setupDrawer();
 setupAuthMenu();
-setupReceiptsTab();
-setupExecutionsTab();
 setupNotifications();
 setupEventsTab();
 setupCompaniesTable();

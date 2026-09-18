@@ -128,6 +128,16 @@ class GCONCoordinator:
         # list every call.
         self._verified_receipt_count = 0
         self._unverified_receipt_count = 0
+        # Running totals for policy/assurance evaluation, kept by the
+        # same incremental pattern as the two counters above. A
+        # policy_report is attached to a receipt in-memory but is not
+        # a persisted column, so unlike the verification counts these
+        # cannot be rebuilt by a DB query -- they count evaluations
+        # performed by THIS coordinator process and reset on restart.
+        # get_policy_evaluation_counts() reports that honestly rather
+        # than presenting a post-restart zero as "nothing failed".
+        self._policy_compliant_count = 0
+        self._policy_exception_count = 0
         # Per-replica receipt trail for verify-tagged jobs (see
         # gcon.execution.replication and _run_replicated_job). Every
         # replica keeps its own independently-signed receipt here,
@@ -1630,6 +1640,7 @@ class GCONCoordinator:
                 # same way offline nodes and failed jobs already are.
                 policy_report = self.policy_engine.evaluate(receipt)
                 job["policy_report"] = policy_report
+                self._record_policy_result(policy_report)
                 if not policy_report["trusted"]:
                     failed_checks = [
                         c["message"] for c in policy_report["checks"] if not c["passed"]
@@ -1904,6 +1915,7 @@ class GCONCoordinator:
                 # that specific node's run, not a single job-wide verdict.
                 policy_report = self.policy_engine.evaluate(receipt)
                 receipt["policy_report"] = policy_report
+                self._record_policy_result(policy_report)
 
                 is_primary = not first_success_seen
                 first_success_seen = True
@@ -3297,6 +3309,50 @@ class GCONCoordinator:
             total = len(self.receipts)
             verified = self._verified_receipt_count
         return {"total": total, "verified": verified, "unverified": total - verified}
+
+    def _record_policy_result(self, policy_report):
+        """Fold one PolicyEngine.evaluate() result into the running
+        assurance totals. Called once per receipt that actually gets
+        evaluated -- including once per replica on a verify-tagged
+        job, since each replica carries its own policy_report.
+
+        Counted incrementally for the same reason receipt
+        verification is (see _verified_receipt_count): the Assure
+        pillar is rendered on every websocket tick, and scanning
+        every receipt's policy_report per tick would be O(total
+        receipts) forever.
+        """
+        if not policy_report:
+            return
+        with self.receipts_lock:
+            if policy_report.get("trusted"):
+                self._policy_compliant_count += 1
+            else:
+                self._policy_exception_count += 1
+
+    def get_policy_evaluation_counts(self):
+        """Aggregate assurance counts for the control plane's Assure
+        pillar.
+
+        `evaluated` is the number of policy evaluations this
+        coordinator process has performed since it started -- NOT the
+        lifetime total. policy_report is attached to an in-memory
+        receipt and has no persisted column, so unlike
+        get_receipt_verification_counts() these figures cannot be
+        rebuilt from the database after a restart. The caller gets
+        `evaluated` alongside the two counts so it can tell "no
+        exceptions yet" apart from "this process has evaluated
+        nothing", instead of rendering a post-restart zero as a clean
+        bill of health.
+        """
+        with self.receipts_lock:
+            compliant = self._policy_compliant_count
+            exceptions = self._policy_exception_count
+        return {
+            "compliant": compliant,
+            "exceptions": exceptions,
+            "evaluated": compliant + exceptions,
+        }
 
     def get_receipts(self, org_id=None):
         """

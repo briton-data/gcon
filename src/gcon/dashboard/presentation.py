@@ -262,6 +262,8 @@ class PresentationLayer:
         running_jobs = 0
         completed_jobs = 0
         failed_jobs = 0
+        pending_jobs = 0
+        cancelled_jobs = 0
 
         for job in jobs:
 
@@ -276,12 +278,24 @@ class PresentationLayer:
             elif status == "failed":
                 failed_jobs += 1
 
+            elif status == "pending":
+                pending_jobs += 1
+
+            elif status == "cancelled":
+                cancelled_jobs += 1
+
         return {
             "total_nodes": len(nodes),
             "total_jobs": len(jobs),
             "running_jobs": running_jobs,
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,
+            # Counted in the same pass the three above already use, so
+            # the Orchestrate pillar can show a real queued figure
+            # rather than deriving one by subtraction (which would
+            # silently fold cancelled jobs into "queued").
+            "pending_jobs": pending_jobs,
+            "cancelled_jobs": cancelled_jobs,
         }
 
     def get_dashboard(self):
@@ -320,6 +334,7 @@ class PresentationLayer:
             "global_status": self.get_global_status(health),
             "node_summary": self.get_node_summary(),
             "receipts_summary": receipts_summary,
+            "policy_summary": self.get_policy_summary(),
             "storage_summary": self.get_storage_summary(health),
             "critical_alerts": self.get_critical_alerts(health),
             "execution_timeline": self.get_execution_timeline(),
@@ -352,6 +367,23 @@ class PresentationLayer:
         regardless of how much receipt history had accumulated.
         """
         return self.coordinator.get_receipt_verification_counts()
+
+    def get_policy_summary(self):
+        """
+        Return live assurance counts (policy-compliant vs policy
+        exceptions) for the control plane's Assure pillar.
+
+        Delegates to Coordinator.get_policy_evaluation_counts(), which
+        keeps these as running totals rather than scanning every
+        receipt's policy_report per call -- this is part of the
+        websocket payload, so it runs on every dashboard tick.
+
+        Note the `evaluated` field: these counts are per-process, not
+        lifetime, because policy_report is not a persisted column.
+        The pillar uses it to distinguish "nothing evaluated yet"
+        from "everything passed".
+        """
+        return self.coordinator.get_policy_evaluation_counts()
 
     def get_storage_summary(self, health=None):
         """

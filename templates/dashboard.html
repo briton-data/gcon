@@ -59,28 +59,16 @@
                     </div>
                 </div>
 
+                <div class="row mb-4">
+                    <div class="col-lg-12">
+                        {% include "panels/pillars.html" %}
+                    </div>
+                </div>
+
                 <div class="row g-3 mb-4">
 
                     <div class="col-lg col-6">
                         {% with title="Total Nodes", value=dashboard.metrics.total_nodes, icon="bi-hdd-network", elem_id="metric-total-nodes" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-
-                    <div class="col-lg col-6">
-                        {% with title="Running Jobs", value=dashboard.metrics.running_jobs, icon="bi-cpu-fill", elem_id="metric-running-jobs" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-
-                    <div class="col-lg col-6">
-                        {% with title="Completed Jobs", value=dashboard.metrics.completed_jobs, icon="bi-check-circle-fill", elem_id="metric-completed-jobs" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-
-                    <div class="col-lg col-6">
-                        {% with title="Failed Jobs", value=dashboard.metrics.failed_jobs, icon="bi-x-octagon-fill", elem_id="metric-failed-jobs" %}
                         {% include "cards/metric_card.html" %}
                         {% endwith %}
                     </div>
@@ -95,58 +83,6 @@
 
                 <div class="row g-3 mb-4 align-items-stretch">
 
-                    <div class="col-lg-7">
-                        <div class="gcon-panel h-100 mb-0" id="operations-panel">
-                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">Control Operations</h5>
-                                <span class="badge bg-secondary" id="cc-node-summary">-- nodes</span>
-                            </div>
-                            <div class="gcon-panel-body" style="min-height:auto;">
-
-                                <div class="gcon-ops-group">
-                                    <span class="gcon-ops-label">Cluster</span>
-                                    <button class="btn btn-sm btn-primary" id="cc-scale-up-btn">Scale Up</button>
-                                    <button class="btn btn-sm btn-outline-danger" id="cc-scale-down-btn">Scale Down</button>
-                                    <button class="btn btn-sm btn-outline-warning" id="op-pause-scheduler-btn">Pause Scheduler</button>
-                                    <button class="btn btn-sm btn-outline-success" id="op-resume-scheduler-btn">Resume Scheduler</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-refresh-cluster-btn-inline">Refresh</button>
-                                </div>
-
-                                <div class="gcon-ops-group">
-                                    <span class="gcon-ops-label">Node</span>
-                                    <select class="form-select form-select-sm w-auto" id="op-node-select">
-                                        <option value="">Select node…</option>
-                                    </select>
-                                    <button class="btn btn-sm btn-outline-warning" id="op-drain-node-btn">Drain Node</button>
-                                    <button class="btn btn-sm btn-outline-info" id="op-restart-worker-btn">Restart Worker</button>
-                                    <button class="btn btn-sm btn-outline-danger" id="op-stop-worker-btn">Stop Worker</button>
-                                </div>
-
-                                <div class="gcon-ops-group">
-                                    <span class="gcon-ops-label">Jobs</span>
-                                    <select class="form-select form-select-sm w-auto" id="op-job-select">
-                                        <option value="">Select running job…</option>
-                                    </select>
-                                    <button class="btn btn-sm btn-outline-danger" id="op-cancel-job-btn">Cancel Running Job</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-clear-queue-btn">Clear Queue</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-retry-failed-btn">Retry Failed Jobs</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-clear-failed-btn">Clear Failed Jobs</button>
-                                </div>
-
-                                <div class="gcon-ops-group">
-                                    <span class="gcon-ops-label">Data</span>
-                                    <button class="btn btn-sm btn-outline-light" id="op-verify-receipts-btn">Verify Receipts</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-export-logs-btn">Export Logs</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-export-metrics-btn">Export Metrics</button>
-                                    <button class="btn btn-sm btn-outline-light" id="op-snapshot-btn">Snapshot Cluster</button>
-                                    <button class="btn btn-sm btn-danger ms-auto" id="op-emergency-stop-btn">Emergency Stop</button>
-                                </div>
-
-                                <div id="op-result" class="mt-2 small"></div>
-
-                            </div>
-                        </div>
-                    </div>
 
                     <div class="col-lg-5">
                         {% include "panels/system_services.html" %}
@@ -211,8 +147,41 @@
                             </div>
                         </div>
                     </div>
-                    <div class="col-lg-4">
-                        {% include "panels/execution_timeline.html" %}
+                </div>
+
+                <div class="row g-3 mb-3">
+                    <div class="col-lg-3 col-md-6 col-6">
+                        {% with title="Avg CPU %", value="--", icon="bi-cpu", elem_id="sm-avg-cpu" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                    <div class="col-lg-3 col-md-6 col-6">
+                        {% with title="Avg Memory %", value="--", icon="bi-memory", elem_id="sm-avg-memory" %}
+                        {% include "cards/metric_card.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <div class="row g-3 mb-3 align-items-stretch">
+                    <div class="col-lg-6">
+                        <div class="gcon-panel h-100 mb-0">
+                            <div class="gcon-panel-header">
+                                <h5 class="mb-0"><i class="bi bi-hdd-network me-2"></i>Node Health</h5>
+                            </div>
+                            <div class="gcon-panel-body" style="min-height:auto;" id="sm-node-health">
+                                <div class="text-secondary small">Loading…</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="gcon-panel h-100 mb-0">
+                            <div class="gcon-panel-header">
+                                <h5 class="mb-0"><i class="bi bi-server me-2"></i>Storage Capacity</h5>
+                            </div>
+                            <div class="gcon-panel-body" style="min-height:auto;" id="sm-storage-health">
+                                <div class="text-secondary small">Loading…</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -227,227 +196,6 @@
             <script type="application/json" id="dashboard-bootstrap-data">
                 {{ dashboard | tojson }}
             </script>
-
-            <!-- ================================================= -->
-            <!-- TAB: Cluster Visualization                         -->
-            <!-- ================================================= -->
-            <!-- ================================================= -->
-            <!-- TAB: Executions                                    -->
-            <!-- ================================================= -->
-            <div class="gcon-tab d-none" id="tab-executions">
-
-                <div class="row g-3 mb-4">
-                    <div class="col-lg col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <div class="gcon-metric-icon"><i class="bi bi-play-circle"></i></div>
-                            </div>
-                            <div class="gcon-metric-value" id="exec-tab-total">--</div>
-                            <div class="gcon-metric-title">Total</div>
-                        </div>
-                    </div>
-                    <div class="col-lg col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <div class="gcon-metric-icon" style="color:var(--info); background:var(--info-dim);">
-                                    <i class="bi bi-hourglass-split"></i>
-                                </div>
-                            </div>
-                            <div class="gcon-metric-value" id="exec-tab-queued">--</div>
-                            <div class="gcon-metric-title">Queued</div>
-                        </div>
-                    </div>
-                    <div class="col-lg col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <div class="gcon-metric-icon" style="color:var(--primary); background:var(--primary-dim);">
-                                    <i class="bi bi-lightning-charge"></i>
-                                </div>
-                            </div>
-                            <div class="gcon-metric-value" id="exec-tab-running">--</div>
-                            <div class="gcon-metric-title">Running</div>
-                        </div>
-                    </div>
-                    <div class="col-lg col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <div class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
-                                    <i class="bi bi-check-circle"></i>
-                                </div>
-                            </div>
-                            <div class="gcon-metric-value" id="exec-tab-completed">--</div>
-                            <div class="gcon-metric-title">Completed</div>
-                        </div>
-                    </div>
-                    <div class="col-lg col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <div class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
-                                    <i class="bi bi-x-circle"></i>
-                                </div>
-                            </div>
-                            <div class="gcon-metric-value" id="exec-tab-failed">--</div>
-                            <div class="gcon-metric-title">Failed</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gcon-panel">
-
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-                        <h5 class="mb-0"><i class="bi bi-play-circle me-2"></i>Executions</h5>
-                        <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <select class="form-select form-select-sm w-auto" id="executions-company-filter">
-                                <option value="">All companies</option>
-                                {% for company in dashboard.companies %}
-                                <option value="{{ company.org_id }}">{{ company.name }}</option>
-                                {% endfor %}
-                            </select>
-                            <input type="text" id="executions-search" class="form-control form-control-sm w-auto"
-                                   placeholder="Search job or node ID...">
-                        </div>
-                    </div>
-
-                    <div class="btn-group btn-group-sm mb-3" id="executions-status-filter" role="group">
-                        <button type="button" class="btn btn-outline-light active" data-status="">All</button>
-                        <button type="button" class="btn btn-outline-light" data-status="pending">Queued</button>
-                        <button type="button" class="btn btn-outline-light" data-status="running">Running</button>
-                        <button type="button" class="btn btn-outline-light" data-status="completed">Completed</button>
-                        <button type="button" class="btn btn-outline-light" data-status="failed">Failed</button>
-                        <button type="button" class="btn btn-outline-light" data-status="cancelled">Cancelled</button>
-                    </div>
-
-                    <div class="gcon-panel-body p-0">
-                        <div class="table-responsive">
-                            <table class="table gcon-table mb-0" id="executions-table">
-                                <thead>
-                                    <tr>
-                                        <th>Job</th>
-                                        <th>Status</th>
-                                        <th>Worker</th>
-                                        <th>Started</th>
-                                        <th>Duration</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="executions-tbody">
-                                    <tr><td colspan="5" class="text-secondary text-center py-4">Loading executions...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <div class="d-flex justify-content-between align-items-center px-3 py-2 flex-wrap gap-2" id="executions-pagination">
-                            <small class="text-secondary" id="executions-page-info">--</small>
-                            <div class="btn-group btn-group-sm">
-                                <button type="button" class="btn btn-outline-light" id="executions-prev-page">
-                                    <i class="bi bi-chevron-left"></i>
-                                </button>
-                                <button type="button" class="btn btn-outline-light" id="executions-next-page">
-                                    <i class="bi bi-chevron-right"></i>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-            </div>
-
-            <div class="gcon-tab d-none" id="tab-topology">
-
-                <div class="gcon-panel">
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Live Topology</h5>
-                        <span class="badge bg-success">Live</span>
-                    </div>
-                    <div class="gcon-panel-body">
-                        <div id="topology-container" class="gcon-topology-container">
-                            <div class="text-secondary text-center py-5">Loading topology...</div>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
-
-            <!-- ================================================= -->
-            <!-- TAB: Receipt Explorer                              -->
-            <!-- ================================================= -->
-            <div class="gcon-tab d-none" id="tab-receipts">
-
-                <div class="row g-4 mb-4">
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Total Receipts</span>
-                                <span class="gcon-metric-icon"><i class="bi bi-patch-check"></i></span>
-                            </div>
-                            <div class="gcon-metric-value" id="receipts-tab-total">--</div>
-                        </div>
-                    </div>
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Verified</span>
-                                <span class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
-                                    <i class="bi bi-shield-check"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="receipts-tab-verified">--</div>
-                        </div>
-                    </div>
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Unverified</span>
-                                <span class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
-                                    <i class="bi bi-shield-x"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="receipts-tab-unverified">--</div>
-                        </div>
-                    </div>
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card d-flex flex-column justify-content-center" style="cursor:default;">
-                            <span class="gcon-metric-title mb-2">Re-check every signature</span>
-                            <button class="btn btn-sm btn-primary" id="receipts-tab-verify-all-btn">
-                                <i class="bi bi-arrow-repeat me-1"></i>Verify All Receipts
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gcon-panel">
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-                        <h5 class="mb-0"><i class="bi bi-patch-check me-2"></i>Execution Receipts</h5>
-                        <input type="text" id="receipts-search" class="form-control form-control-sm w-auto"
-                               placeholder="Filter by receipt or job ID...">
-                    </div>
-
-                    <div class="btn-group btn-group-sm mb-3 mx-3" id="receipts-verified-filter" role="group">
-                        <button type="button" class="btn btn-outline-light active" data-verified="">All</button>
-                        <button type="button" class="btn btn-outline-light" data-verified="true">Verified</button>
-                        <button type="button" class="btn btn-outline-light" data-verified="false">Unverified</button>
-                    </div>
-
-                    <div class="gcon-panel-body">
-                        <div class="gcon-receipt-grid" id="receipts-grid">
-                            <div class="text-secondary text-center py-4">Loading receipts...</div>
-                        </div>
-
-                        <div class="d-flex justify-content-between align-items-center px-1 py-2 flex-wrap gap-2" id="receipts-pagination">
-                            <small class="text-secondary" id="receipts-page-info">--</small>
-                            <div class="btn-group btn-group-sm">
-                                <button type="button" class="btn btn-outline-light" id="receipts-prev-page">
-                                    <i class="bi bi-chevron-left"></i>
-                                </button>
-                                <button type="button" class="btn btn-outline-light" id="receipts-next-page">
-                                    <i class="bi bi-chevron-right"></i>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
 
             <!-- ================================================= -->
             <!-- TAB: Trust Center                                  -->
@@ -508,7 +256,7 @@
 
                 <div class="row mb-4 align-items-stretch">
 
-                    <div class="col-lg-7">
+                    <div class="col-lg-12">
                         <div class="gcon-panel h-100">
                             <div class="gcon-panel-header d-flex justify-content-between align-items-center">
                                 <h5 class="mb-0"><i class="bi bi-graph-up me-2"></i>Trust Score History</h5>
@@ -522,79 +270,6 @@
                         </div>
                     </div>
 
-                    <div class="col-lg-5">
-                        <div class="gcon-panel h-100">
-                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0"><i class="bi bi-diagram-2 me-2"></i>Signature Validation</h5>
-                                <a href="#" class="gcon-panel-link" data-tab="receipts">View full receipt list &rarr;</a>
-                            </div>
-                            <div class="gcon-panel-body">
-                                <div id="tc-signature-summary">
-                                    <div class="text-secondary text-center py-4">Loading…</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-                <div class="row mb-4 align-items-stretch">
-
-                    <div class="col-lg-6">
-                        <div class="gcon-panel h-100">
-                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Verification Failures</h5>
-                                <span class="badge bg-danger" id="tc-failures-count">0</span>
-                            </div>
-                            <div class="gcon-panel-body">
-                                <div id="tc-failures-list">
-                                    <div class="text-secondary text-center py-4">Loading…</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-6">
-                        <div class="gcon-panel h-100">
-                            <div class="gcon-panel-header">
-                                <h5 class="mb-0"><i class="bi bi-hdd-network me-2"></i>Node Trust Status</h5>
-                            </div>
-                            <div class="gcon-panel-body">
-                                <div class="table-responsive">
-                                    <table class="table gcon-table align-middle mb-0">
-                                        <thead>
-                                            <tr>
-                                                <th>Node</th>
-                                                <th>Status</th>
-                                                <th>Trusted</th>
-                                                <th>Last Seen</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="tc-node-trust-body">
-                                            <tr><td colspan="4" class="text-center text-secondary">Loading…</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-                <div class="row">
-                    <div class="col-lg-12">
-                        <div class="gcon-panel">
-                            <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0"><i class="bi bi-clock-history me-2"></i>Verification Timeline</h5>
-                                <span class="gcon-panel-link" data-tab="receipts">Open Receipt Explorer →</span>
-                            </div>
-                            <div class="gcon-panel-body">
-                                <div id="tc-verification-timeline">
-                                    <div class="text-secondary text-center py-4">Loading…</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
 
             </div>
@@ -607,8 +282,7 @@
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
 
-                        <div class="btn-group" id="explorer-subnav">
-                            <button class="btn btn-sm btn-primary" data-explorer="nodes">Nodes</button>
+                        <div class="btn-group d-none" id="explorer-subnav">
                             <button class="btn btn-sm btn-outline-primary" data-explorer="artifacts">Artifacts</button>
                         </div>
 
@@ -650,7 +324,14 @@
                                 <p class="text-secondary small mb-0">
                                     Every stored artifact is traceable back to the execution that produced it.
                                     Open the Artifact Registry to search, filter, and inspect artifact metadata,
-                                    size, owner, and retention.
+                                    size, and owner.
+                                </p>
+                                <p class="text-secondary small mb-0 mt-2">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    Metadata only, held in this coordinator process's memory — not yet
+                                    persisted to the database, so it does not survive a restart and there
+                                    is no retention policy. A durable artifact/data plane is planned but
+                                    not built.
                                 </p>
                             </div>
                         </div>
@@ -711,177 +392,6 @@
                                 <tr><td colspan="9" class="text-secondary text-center py-4">Loading...</td></tr>
                             </tbody>
                         </table>
-                    </div>
-                </div>
-
-            </div>
-
-            <!-- ================================================= -->
-            <!-- TAB: Real-Time Monitoring                          -->
-            <!-- ================================================= -->
-            <div class="gcon-tab d-none" id="tab-monitoring">
-
-                <div class="row g-3 mb-4">
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Avg CPU %", value="--", icon="bi-cpu", elem_id="sm-avg-cpu" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Avg Memory %", value="--", icon="bi-memory", elem_id="sm-avg-memory" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Queued", value="--", icon="bi-hourglass-split", elem_id="sm-queued" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Running", value="--", icon="bi-play-circle", elem_id="sm-running" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Events Seen", value="--", icon="bi-broadcast", elem_id="sm-event-count" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-2 col-md-4 col-6">
-                        {% with title="Uptime", value="--", icon="bi-clock-history", elem_id="sm-uptime" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                </div>
-
-                <div class="row g-3 mb-4 align-items-stretch">
-
-                    <div class="col-lg-4">
-                        <div class="gcon-panel h-100 mb-0">
-                            <div class="gcon-panel-header">
-                                <h5 class="mb-0"><i class="bi bi-hdd-network me-2"></i>Node Health</h5>
-                            </div>
-                            <div class="gcon-panel-body" style="min-height:auto;" id="sm-node-health">
-                                <div class="text-secondary small">Loading…</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-4">
-                        <div class="gcon-panel h-100 mb-0">
-                            <div class="gcon-panel-header">
-                                <h5 class="mb-0"><i class="bi bi-server me-2"></i>Storage Capacity</h5>
-                            </div>
-                            <div class="gcon-panel-body" style="min-height:auto;" id="sm-storage-health">
-                                <div class="text-secondary small">Loading…</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-4">
-                        <div class="gcon-panel h-100 mb-0">
-                            <div class="gcon-panel-header">
-                                <h5 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Coordinator &amp; Scheduler</h5>
-                            </div>
-                            <div class="gcon-panel-body" style="min-height:auto;" id="sm-services-health">
-                                <div class="text-secondary small">
-                                    Live Coordinator/Scheduler/Receipts/Storage/Heartbeat status is shown once,
-                                    in the header strip and on
-                                    <a href="#" class="gcon-panel-link" data-tab="control-center">Overview</a> —
-                                    see it there instead of a second copy here.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-                <div class="gcon-panel">
-                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Event Stream</h5>
-                        <span class="badge bg-success" id="sm-connection">Live</span>
-                    </div>
-                    <div class="gcon-panel-body">
-                        <div class="gcon-activity-feed gcon-activity-feed-lg" id="monitoring-activity-feed">
-                            <div class="text-secondary">No recent activity.</div>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
-
-            <!-- ================================================= -->
-            <!-- TAB: Analytics & History                           -->
-            <!-- ================================================= -->
-            <div class="gcon-tab d-none" id="tab-analytics">
-
-                <div class="row g-4 mb-4">
-                    <div class="col-lg-3">
-                        {% with title="Success Rate", value="--%", icon="bi-trophy", elem_id="an-success-rate" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-3">
-                        {% with title="Completed", value="--", icon="bi-check-circle", elem_id="an-completed" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-3">
-                        {% with title="Failed", value="--", icon="bi-x-circle", elem_id="an-failed" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                    <div class="col-lg-3">
-                        {% with title="Pending", value="--", icon="bi-hourglass-split", elem_id="an-pending" %}
-                        {% include "cards/metric_card.html" %}
-                        {% endwith %}
-                    </div>
-                </div>
-
-                <div class="row g-4 mb-4">
-                    <div class="col-lg-6">
-                        <div class="gcon-panel">
-                            <div class="gcon-panel-header"><h5 class="mb-0">Job Outcomes</h5></div>
-                            <div class="gcon-panel-body">
-                                <div id="analytics-bars" class="gcon-bar-chart"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-lg-6">
-                        <div class="gcon-panel">
-                            <div class="gcon-panel-header"><h5 class="mb-0">History Timeline</h5></div>
-                            <div class="gcon-panel-body">
-                                <div id="analytics-timeline" class="gcon-activity-feed gcon-activity-feed-lg">
-                                    <div class="text-secondary">No history yet.</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gcon-panel">
-                    <div class="gcon-panel-header">
-                        <h5 class="mb-0"><i class="bi bi-building me-2"></i>Usage by Client</h5>
-                    </div>
-                    <div class="gcon-panel-body p-0">
-                        <div class="table-responsive">
-                            <table class="table gcon-table mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>Client</th>
-                                        <th>Nodes</th>
-                                        <th>Running</th>
-                                        <th>Completed</th>
-                                        <th>Failed</th>
-                                        <th>Compute Time</th>
-                                        <th>LLM Tokens</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="analytics-companies-tbody">
-                                    <tr><td colspan="7" class="text-secondary text-center py-4">Loading…</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
                     </div>
                 </div>
 
