@@ -217,12 +217,43 @@ class CustomerAuthOut(BaseModel):
     every other endpoint in this file already uses. No session
     cookie is involved anywhere in this file.
     """
-    organization: dict = None
-    customer_user: dict = None
-    api_key: dict = None
+    organization: Optional[dict] = None
+    customer_user: Optional[dict] = None
+    api_key: Optional[dict] = None
 
     class Config:
         extra = "allow"
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str
+
+
+class ForgotPasswordOut(BaseModel):
+    """
+    No email service exists anywhere in this codebase (confirmed by
+    checking -- there's no SMTP/mail-provider integration at all), so
+    this deliberately returns the reset token directly in the
+    response rather than pretending to have sent an email nobody will
+    receive. A real deployment needs an actual email step inserted
+    here before this is safe to expose publicly -- flagged plainly,
+    not silently shipped as if this were the finished answer.
+
+    Always returns 200 with `token: null` for an unknown email (never
+    reveals whether an email has an account -- same anti-enumeration
+    principle CustomerUserRegistry.authenticate() already uses for
+    login).
+    """
+    token: Optional[str] = None
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+
+class ApiKeyCreateIn(BaseModel):
+    name: str
 
 
 def create_api_v1_app(management, presentation):
@@ -341,6 +372,103 @@ def create_api_v1_app(management, presentation):
         if customer is None:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         return {"customer_user": customer.to_dict()}
+
+    @app.post(
+        "/auth/forgot-password",
+        response_model=ForgotPasswordOut,
+        tags=["Auth"],
+        summary="Request a password reset token",
+    )
+    def auth_forgot_password(payload: ForgotPasswordIn):
+        customer = management.customer_registry.get_user_by_email(payload.email)
+        if customer is None:
+            # Same email as a real request, same 200, no token -- an
+            # unknown-email response that looked different would let
+            # this route be used to check which emails have accounts.
+            return {"token": None}
+        token = management.customer_reset_token_manager.create_token(customer.customer_user_id)
+        return {"token": token}
+
+    @app.post(
+        "/auth/reset-password",
+        tags=["Auth"],
+        summary="Set a new password using a reset token",
+        responses={400: {"model": ErrorOut}},
+    )
+    def auth_reset_password(payload: ResetPasswordIn):
+        customer_user_id = management.customer_reset_token_manager.get_customer_user_id(payload.token)
+        if customer_user_id is None:
+            raise HTTPException(status_code=400, detail="This reset link is invalid or has expired.")
+        management.customer_registry.set_password(customer_user_id, payload.new_password)
+        management.customer_reset_token_manager.consume_token(payload.token)
+        # Invalidate every other outstanding token for this user too,
+        # not just the one just used -- otherwise an old, still-valid
+        # reset link sitting in an inbox could reset the password
+        # again later, silently, after the customer thinks this is
+        # done and forgotten.
+        management.customer_reset_token_manager.invalidate_all_for_user(customer_user_id)
+        return {"reset": True}
+
+    # ------------------------------------------------------------
+    # API keys (customer self-service)
+    #
+    # Uses require_scope() with no scope argument -- valid
+    # authentication only, no specific scope required. Neither
+    # existing scope ("Submit workflows" / "View monitoring") is
+    # semantically about key management, so requiring either one
+    # would arbitrarily lock out a key that only has the other.
+    # ------------------------------------------------------------
+
+    @app.get(
+        "/auth/api-keys",
+        tags=["Auth"],
+        summary="List this organization's API keys",
+        responses={401: {"model": ErrorOut}},
+    )
+    def list_api_keys(auth=Depends(require_scope())):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if org_id is None:
+            return []
+        return jsonable_encoder(management.list_customer_api_keys(org_id))
+
+    @app.post(
+        "/auth/api-keys",
+        tags=["Auth"],
+        summary="Create a new API key for this organization",
+        responses={401: {"model": ErrorOut}},
+    )
+    def create_api_key(payload: ApiKeyCreateIn, auth=Depends(require_scope())):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if org_id is None:
+            raise HTTPException(status_code=400, detail="This key has no organization to create a key for.")
+        # created_by is the CALLER (owner.user_id), not necessarily
+        # whoever's key this ends up looking like it belongs to -- any
+        # teammate's key can create a new key for the org, matching
+        # list_customer_api_keys' own "org-level, not per-user
+        # resource" principle.
+        return jsonable_encoder(
+            management.create_customer_api_key(org_id, owner.user_id, payload.name)
+        )
+
+    @app.delete(
+        "/auth/api-keys/{key_id}",
+        tags=["Auth"],
+        summary="Revoke an API key",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def revoke_api_key(key_id: str, auth=Depends(require_scope())):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        try:
+            return jsonable_encoder(management.revoke_customer_api_key(org_id, key_id))
+        except ValueError as e:
+            # revoke_customer_api_key already gives the same message
+            # for "doesn't exist" and "belongs to a different org" --
+            # see its own docstring - so this can't be used to probe
+            # for other orgs' key ids either.
+            raise HTTPException(status_code=404, detail=str(e))
 
     # ------------------------------------------------------------
     # Cluster
@@ -651,6 +779,31 @@ def create_api_v1_app(management, presentation):
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
         return jsonable_encoder(presentation.get_receipts(org_id=org_id))
+
+    @app.get(
+        "/receipts/{receipt_id}",
+        tags=["Receipts"],
+        summary="Get full evidence detail for a single receipt",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def get_receipt(receipt_id: str, auth=Depends(require_scope("View monitoring"))):
+        # Same org-check pattern as get_job: confirm this receipt_id
+        # is actually in the caller's own org-scoped list BEFORE
+        # fetching detail, and use the same 404 for "doesn't exist"
+        # and "belongs to a different org" -- get_receipt_detail()
+        # itself takes no org_id and does no scoping (it's the
+        # internal staff dashboard's method, staff sees everything),
+        # so this route enforces isolation itself rather than relying
+        # on that method to.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        own_receipt_ids = {r["receipt_id"] for r in presentation.get_receipts(org_id=org_id)}
+        if receipt_id not in own_receipt_ids:
+            raise HTTPException(status_code=404, detail=f"Receipt '{receipt_id}' not found.")
+        detail = presentation.get_receipt_detail(receipt_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Receipt '{receipt_id}' not found.")
+        return jsonable_encoder(detail)
 
     @app.get(
         "/artifacts",
