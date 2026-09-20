@@ -13,13 +13,17 @@ available at /api/v1/docs (Swagger UI) and /api/v1/redoc, with the
 raw schema at /api/v1/openapi.json.
 """
 
+import os
+import re
+from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
 from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
+from gcon.management.rate_limit import LoginRateLimiter
 
 
 # ---------------------------------------------------------------
@@ -68,6 +72,22 @@ class JobOut(BaseModel):
     runtime_seconds: object = None
     usage: object = None
     output: Optional[str] = None
+    kind: Optional[str] = Field(
+        default=None,
+        description="'command', 'resourced' or 'staged' -- how the job was submitted.",
+    )
+    requires: Optional[Dict[str, Any]] = Field(
+        default=None, description="Capability requirements the job was submitted with, if any.",
+    )
+    verify: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Replicated-execution request the job was submitted with, if any.",
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Why a failed/cancelled job ended, when the result carries one.",
+    )
+    return_code: Optional[int] = None
 
 
 class JobSubmitRequest(BaseModel):
@@ -206,16 +226,15 @@ class CustomerLoginIn(BaseModel):
 
 class CustomerAuthOut(BaseModel):
     """
-    Response for /auth/signup and /auth/login. `api_key` is only
-    present on signup (the secret is revealed exactly once, same
-    convention as ManagementLayer.create_api_key() everywhere else --
-    it cannot be retrieved again after this response). A separate
-    frontend calling this API stores `api_key.secret` (signup) or
-    asks the customer to supply an existing key (login returns
-    account info only, not a new key) and sends it as a Bearer token
-    on every subsequent /api/v1 request -- the same authentication
-    every other endpoint in this file already uses. No session
-    cookie is involved anywhere in this file.
+    Response for /auth/signup and /auth/login. Both return a freshly
+    created API key in `api_key` (the secret is revealed exactly once,
+    same convention as ManagementLayer.create_api_key() everywhere
+    else -- it cannot be retrieved again after this response). A
+    separate frontend stores `api_key.secret` and sends it as a Bearer
+    token on every subsequent /api/v1 request -- the same
+    authentication every other endpoint in this file already uses --
+    and revokes it on logout. No session cookie is involved anywhere
+    in this file.
     """
     organization: Optional[dict] = None
     customer_user: Optional[dict] = None
@@ -231,20 +250,23 @@ class ForgotPasswordIn(BaseModel):
 
 class ForgotPasswordOut(BaseModel):
     """
-    No email service exists anywhere in this codebase (confirmed by
-    checking -- there's no SMTP/mail-provider integration at all), so
-    this deliberately returns the reset token directly in the
-    response rather than pretending to have sent an email nobody will
-    receive. A real deployment needs an actual email step inserted
-    here before this is safe to expose publicly -- flagged plainly,
-    not silently shipped as if this were the finished answer.
-
-    Always returns 200 with `token: null` for an unknown email (never
-    reveals whether an email has an account -- same anti-enumeration
-    principle CustomerUserRegistry.authenticate() already uses for
-    login).
+    No email service exists anywhere in this codebase, so a reset
+    token cannot yet be delivered to its rightful owner. By default
+    this route therefore issues NO token and reports
+    `delivery: "unavailable"`; the token is only returned when
+    GCON_EXPOSE_RESET_TOKEN is set (local development). Always the
+    same 200 for known and unknown emails, so it never reveals which
+    emails have accounts.
     """
     token: Optional[str] = None
+    delivery: str = Field(
+        default="unavailable",
+        description=(
+            "'unavailable' (production default): no reset email can be sent yet "
+            "and no token is issued. 'dev_token': GCON_EXPOSE_RESET_TOKEN is set, "
+            "so the token is returned in this response -- local development only."
+        ),
+    )
 
 
 class ResetPasswordIn(BaseModel):
@@ -256,14 +278,50 @@ class ApiKeyCreateIn(BaseModel):
     name: str
 
 
-def create_api_v1_app(management, presentation):
+MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_LENGTH = 256
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_password(password):
+    """Server-side password rule (the frontend's own check is only a
+    convenience -- it is not the security boundary). Raises ValueError
+    with a message safe to show to the customer."""
+    if not isinstance(password, str) or len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at most {MAX_PASSWORD_LENGTH} characters.")
+
+
+def _validate_signup(payload):
+    if not (payload.org_name or "").strip():
+        raise ValueError("Organization name is required.")
+    if not (payload.name or "").strip():
+        raise ValueError("Your name is required.")
+    if not _EMAIL_RE.match((payload.email or "").strip()):
+        raise ValueError("Enter a valid email address.")
+    _validate_password(payload.password)
+
+
+def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None):
     """
     Build the /api/v1 sub-application. `management` is the shared
     ManagementLayer instance (for API key auth) and `presentation`
     is the shared PresentationLayer (for real cluster data) — the
     same instances the dashboard itself uses, so the public API and
     the dashboard are always looking at the same live state.
+
+    `rate_limiter` / `client_ip` are optional: WebServer passes its own
+    LoginRateLimiter and trusted-proxy-aware IP resolver so /auth/login
+    is throttled with the same configuration as the staff login. When
+    omitted (tests, standalone use) a private in-process limiter and the
+    plain TCP peer address are used.
     """
+    if rate_limiter is None:
+        rate_limiter = LoginRateLimiter(db=getattr(management, "db", None))
+    if client_ip is None:
+        def client_ip(request):
+            return request.client.host if request.client else None
 
     app = FastAPI(
         title="GCON Public API",
@@ -315,20 +373,16 @@ def create_api_v1_app(management, presentation):
     # ------------------------------------------------------------
     # Auth
     #
-    # These two routes are deliberately the only ones in this file
-    # that do NOT require an API key -- that's the point, they're how
-    # a customer gets one in the first place. A separate frontend
-    # (its own repo/deploy, not part of gcon-rebuild) calls these
-    # directly: /auth/signup returns a usable API key immediately
-    # (same one-time-reveal convention as every other key creation in
-    # this codebase), /auth/login confirms credentials and returns
-    # the account's org_id/name so the frontend can display it --  it
-    # deliberately does NOT mint or return a new key on every login,
-    # since a customer's existing key(s) (managed via
-    # list/create/revoke_customer_api_key, not yet exposed here) are
-    # what the frontend should already be holding and sending as a
-    # Bearer token on every other call in this file. No session
-    # cookie, no server-rendered page -- pure JSON in, JSON out.
+    # /auth/signup, /auth/login, /auth/forgot-password and
+    # /auth/reset-password are deliberately the only routes in this
+    # file that do NOT require an API key -- they are how a customer
+    # gets one in the first place. A separate frontend (its own
+    # repo/deploy, not part of gcon-rebuild) calls them directly:
+    # signup and login each return a usable API key immediately (same
+    # one-time-reveal convention as every other key creation in this
+    # codebase), which the frontend sends as a Bearer token on every
+    # other call and revokes on logout. No session cookie, no
+    # server-rendered page -- pure JSON in, JSON out.
     # ------------------------------------------------------------
 
     @app.post(
@@ -340,6 +394,7 @@ def create_api_v1_app(management, presentation):
     )
     def auth_signup(payload: CustomerSignupIn):
         try:
+            _validate_signup(payload)
             result = management.signup_customer(
                 payload.org_name, payload.name, payload.email, payload.password,
             )
@@ -354,40 +409,84 @@ def create_api_v1_app(management, presentation):
         "/auth/login",
         response_model=CustomerAuthOut,
         tags=["Auth"],
-        summary="Verify customer credentials",
-        responses={401: {"model": ErrorOut}},
+        summary="Log in: verify credentials and receive a session API key",
+        responses={401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
     )
-    def auth_login(payload: CustomerLoginIn):
+    def auth_login(payload: CustomerLoginIn, request: Request):
+        # Rate-limited exactly like the staff login (check -> 429,
+        # record_failure on a bad password, record_success clears the
+        # counter), but under its own "customer-login:" key namespace
+        # so a customer's failed attempts can never lock out a staff
+        # account that happens to share an email address.
+        limiter_key = f"customer-login:{payload.email}"
+        ip = client_ip(request)
+        try:
+            rate_limiter.check(limiter_key, ip)
+        except ValueError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+
         # Deliberately calls customer_registry.authenticate() directly
         # rather than management.customer_login() -- the latter also
-        # creates a session row via CustomerSessionManager for the
-        # cookie-based flow this file does not use, which would just
-        # be silently orphaned (created, never read, never expired
-        # until its TTL) on every single login call. This checks the
-        # same password (same PBKDF2 verification underneath) without
-        # that waste, since a separate frontend authenticates every
-        # subsequent request with the customer's own API key, not a
-        # session token.
+        # creates a cookie-session row this API never reads.
         customer = management.customer_registry.authenticate(payload.email, payload.password)
         if customer is None:
+            rate_limiter.record_failure(limiter_key, ip)
             raise HTTPException(status_code=401, detail="Invalid email or password.")
-        return {"customer_user": customer.to_dict()}
+        rate_limiter.record_success(limiter_key, ip)
+
+        try:
+            organization = management.org_registry.get_organization(customer.org_id).to_dict()
+        except ValueError:
+            organization = None
+
+        # A successful password login is what grants the frontend a
+        # credential: a fresh, named API key (same scopes, same 90-day
+        # expiry as every customer key) revealed exactly once in this
+        # response. The frontend sends it as a Bearer token and revokes
+        # it on logout (DELETE /auth/api-keys/{key_id}, key_id from
+        # /whoami). Without this a customer who logged out could never
+        # get back in, since no other route hands out a first key.
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        session_key = management.create_customer_api_key(
+            customer.org_id, customer.customer_user_id, f"Web session {stamp} UTC",
+        )
+        return {
+            "organization": organization,
+            "customer_user": customer.to_dict(),
+            "api_key": session_key,
+        }
 
     @app.post(
         "/auth/forgot-password",
         response_model=ForgotPasswordOut,
         tags=["Auth"],
-        summary="Request a password reset token",
+        summary="Request a password reset",
     )
     def auth_forgot_password(payload: ForgotPasswordIn):
+        # No email service exists in this codebase, so there is no way
+        # to deliver a reset token to its rightful owner. Returning the
+        # token to whoever asked -- which this route used to do -- lets
+        # anyone who knows an email address reset that account's
+        # password (and, now that login issues an API key, take the
+        # account over). So by default NO token is created or returned,
+        # for any email, and the response says delivery is unavailable.
+        #
+        # GCON_EXPOSE_RESET_TOKEN=1 restores the old behaviour for
+        # local development ONLY. Read live on every call (not frozen
+        # at import) so it can be flipped without a restart.
+        #
+        # Either way the response is identical for known and unknown
+        # emails, so this cannot be used to discover which emails have
+        # accounts. A real deployment replaces the "unavailable" branch
+        # with: create the token, e-mail it, return {"token": None}.
+        expose = os.environ.get("GCON_EXPOSE_RESET_TOKEN", "").strip().lower() in ("1", "true", "yes")
+        if not expose:
+            return {"token": None, "delivery": "unavailable"}
         customer = management.customer_registry.get_user_by_email(payload.email)
         if customer is None:
-            # Same email as a real request, same 200, no token -- an
-            # unknown-email response that looked different would let
-            # this route be used to check which emails have accounts.
-            return {"token": None}
+            return {"token": None, "delivery": "dev_token"}
         token = management.customer_reset_token_manager.create_token(customer.customer_user_id)
-        return {"token": token}
+        return {"token": token, "delivery": "dev_token"}
 
     @app.post(
         "/auth/reset-password",
@@ -396,6 +495,10 @@ def create_api_v1_app(management, presentation):
         responses={400: {"model": ErrorOut}},
     )
     def auth_reset_password(payload: ResetPasswordIn):
+        try:
+            _validate_password(payload.new_password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         customer_user_id = management.customer_reset_token_manager.get_customer_user_id(payload.token)
         if customer_user_id is None:
             raise HTTPException(status_code=400, detail="This reset link is invalid or has expired.")

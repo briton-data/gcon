@@ -3118,10 +3118,42 @@ class GCONCoordinator:
                 # command didn't write one. Never fabricated.
                 "usage": metrics.get("usage"),
                 "output": output,
+                # How this job was configured at submission (see
+                # submit_job) -- previously stored on the job but
+                # never returned, so a customer had no way to see
+                # which capabilities they had actually asked for.
+                "kind": job.get("kind", "command"),
+                "requires": job.get("requires"),
+                "verify": job.get("verify"),
+                # Why a non-successful job ended the way it did. The
+                # agent reports this under "error" (timeout / exception)
+                # or, for the dispatch-failure path, "message"; a
+                # command that simply exited non-zero has neither, so
+                # fall back to its stderr. Capped like "output" so one
+                # runaway job can't bloat every /jobs response.
+                "error": self._job_error_text(job, result),
+                "return_code": result.get("return_code"),
             })
             if limit is not None and len(jobs) >= limit:
                 break
         return jobs
+
+    @staticmethod
+    def _job_error_text(job, result):
+        """
+        Human-readable reason a job did not succeed, or None for a job
+        that is still pending/running or completed successfully. Never
+        fabricated: returns None when the result carries no error text.
+        """
+        if job.get("status") not in ("failed", "cancelled"):
+            return None
+        text = result.get("error") or result.get("message")
+        if not text:
+            text = result.get("stderr")
+        if not text:
+            return None
+        text = str(text)
+        return text if len(text) <= 4096 else text[:4096] + "... (truncated)"
 
     def get_storage(self):
         """
