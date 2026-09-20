@@ -68,7 +68,10 @@ class WebServer:
 
         # Versioned, API-key-authenticated public API — independent of
         # the dashboard's cookie-session auth used everywhere else.
-        self.api_v1_app = create_api_v1_app(self.management, self.presentation)
+        self.api_v1_app = create_api_v1_app(
+            self.management, self.presentation,
+            rate_limiter=self.login_rate_limiter, client_ip=self._client_ip,
+        )
         self.api_v1_app.add_middleware(SecurityHeadersMiddleware)
         cors_origins = [
             o.strip() for o in os.environ.get("GCON_API_CORS_ORIGINS", "").split(",") if o.strip()

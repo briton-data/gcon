@@ -1180,6 +1180,12 @@ class ManagementLayer:
         (CustomerUserRegistry.add_user's own check) -- surfaced
         as-is, a signup form is expected to show that directly.
         """
+        # Checked BEFORE the organization is created: add_user() below
+        # has the same check, but by then the org already exists, so a
+        # rejected duplicate signup used to leave an orphaned, member-
+        # less organization behind on every attempt.
+        if self.customer_registry.get_user_by_email(email) is not None:
+            raise ValueError(f"An account with email '{email}' already exists.")
         org = self.org_registry.add_organization(org_name, plan=plan)
         customer = self.customer_registry.add_user(name, email, org.org_id, password)
         key = self.api_key_manager.create_key(
