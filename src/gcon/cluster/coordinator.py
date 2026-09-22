@@ -2495,14 +2495,41 @@ class GCONCoordinator:
 
     def cancel_job(self, job_id):
         """
-        Cancel a specific running job by killing its process.
+        Cancel a specific job. Two cases:
+
+          - "running": kill its process on the worker (the original
+            behaviour of this method).
+          - "pending" (queued, not yet dispatched -- e.g. it needs a
+            GPU and no worker currently has one): there is no process
+            to kill, so this simply marks it cancelled directly. It is
+            deliberately left in self.job_queue rather than removed
+            (Queue has no way to remove one specific item): when the
+            scheduler eventually pops it, assign_job() already refuses
+            to dispatch a job whose status isn't still "pending" (the
+            same guard that protects against its own race with
+            scheduler_loop), so it is silently skipped instead of run.
+
+        Any other status (already completed/failed/cancelled) is
+        refused, same as before.
         """
         if job_id not in self.jobs:
             raise ValueError(f"Job '{job_id}' does not exist.")
 
         job = self.jobs[job_id]
+
+        if job["status"] == "pending":
+            with self.jobs_lock:
+                if job["status"] != "pending":       # lost a race with the scheduler picking it up
+                    raise ValueError(f"Job '{job_id}' is not pending or running (status: {job['status']}).")
+                job["status"] = "cancelled"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                job["cancel_requested"] = True
+            self._persist_job_status(job_id, job)
+            print(f"[JOB] Cancelled queued job '{job_id}' before it was dispatched.")
+            return False
+
         if job["status"] != "running":
-            raise ValueError(f"Job '{job_id}' is not running (status: {job['status']}).")
+            raise ValueError(f"Job '{job_id}' is not pending or running (status: {job['status']}).")
 
         job["cancel_requested"] = True
         node = self.registry.get_node(job["node_id"])
@@ -2576,6 +2603,81 @@ class GCONCoordinator:
             f"{deleted_from_db} from the durable store."
         )
         return cleared
+
+    # Statuses a customer may clear. Deliberately NOT "completed": a receipt has
+    # no organization of its own (it is attributed to an org only through its
+    # job), so deleting a completed job would strand its receipt -- it would
+    # drop out of the customer's evidence list and could no longer be opened.
+    # Failed and cancelled jobs never have receipts.
+    CLEARABLE_STATUSES = ("failed", "cancelled")
+
+    def clear_jobs_for_org(self, org_id, job_ids):
+        """
+        Permanently remove the given jobs for ONE organization. Unlike
+        clear_failed_jobs()/clear_completed_jobs() (staff tools that act on
+        every organization's jobs at once), this only ever touches jobs the
+        caller names explicitly, that belong to `org_id`, that are failed or
+        cancelled, and that have no receipt. Anything else is skipped with a
+        reason -- never deleted, never an error for the whole batch.
+
+        Deletes from the durable store as well as memory: memory alone would
+        let the job come straight back on the next restart (see
+        clear_failed_jobs).
+
+        Returns {"cleared": [job_id, ...], "skipped": [{"job_id", "reason"}, ...]}
+        where reason is "not_found" (also used for another org's job, so
+        job ids can't be probed), "not_clearable" or "has_receipt".
+        """
+        if not org_id:
+            raise ValueError("An organization is required to clear jobs.")
+        cleared, skipped, seen = [], [], set()
+        for job_id in job_ids:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            reason = self._clear_one_job_for_org(org_id, job_id)
+            if reason is None:
+                cleared.append(job_id)
+            else:
+                skipped.append({"job_id": job_id, "reason": reason})
+        if cleared:
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC), event_type="JOBS_CLEARED",
+                source="Coordinator", payload={"org_id": org_id, "job_ids": cleared},
+            ))
+            print(f"[JOBS] Org '{org_id}' cleared {len(cleared)} job(s).")
+        return {"cleared": cleared, "skipped": skipped}
+
+    def _clear_one_job_for_org(self, org_id, job_id):
+        # Evidence check first, outside jobs_lock (keeps lock order simple).
+        with self.receipts_lock:
+            has_receipt = job_id in self.receipts
+        if not has_receipt and self.control_plane is not None:
+            try:
+                has_receipt = bool(self.control_plane.receipts.list_for_job(job_id))
+            except Exception as e:
+                print(f"[WARN] Could not check receipts for '{job_id}': {e!r}")
+                return "has_receipt"       # can't prove there is none -> don't delete
+        with self.jobs_lock:
+            job = self.jobs.get(job_id)
+            row = None
+            if job is None:
+                row = self.control_plane.jobs.get(job_id) if self.control_plane is not None else None
+                owner, status = (row or {}).get("org_id"), (row or {}).get("status")
+                exists = row is not None
+            else:
+                owner, status, exists = job.get("org_id"), job.get("status"), True
+            if not exists or owner != org_id:
+                return "not_found"
+            if status not in self.CLEARABLE_STATUSES:
+                return "not_clearable"
+            if has_receipt:
+                return "has_receipt"
+            if self.control_plane is not None and self.control_plane.jobs.get(job_id) is not None:
+                if self.control_plane.jobs.delete_owned_terminal(job_id, org_id, self.CLEARABLE_STATUSES) == 0:
+                    return "not_clearable"   # its stored state changed under us
+            self.jobs.pop(job_id, None)
+        return None
 
     def retry_failed_jobs(self):
         """

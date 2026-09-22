@@ -13,8 +13,10 @@ available at /api/v1/docs (Swagger UI) and /api/v1/redoc, with the
 raw schema at /api/v1/openapi.json.
 """
 
+import logging
 import os
 import re
+import threading
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +26,10 @@ from pydantic import BaseModel, Field
 
 from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
 from gcon.management.rate_limit import LoginRateLimiter
+from gcon.management.auth import RESET_TOKEN_TTL_MINUTES
+from gcon.management.mailer import SmtpMailer, password_reset_message
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------
@@ -88,6 +94,31 @@ class JobOut(BaseModel):
         description="Why a failed/cancelled job ended, when the result carries one.",
     )
     return_code: Optional[int] = None
+
+
+class ClearJobsIn(BaseModel):
+    job_ids: List[str] = Field(
+        description="Jobs to clear. Named explicitly -- there is no 'clear everything' form.",
+    )
+
+
+class ClearSkippedOut(BaseModel):
+    job_id: str
+    reason: str = Field(description="'not_found', 'not_clearable' or 'has_receipt'")
+    message: str
+
+
+class ClearJobsOut(BaseModel):
+    cleared: List[str]
+    skipped: List[ClearSkippedOut]
+
+
+MAX_CLEAR_JOBS = 200
+_CLEAR_MESSAGES = {
+    "not_found": "This job was not found.",
+    "not_clearable": "Only failed or cancelled jobs can be cleared.",
+    "has_receipt": "This job has a receipt, and receipts are never deleted.",
+}
 
 
 class JobSubmitRequest(BaseModel):
@@ -250,21 +281,22 @@ class ForgotPasswordIn(BaseModel):
 
 class ForgotPasswordOut(BaseModel):
     """
-    No email service exists anywhere in this codebase, so a reset
-    token cannot yet be delivered to its rightful owner. By default
-    this route therefore issues NO token and reports
-    `delivery: "unavailable"`; the token is only returned when
-    GCON_EXPOSE_RESET_TOKEN is set (local development). Always the
-    same 200 for known and unknown emails, so it never reveals which
-    emails have accounts.
+    Password reset responses are deliberately identical for known and
+    unknown email addresses. When SMTP is configured, a single-use,
+    time-limited reset token is emailed to the account's address and is
+    never returned in the API response. In local development,
+    GCON_EXPOSE_RESET_TOKEN can be enabled to return the token directly.
+    If SMTP is not configured, no token is issued.
     """
     token: Optional[str] = None
     delivery: str = Field(
         default="unavailable",
         description=(
-            "'unavailable' (production default): no reset email can be sent yet "
-            "and no token is issued. 'dev_token': GCON_EXPOSE_RESET_TOKEN is set, "
-            "so the token is returned in this response -- local development only."
+            "'email': a reset link was emailed if the account exists (the same "
+            "answer is given for every address). 'unavailable': email isn't set up, "
+            "so nothing was sent and no token was issued. 'dev_token': "
+            "GCON_EXPOSE_RESET_TOKEN is set, so the token is returned in this "
+            "response -- local development only."
         ),
     )
 
@@ -303,7 +335,7 @@ def _validate_signup(payload):
     _validate_password(payload.password)
 
 
-def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None):
+def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None, mailer=None):
     """
     Build the /api/v1 sub-application. `management` is the shared
     ManagementLayer instance (for API key auth) and `presentation`
@@ -315,8 +347,11 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     LoginRateLimiter and trusted-proxy-aware IP resolver so /auth/login
     is throttled with the same configuration as the staff login. When
     omitted (tests, standalone use) a private in-process limiter and the
-    plain TCP peer address are used.
+    plain TCP peer address are used. `mailer` sends password-reset emails
+    (default: SmtpMailer, configured through GCON_SMTP_* environment variables).
     """
+    if mailer is None:
+        mailer = SmtpMailer()
     if rate_limiter is None:
         rate_limiter = LoginRateLimiter(db=getattr(management, "db", None))
     if client_ip is None:
@@ -456,37 +491,63 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             "api_key": session_key,
         }
 
+    def _deliver_reset_email(to, subject, body):
+        # Runs in a background thread: the response must not wait for (or
+        # reveal, by its timing) whether an email was actually sent. Nothing
+        # sensitive is logged -- the token only ever appears in `body`.
+        try:
+            mailer.send(to, subject, body)
+        except Exception as e:
+            log.error("Password reset email could not be sent (%s: %s)", type(e).__name__, str(e)[:200])
+
     @app.post(
         "/auth/forgot-password",
         response_model=ForgotPasswordOut,
         tags=["Auth"],
         summary="Request a password reset",
     )
-    def auth_forgot_password(payload: ForgotPasswordIn):
-        # No email service exists in this codebase, so there is no way
-        # to deliver a reset token to its rightful owner. Returning the
-        # token to whoever asked -- which this route used to do -- lets
-        # anyone who knows an email address reset that account's
-        # password (and, now that login issues an API key, take the
-        # account over). So by default NO token is created or returned,
-        # for any email, and the response says delivery is unavailable.
+    def auth_forgot_password(payload: ForgotPasswordIn, request: Request):
+        # Three modes, decided fresh on every call (environment is read live):
         #
-        # GCON_EXPOSE_RESET_TOKEN=1 restores the old behaviour for
-        # local development ONLY. Read live on every call (not frozen
-        # at import) so it can be flipped without a restart.
+        # 1. GCON_EXPOSE_RESET_TOKEN=1 -- local development ONLY: the token is
+        #    returned in the response so the flow can be tried without a mail
+        #    server. Never enable this in production: it lets anyone who knows
+        #    an email address take over that account.
+        # 2. Email configured (GCON_SMTP_HOST / _FROM, GCON_WEB_BASE_URL) -- the
+        #    real thing: create a single-use, time-limited token and EMAIL it to
+        #    the account's own address. The caller is never given the token.
+        # 3. Otherwise -- no way to deliver a token to its rightful owner, so none
+        #    is created; the response says so.
         #
-        # Either way the response is identical for known and unknown
-        # emails, so this cannot be used to discover which emails have
-        # accounts. A real deployment replaces the "unavailable" branch
-        # with: create the token, e-mail it, return {"token": None}.
+        # In every mode the answer is identical for known and unknown emails, so
+        # this can't be used to discover which addresses have accounts.
         expose = os.environ.get("GCON_EXPOSE_RESET_TOKEN", "").strip().lower() in ("1", "true", "yes")
-        if not expose:
+        if expose:
+            customer = management.customer_registry.get_user_by_email(payload.email)
+            if customer is None:
+                return {"token": None, "delivery": "dev_token"}
+            token = management.customer_reset_token_manager.create_token(customer.customer_user_id)
+            return {"token": token, "delivery": "dev_token"}
+
+        if not mailer.configured():
             return {"token": None, "delivery": "unavailable"}
+
+        # Every request counts against a per-address limit (whether or not the
+        # account exists), so this can't be used to flood someone's inbox.
+        limiter_key = f"customer-reset:{payload.email.strip().lower()}"
+        ip = client_ip(request)
+        try:
+            rate_limiter.check(limiter_key, ip)
+        except ValueError:
+            raise HTTPException(status_code=429, detail="Too many reset requests. Please wait a few minutes and try again.")
+        rate_limiter.record_failure(limiter_key, ip)
+
         customer = management.customer_registry.get_user_by_email(payload.email)
-        if customer is None:
-            return {"token": None, "delivery": "dev_token"}
-        token = management.customer_reset_token_manager.create_token(customer.customer_user_id)
-        return {"token": token, "delivery": "dev_token"}
+        if customer is not None:
+            token = management.customer_reset_token_manager.create_token(customer.customer_user_id)
+            subject, body = password_reset_message(getattr(customer, "name", ""), token, RESET_TOKEN_TTL_MINUTES)
+            threading.Thread(target=_deliver_reset_email, args=(customer.email, subject, body), daemon=True).start()
+        return {"token": None, "delivery": "email"}
 
     @app.post(
         "/auth/reset-password",
@@ -757,10 +818,41 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         return {"job_id": payload.job_id, "submitted": True}
 
     @app.post(
+        "/jobs/clear",
+        response_model=ClearJobsOut,
+        tags=["Jobs"],
+        summary="Permanently clear failed or cancelled jobs",
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}},
+    )
+    def clear_jobs(payload: ClearJobsIn, auth=Depends(require_scope("Submit workflows"))):
+        # Clears only the jobs named in the request, only if they belong to the
+        # caller's organization, are failed or cancelled, and have no receipt.
+        # Everything else comes back in `skipped` with a reason and is left
+        # untouched. Another organization's job id gets the same "not_found"
+        # as a job that doesn't exist, so ids can't be probed.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not org_id:
+            raise HTTPException(status_code=400, detail="Clearing jobs needs an organization account.")
+        ids = [j.strip() for j in payload.job_ids if isinstance(j, str) and j.strip()]
+        if not ids:
+            raise HTTPException(status_code=400, detail="Choose at least one job to clear.")
+        if len(ids) > MAX_CLEAR_JOBS:
+            raise HTTPException(status_code=400, detail=f"You can clear at most {MAX_CLEAR_JOBS} jobs at a time.")
+        try:
+            result = presentation.coordinator.clear_jobs_for_org(org_id, ids)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            "cleared": result["cleared"],
+            "skipped": [{**sk, "message": _CLEAR_MESSAGES.get(sk["reason"], "This job could not be cleared.")} for sk in result["skipped"]],
+        }
+
+    @app.post(
         "/jobs/{job_id}/cancel",
         response_model=JobCancelResponse,
         tags=["Jobs"],
-        summary="Cancel a running job",
+        summary="Cancel a queued or running job",
         responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def cancel_job(job_id: str, auth=Depends(require_scope("Submit workflows"))):

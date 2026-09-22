@@ -179,6 +179,26 @@ class JobRepository:
         cursor = self.db.execute("DELETE FROM jobs WHERE status = ?", (status,))
         return cursor.rowcount
 
+    def delete_owned_terminal(self, job_id: str, org_id: str, statuses) -> int:
+        """Permanently delete ONE job from the durable store, but only if it
+        belongs to `org_id` AND its stored status is still one of `statuses`
+        (all of which must be terminal). The ownership and status checks are
+        part of the DELETE itself, so a job that was retried, re-assigned or
+        belongs to another organization is simply not matched (returns 0)
+        rather than being deleted on the strength of an earlier check.
+        Attempts and logs go with it (ON DELETE CASCADE). Returns rows removed."""
+        if not org_id:
+            raise ValueError("an organization is required")
+        statuses = tuple(statuses)
+        if not statuses or any(s in ("pending", "running") for s in statuses):
+            raise ValueError("only terminal statuses may be deleted")
+        marks = ",".join("?" for _ in statuses)
+        cursor = self.db.execute(
+            f"DELETE FROM jobs WHERE job_id = ? AND org_id = ? AND status IN ({marks})",
+            (job_id, org_id, *statuses),
+        )
+        return cursor.rowcount
+
     def list_all(self) -> List[Dict[str, Any]]:
         rows = self.db.query("SELECT * FROM jobs ORDER BY submitted_at")
         return [self._row_to_dict(r) for r in rows]
