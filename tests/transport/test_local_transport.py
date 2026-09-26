@@ -59,7 +59,16 @@ def test_send_job_delegates_and_wraps_result():
 
     response = manager.send_job("node-1", "job-1", "echo hi", timeout=30)
 
-    assert response == {"status": "success", "result": {"status": "success", "stdout": "hi"}}
+    # attempt_id is always present (None on this transport -- see
+    # LocalTransport.send_job's docstring: no control_plane/wire
+    # request_message_id to key a durable job_attempts row on, unlike
+    # GrpcTransport) so callers can read response.get("attempt_id")
+    # uniformly across transports without a key-existence check.
+    assert response == {
+        "status": "success",
+        "result": {"status": "success", "stdout": "hi"},
+        "attempt_id": None,
+    }
     job_id, command, timeout, usage_report_path = node.executed_with
     assert (job_id, command, timeout) == ("job-1", "echo hi", 30)
     # Previously LocalTransport never generated a usage_report_path at
