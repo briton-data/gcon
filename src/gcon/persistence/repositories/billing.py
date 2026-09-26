@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
@@ -60,7 +59,7 @@ class InvoiceRepository:
                             item["amount_cents"],
                         ),
                     )
-        except sqlite3.IntegrityError:
+        except self.db.IntegrityError:
             existing = self.get_for_period(org_id, period_start, period_end)
             if existing is not None:
                 return existing

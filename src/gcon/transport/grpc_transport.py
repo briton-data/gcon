@@ -333,6 +333,14 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             auth_fingerprint=peer_cn,
             metadata={"capabilities": capabilities},
             org_id=org_id,
+            # `or None`: proto3 has no NULL for a string field, an
+            # older agent build with no keypair sends "" here, not
+            # nothing -- NodeRepository.upsert's COALESCE only
+            # protects an existing key from a real None, so passing
+            # "" straight through would silently wipe it on every
+            # reconnect from an agent that just hasn't been upgraded
+            # yet.
+            ed25519_public_key=request.ed25519_public_key_pem or None,
         )
         if capabilities:
             self.control_plane.node_capabilities.set_capabilities(
@@ -804,10 +812,54 @@ class GrpcTransport(Transport):
             result["error"] = jr.error
         if jr.metrics_json:
             result["metrics"] = _json.loads(jr.metrics_json)
+        # Raw pass-through only -- this is a transport, not the place
+        # to verify a signature or decide what it means for a receipt.
+        # Empty for an agent build with no keypair (see JobResult's
+        # own proto comment); coordinator.py's _run_job is what
+        # actually verifies this (against the node's registered
+        # public key) and embeds it into the receipt it creates.
+        if jr.worker_attestation_payload_json:
+            result["worker_attestation_payload_json"] = jr.worker_attestation_payload_json
+            result["worker_attestation_signature"] = jr.worker_attestation_signature
 
-        self.control_plane.jobs.set_status(job_id, jr.status, result=result, completed=True)
+        # Only the job's most recent attempt is allowed to write the
+        # durable job status. `attempt` (recorded above, before
+        # dispatch) vs. the latest row job_attempts has *now* tells us
+        # whether that's still true: if the coordinator has since
+        # reassigned this job to a newer attempt (recover_jobs after
+        # this node went quiet, or -- see coordinator.py's
+        # restore_from_persistence -- a fresh attempt created after a
+        # coordinator restart), a newer job_attempts row already
+        # exists the moment that redispatch happens, even before it
+        # finishes. This result is stale in that case: writing it here
+        # would overwrite a job's durable status with an outcome from
+        # an attempt that's no longer authoritative -- and unlike the
+        # in-memory job dict (which _run_job's own attempt_number
+        # fencing protects -- see its docstring), a bad write here is
+        # durable, so a crash landing before the real current
+        # attempt's own completion overwrites it back could leave it
+        # wrong permanently, not just transiently.
+        latest_attempts = self.control_plane.job_attempts.list_for_job(job_id)
+        is_latest_attempt = bool(latest_attempts) and latest_attempts[-1]["attempt_id"] == attempt["attempt_id"]
+        if is_latest_attempt:
+            self.control_plane.jobs.set_status(job_id, jr.status, result=result, completed=True)
+        else:
+            logger.warning(
+                "Discarding a stale job-status write for job_id=%s "
+                "attempt_id=%s -- a newer attempt already exists.",
+                job_id, attempt["attempt_id"],
+            )
 
-        return {"status": "success", "result": result}
+        # attempt_id was already durably recorded above (record_attempt,
+        # before dispatch) and marked completed/failed by
+        # AgentControlServicer's job_result handler once jr arrived --
+        # surfaced here too so the coordinator can bind whichever
+        # receipt it creates from `result` to the specific attempt that
+        # actually produced it (see JobAttemptRepository's module
+        # docstring), instead of the receipts.attempt_id column staying
+        # permanently None the way it did before this was threaded
+        # through.
+        return {"status": "success", "result": result, "attempt_id": attempt["attempt_id"]}
 
     def cancel_job(self, node_id: str, job_id: str) -> bool:
         try:

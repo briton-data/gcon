@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from gcon.persistence.db import ControlPlaneDatabase, Dialect
+from gcon.config import resolve_control_plane_postgres_dsn
+from gcon.persistence.db import ControlPlaneDatabase, Dialect, PostgresDialect
 from gcon.persistence.repositories import (
     NodeRepository,
     NodeCapabilityRepository,
@@ -27,11 +28,24 @@ from gcon.persistence.repositories import (
     EnrollTokenRepository,
     TelemetryRepository,
     NodeEnrollmentAuditRepository,
+    IdempotencyKeyRepository,
 )
 
 
 class ControlPlane:
     def __init__(self, path: Optional[str] = None, dialect: Optional[Dialect] = None):
+        # An explicit `dialect` (or an explicit `path` with no
+        # dialect override -- unchanged existing behavior, defaults to
+        # SQLite) always wins. Only when neither is given do we check
+        # GCON_CONTROL_PLANE_DATABASE_URL and, if it's set, connect to
+        # that Postgres server instead -- this is opt-in, so every
+        # existing single-host deployment that's never heard of this
+        # keeps working exactly as before with zero config changes.
+        if dialect is None and path is None:
+            dsn = resolve_control_plane_postgres_dsn()
+            if dsn:
+                dialect = PostgresDialect()
+                path = dsn
         self.db = ControlPlaneDatabase(path=path, dialect=dialect)
 
         self.nodes = NodeRepository(self.db)
@@ -50,6 +64,7 @@ class ControlPlane:
         self.enroll_tokens = EnrollTokenRepository(self.db)
         self.telemetry_events = TelemetryRepository(self.db)
         self.node_enrollment_audit = NodeEnrollmentAuditRepository(self.db)
+        self.idempotency_keys = IdempotencyKeyRepository(self.db)
 
     def close(self) -> None:
         self.db.close()

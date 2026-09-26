@@ -133,7 +133,8 @@ class GconClient:
                     stages: Optional[Dict[str, Any]] = None,
                     dataset_artifacts: Optional[List[str]] = None,
                     callback_url: Optional[str] = None,
-                    verify: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    verify: Optional[Dict[str, Any]] = None,
+                    idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """
         Submit a new job to the cluster.
 
@@ -161,6 +162,16 @@ class GconClient:
                 {"replicas": 2, "tolerance": 0.02}. Orthogonal to
                 kind/requires/stages -- a resourced or staged job can
                 also ask for replication.
+            idempotency_key: if you're retrying a submission whose
+                original outcome is unknown (e.g. the request timed
+                out, or your process died before it saw the
+                response), pass the SAME key you used the first time
+                and you'll get back that original job (even if
+                `job_id` here is a new one you generated for this
+                retry attempt) instead of risking a second job being
+                created. Durable server-side, scoped to your
+                organization -- a fresh key always creates a new job,
+                same as leaving this unset.
 
         Raises GconAPIError with status_code=400 if the submission is
         rejected by server-side policy (e.g. a `requires`/`verify`
@@ -180,7 +191,14 @@ class GconClient:
             payload["callback_url"] = callback_url
         if verify is not None:
             payload["verify"] = verify
-        return self._request("POST", "/jobs", json=payload)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self._request("POST", "/jobs", json=payload, headers=headers)
+
+    def get_job_attempts(self, job_id: str) -> List[Dict[str, Any]]:
+        """Durable dispatch-attempt history for a job -- attempt
+        number, node, status, dispatched/completed timestamps, most
+        recent first."""
+        return self._request("GET", f"/jobs/{job_id}/attempts")
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
         """Cancel a running job."""

@@ -452,4 +452,57 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_node_enrollment_audit_node ON node_enrollment_audit (node_id, created_at)",
         ],
     ),
+    Migration(
+        version=8,
+        name="job_submission_idempotency_keys",
+        up_sql=[
+            # Durable API-level idempotency for POST /jobs. Before
+            # this, a client retrying a submission after a dropped
+            # response (or any other ambiguous-outcome situation) had
+            # no way to safely retry with an Idempotency-Key and get
+            # back the SAME job rather than risk creating a second
+            # one -- job_id uniqueness alone doesn't cover this: a
+            # client that generates a fresh job_id per retry attempt
+            # (a very ordinary thing to do) sails right past the
+            # existing "job_id already exists" check in submit_job.
+            # Deliberately its own small table rather than a column on
+            # `jobs`, since a job has at most one idempotency key but
+            # an idempotency key can only ever resolve to one job --
+            # the natural direction for the lookup this exists to
+            # serve (key -> job_id) is the table's own primary key.
+            # Scoped by (org_id, idempotency_key) rather than the key
+            # alone: two different orgs' clients could coincidentally
+            # pick the same key string, and API keys are already
+            # org-scoped, so nothing stops that from happening in the
+            # wild.
+            """
+            CREATE TABLE job_submission_idempotency_keys (
+                org_id           TEXT NOT NULL DEFAULT '',
+                idempotency_key  TEXT NOT NULL,
+                job_id           TEXT NOT NULL REFERENCES jobs (job_id) ON DELETE CASCADE,
+                created_at       TEXT NOT NULL,
+                PRIMARY KEY (org_id, idempotency_key)
+            )
+            """,
+        ],
+    ),
+    Migration(
+        version=9,
+        name="node_ed25519_public_key",
+        up_sql=[
+            # This node's own Ed25519 public key, as registered at
+            # Register() time (see RegisterRequest.
+            # ed25519_public_key_pem and gcon.execution.
+            # worker_identity) -- what lets a receipt's
+            # worker_attestation block be independently verified
+            # later, against the specific key that was on file when
+            # the attestation was made, not whatever key (if any) the
+            # node happens to present today. NULL for a node that
+            # hasn't registered one (older agent build, or a
+            # transport with no per-node identity at all) -- real,
+            # not an error; that node's receipts simply carry no
+            # worker_attestation block.
+            "ALTER TABLE nodes ADD COLUMN ed25519_public_key TEXT",
+        ],
+    ),
 ]

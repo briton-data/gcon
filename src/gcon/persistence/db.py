@@ -38,6 +38,27 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+
+# Portable "this violated a UNIQUE/PK/FK constraint" exception type,
+# for repositories that intentionally race an INSERT against a
+# concurrent duplicate and need to catch just that (see
+# JobAttemptRepository.record_attempt's docstring for why: losing
+# that race is expected and handled, not a real error). sqlite3 and
+# psycopg raise different, unrelated exception classes for the same
+# underlying condition; repositories that only ever caught
+# sqlite3.IntegrityError directly would silently stop catching this
+# at all the moment a coordinator is Postgres-backed (see
+# PostgresDialect), letting a real, expected race propagate as an
+# unhandled error instead of falling back to "read back what the
+# winner wrote". psycopg is an optional dependency (only installed
+# for `pip install gcon[postgres]`), so this degrades gracefully to
+# just sqlite3.IntegrityError when it isn't present -- exactly the
+# set of engines actually in play for that process either way.
+try:
+    import psycopg.errors as _psycopg_errors
+    IntegrityError: "tuple" = (sqlite3.IntegrityError, _psycopg_errors.IntegrityError)
+except ImportError:
+    IntegrityError: "tuple" = (sqlite3.IntegrityError,)
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -91,13 +112,14 @@ class SQLiteDialect(Dialect):
 
 class PostgresDialect(Dialect):
     """
-    Not wired to a live driver in this codebase (no network-accessible
-    Postgres in this deployment target), but exists so the migration
-    registry and repositories can be exercised against the intended
-    production dialect string today, ahead of adding `psycopg` as a
-    dependency. Swapping `ControlPlaneDatabase` to open a psycopg
-    connection instead of `sqlite3.connect`, translating `?` -> `%s`
-    placeholders, and selecting this dialect is the entire migration.
+    Wired to a live driver (psycopg 3, `pip install gcon[postgres]`)
+    by ControlPlaneDatabase.__init__ -- see its docstring for how a
+    ControlPlaneDatabase is told to use this dialect. This is the
+    real, network-shared backend genuine cross-host coordinator HA
+    depends on: leader election and job state can only be shared
+    across separate machines through a database those machines can
+    all actually reach over the network, which a local SQLite file
+    never can be.
     """
 
     def __init__(self):
@@ -111,6 +133,68 @@ def render_migration_sql(sql: str, dialect: Dialect) -> str:
     return sql.replace("{{PK}}", dialect.pk_ddl())
 
 
+class _PsycopgConnectionShim:
+    """
+    Makes a psycopg3 Connection behave like sqlite3.Connection's
+    convenience API: sqlite3.Connection.execute()/.executemany() are
+    shortcuts that implicitly open a cursor and hand it back;
+    psycopg3's Connection has no such shortcut at all (you get a
+    cursor from conn.cursor(), then call .execute() on *that*). Every
+    repository file (there are about a dozen) and ControlPlaneDatabase
+    itself were written entirely against the sqlite3 shortcut --
+    `db.execute(...)`, `with db.transaction() as conn: conn.execute(...)`
+    -- since SQLite was the only backend that existed. Rewriting every
+    one of those call sites to open its own cursor is exactly the
+    "rewrite, not a driver change" this module's docstring already
+    said this migration should not be; this shim is the one seam that
+    keeps it a driver change: everything above ControlPlaneDatabase
+    keeps calling conn.execute(sql, params) exactly as before,
+    unaware the connection underneath is psycopg for a Postgres-backed
+    coordinator.
+
+    Also handles the other two real SQLite/psycopg differences that
+    would otherwise leak into every repository:
+      * Placeholders: SQLite uses `?`, psycopg uses `%s`. Translated
+        here, once, so no repository's SQL string needs to change.
+        Safe as a blind replace in this codebase specifically --
+        checked (grep) that no query anywhere embeds a literal `?`
+        inside a string constant; every `?` in every query here is a
+        bound-parameter placeholder.
+      * Row shape: connected with row_factory=dict_row (see
+        ControlPlaneDatabase.__init__), so fetchone()/fetchall() hand
+        back real dicts -- both `row["col"]` and `dict(row)`, the two
+        access patterns already used throughout the repositories
+        (written against sqlite3.Row, which supports both), keep
+        working unchanged.
+    """
+
+    def __init__(self, raw_conn):
+        self._raw = raw_conn
+
+    @staticmethod
+    def _translate(sql):
+        return sql.replace("?", "%s")
+
+    def execute(self, sql, params=()):
+        cur = self._raw.cursor()
+        cur.execute(self._translate(sql), params)
+        return cur
+
+    def executemany(self, sql, seq_of_params):
+        cur = self._raw.cursor()
+        cur.executemany(self._translate(sql), seq_of_params)
+        return cur
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+
 class ControlPlaneDatabase:
     """
     One connection, shared by every control-plane repository
@@ -120,22 +204,65 @@ class ControlPlaneDatabase:
     coordinator's durable cluster state.
     """
 
+    # Exposed here (not just importable from this module) so a
+    # repository holding `self.db` can write `except self.db.
+    # IntegrityError:` without a separate import -- see the module-
+    # level IntegrityError's own comment for why this needs to be
+    # dialect-portable rather than sqlite3.IntegrityError directly.
+    IntegrityError = IntegrityError
+
     def __init__(self, path: str | None = None, dialect: Dialect | None = None):
-        self.path = resolve_control_plane_db_path(path)
         self.dialect = dialect or SQLiteDialect()
-
-        if self.path != ":memory:":
-            directory = os.path.dirname(self.path)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+
+        if self.dialect.name == "postgres":
+            # `path` is repurposed as a libpq connection string/DSN
+            # here (e.g. "postgresql://user:pass@host:5432/dbname")
+            # rather than a filesystem path -- see
+            # gcon.config.resolve_control_plane_db_dsn, which is what
+            # actually decides whether a coordinator uses SQLite or
+            # Postgres and supplies this value. Multiple
+            # ControlPlaneDatabase instances (on separate hosts, in
+            # separate coordinator processes) pointed at the same DSN
+            # is the entire point: unlike a local SQLite file, this is
+            # the one thing they can all genuinely share over the
+            # network, which is what real cross-host leader
+            # election/job-state HA depends on.
+            if path is None:
+                raise ValueError(
+                    "PostgresDialect requires `path` to be a libpq "
+                    "connection string (e.g. "
+                    "'postgresql://user:pass@host:5432/dbname'), not None."
+                )
+            self.path = path
+            try:
+                import psycopg
+                from psycopg.rows import dict_row
+            except ImportError as e:
+                raise RuntimeError(
+                    "PostgresDialect was selected but the `psycopg` "
+                    "driver isn't installed. Install it with "
+                    "`pip install gcon[postgres]` (or `pip install "
+                    "'psycopg[binary]>=3.1'` directly)."
+                ) from e
+            raw_conn = psycopg.connect(self.path, autocommit=False, row_factory=dict_row)
+            self._conn = _PsycopgConnectionShim(raw_conn)
+            # Postgres always enforces foreign keys and has its own
+            # durability guarantees (WAL-based, fsync by default) --
+            # there's no PRAGMA equivalent to set, and none of the
+            # SQLite-specific ones below apply.
+        else:
+            self.path = resolve_control_plane_db_path(path)
+            if self.path != ":memory:":
+                directory = os.path.dirname(self.path)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+            self._conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=FULL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA busy_timeout=5000")
 
         self._migrate()
 

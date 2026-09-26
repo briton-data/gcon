@@ -80,7 +80,15 @@ class LocalTransport(Transport):
             job_id, command, timeout=timeout, usage_report_path=usage_report_path
         )
 
-        return {"status": "success", "result": result}
+        # No JobAttemptRepository durable identity on this path --
+        # LocalTransport is the in-process dev/test transport (no
+        # control_plane guarantee, no wire-level request_message_id to
+        # key an attempt row on); production always dispatches through
+        # GrpcTransport, which does record a real attempt (see its
+        # send_job). attempt_id is still present in the return shape,
+        # as None, so callers can handle both transports uniformly
+        # without a hasattr/key-existence check.
+        return {"status": "success", "result": result, "attempt_id": None}
 
     def cancel_job(self, node_id: str, job_id: str) -> bool:
         node = self.get_node(node_id)

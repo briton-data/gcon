@@ -31,6 +31,7 @@ class NodeRepository:
         auth_fingerprint: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         org_id: Optional[str] = None,
+        ed25519_public_key: Optional[str] = None,
     ) -> None:
         """
         Idempotent registration: safe to call every time an agent
@@ -45,6 +46,15 @@ class NodeRepository:
         agent that, for whatever reason, registers without repeating
         its org_id should not silently wipe the durable record of
         which company it belongs to.
+
+        `ed25519_public_key` (see gcon.execution.worker_identity) gets
+        the same treatment, for the same reason: an agent build old
+        enough to have no keypair at all shouldn't wipe a key a newer
+        build of the same node already registered, but a node that
+        regenerates its keypair (lost its key file, was reimaged)
+        should have the new one take over on its next reconnect, not
+        get stuck being verified against a key it can no longer sign
+        with.
         """
         now = datetime.now(UTC).isoformat()
         existing = self.get(node_id)
@@ -56,8 +66,9 @@ class NodeRepository:
                     INSERT INTO nodes (
                         node_id, hostname, status, transport_endpoint,
                         agent_version, auth_fingerprint, registered_at,
-                        last_seen_at, draining, metadata_json, org_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                        last_seen_at, draining, metadata_json, org_id,
+                        ed25519_public_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                     """,
                     (
                         node_id,
@@ -70,6 +81,7 @@ class NodeRepository:
                         now,
                         json.dumps(metadata or {}),
                         org_id,
+                        ed25519_public_key,
                     ),
                 )
             else:
@@ -79,7 +91,8 @@ class NodeRepository:
                     SET hostname = ?, status = ?, transport_endpoint = ?,
                         agent_version = ?, auth_fingerprint = ?,
                         last_seen_at = ?, metadata_json = ?,
-                        org_id = COALESCE(?, org_id)
+                        org_id = COALESCE(?, org_id),
+                        ed25519_public_key = COALESCE(?, ed25519_public_key)
                     WHERE node_id = ?
                     """,
                     (
@@ -91,6 +104,7 @@ class NodeRepository:
                         now,
                         json.dumps(metadata or {}),
                         org_id,
+                        ed25519_public_key,
                         node_id,
                     ),
                 )

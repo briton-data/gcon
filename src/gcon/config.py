@@ -60,3 +60,23 @@ def resolve_legacy_db_path(explicit: "str | None" = None) -> str:
     if env_override:
         return env_override
     return os.path.join(resolve_data_dir(), LEGACY_DB_FILENAME)
+
+
+def resolve_control_plane_postgres_dsn() -> "str | None":
+    """
+    GCON_CONTROL_PLANE_DATABASE_URL, if set, is a libpq connection
+    string (e.g. "postgresql://user:pass@host:5432/dbname") for the
+    control plane's real, network-shared backend -- the one multiple
+    coordinator processes on *separate hosts* can actually share, for
+    genuine cross-host leader election/job-state HA. A local SQLite
+    file, no matter how it's configured via the functions above, can
+    never be that: it's how every coordinator still defaults to
+    running today, single-host, when this isn't set. Kept separate
+    from resolve_control_plane_db_path (SQLite's own resolution,
+    unchanged) rather than folded into it, since this isn't a "where
+    does the file live" question -- it's "which engine, and which
+    server" -- and ControlPlane.__init__ is what actually decides,
+    from this return value, whether to build a PostgresDialect or the
+    existing SQLiteDialect default.
+    """
+    return os.environ.get("GCON_CONTROL_PLANE_DATABASE_URL") or None

@@ -77,6 +77,37 @@ class PresentationLayer:
             return []
         return self.coordinator.control_plane.node_enrollment_audit.list_for_node(node_id)
 
+    def get_idempotent_job_id(self, org_id, idempotency_key):
+        """
+        Returns the job_id already recorded for (org_id,
+        idempotency_key), or None if this key hasn't been used before
+        -- see the job_submission_idempotency_keys migration and
+        IdempotencyKeyRepository for the full reasoning. Durable
+        idempotency needs somewhere durable to check against: a
+        coordinator with no control_plane (LocalTransport-only, e.g.
+        most tests) has no way to offer this at all, so it's treated
+        as "key not seen yet" rather than an error -- the caller falls
+        through to an ordinary (non-idempotent) submission in that
+        configuration, same as it always has.
+        """
+        if self.coordinator.control_plane is None:
+            return None
+        return self.coordinator.control_plane.idempotency_keys.get_job_id(org_id, idempotency_key)
+
+    def record_idempotency_key(self, org_id, idempotency_key, job_id):
+        if self.coordinator.control_plane is None:
+            return
+        self.coordinator.control_plane.idempotency_keys.record(
+            org_id, idempotency_key, job_id, datetime.now(UTC).isoformat(),
+        )
+
+    def get_job_attempts(self, job_id):
+        """
+        Durable dispatch-attempt history for one job -- see
+        coordinator.get_job_attempts's docstring.
+        """
+        return self.coordinator.get_job_attempts(job_id)
+
     def get_jobs(self, status=None, limit=None, org_id=None):
         """
         Return information about all jobs, newest first.

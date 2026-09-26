@@ -12,7 +12,6 @@ just at the transport layer.
 
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
@@ -66,7 +65,7 @@ class JobAttemptRepository:
                         now,
                     ),
                 )
-            except sqlite3.IntegrityError:
+            except self.db.IntegrityError:
                 # Lost a race with a concurrent duplicate dispatch of the
                 # same request_message_id -- fall through and read back
                 # whichever row actually won.

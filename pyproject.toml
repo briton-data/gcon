@@ -58,6 +58,9 @@ docs = [
     "sphinx>=4.0",
     "sphinx-rtd-theme>=1.0"
 ]
+postgres = [
+    "psycopg[binary]>=3.1"
+]
 
 [project.urls]
 "Homepage" = "https://github.com/briton-data/gcon"

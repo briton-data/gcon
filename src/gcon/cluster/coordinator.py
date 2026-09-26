@@ -3,6 +3,7 @@ import threading
 import socket
 import uuid
 import itertools
+import json
 import os
 from collections import deque
 from queue import Queue
@@ -193,6 +194,21 @@ class GCONCoordinator:
         self._max_concurrent_jobs_per_org = int(
             os.environ.get("GCON_MAX_CONCURRENT_JOBS_PER_ORG", "0")
         )
+        # recover_jobs() (worker-loss reassignment) and retry_job/
+        # retry_failed_jobs (manual retry) previously had no cap at
+        # all -- a job that fails deterministically (bad command, a
+        # node that always dies on it, etc.) would retry forever,
+        # each pass indistinguishable from the last with nothing
+        # durable recording how many times it had already been tried.
+        # job["attempt_number"] (incremented once per dispatch, in
+        # assign_job -- the single choke point every dispatch/retry
+        # already goes through) is the cap's source of truth; it's a
+        # transport-agnostic in-memory counter so the cap works the
+        # same under GrpcTransport and LocalTransport, unlike the
+        # durable job_attempts table (GrpcTransport/control_plane
+        # only -- see JobAttemptRepository), which is used for
+        # receipt binding, not for this.
+        self._max_job_attempts = int(os.environ.get("GCON_MAX_JOB_ATTEMPTS", "3"))
         # Consecutive receipt-verification failures (see
         # _commit_receipt_verification) that auto-quarantine a node --
         # see registry.py's set_quarantined for what that actually
@@ -388,26 +404,84 @@ class GCONCoordinator:
         # (we have no way to know which node, if any, was still working
         # on them). Left alone they would sit in self.jobs forever
         # showing a stale "pending"/"running" status that no longer
-        # reflects reality, invisible to any recovery path. Mark them
-        # failed instead -- both in memory and back in the control
-        # plane -- so they show up as needing resubmission rather than
-        # silently never finishing.
+        # reflects reality, invisible to any recovery path.
+        #
+        # These used to be unconditionally marked "failed" here,
+        # requiring the customer to resubmit. They're now re-dispatched
+        # as a fresh, durably-recorded attempt instead, using the same
+        # job_attempts model _run_job/recover_jobs already use --
+        # queue_job() puts them back through the ordinary
+        # scheduler_loop -> assign_job() -> _run_job() path, so the new
+        # attempt is created and numbered by the exact same mechanism
+        # (JobAttemptRepository.record_attempt, called from
+        # GrpcTransport.send_job) as every other retry, not a special
+        # restart-only code path. Two cases still can't be safely
+        # auto-resumed, and are reconciled the old way (failed, needs
+        # resubmission) with a specific, accurate reason instead of the
+        # old generic message:
+        #
+        # 1. Replicated (verify=N) jobs. The jobs table has no column
+        #    for verify config (replica count, tolerance) -- it was
+        #    never durably persisted anywhere, not even as an event
+        #    payload (checked). Silently re-dispatching such a job as
+        #    plain single-node would quietly downgrade a customer's
+        #    requested multi-witness assurance to none, with no
+        #    indication that happened -- worse than failing it
+        #    outright. Detecting "this was replicated" doesn't need
+        #    that missing config, though: _run_replicated_job dispatches
+        #    all N replicas in parallel and only writes any final state
+        #    once every one of them has resolved (join()s all N
+        #    threads first) -- so more than one job_attempts row still
+        #    sitting at status='dispatched' for the same job_id is only
+        #    possible if it was a replicated dispatch; a single-node
+        #    job can never have more than one attempt in flight at once
+        #    (the next attempt only ever gets created after the
+        #    previous one's thread has already finished, via
+        #    recover_jobs's explicit reset+reassign). This needs no
+        #    stored verify config to detect correctly -- it falls
+        #    straight out of the durable attempt shape.
+        # 2. Jobs that had already reached (or would immediately
+        #    re-reach) the max-attempts cap -- resuming them once more
+        #    just to immediately hit GCON_MAX_JOB_ATTEMPTS on the very
+        #    next loss would be pointless and inconsistent with how
+        #    recover_jobs/retry_job enforce the same cap.
         interrupted_statuses = {"pending", "running"}
-        reconciled = 0
+        resumed = 0
+        reconciled_failed = 0
         for job_id, job in self.jobs.items():
             if job["status"] not in interrupted_statuses:
                 continue
-            job["status"] = "failed"
-            job["completed_at"] = datetime.now(UTC).isoformat()
-            job["result"] = {
-                "error": (
-                    "Job was still in flight when the coordinator was "
-                    "last restarted and was not resumed; it will need "
-                    "to be resubmitted."
+
+            try:
+                attempts = self.control_plane.job_attempts.list_for_job(job_id)
+            except Exception as e:
+                print(f"[RESTORE] Failed to load attempt history for '{job_id}': {e!r}")
+                attempts = []
+
+            open_attempts = [a for a in attempts if a["status"] == "dispatched"]
+            failure_reason = None
+            if len(open_attempts) > 1:
+                failure_reason = (
+                    "Job was mid-flight as a replicated (multi-witness) "
+                    "execution when the coordinator restarted. "
+                    "Verification config is not preserved across a "
+                    "restart, so it cannot be safely resumed "
+                    "automatically -- resubmit with the same verify "
+                    "parameters."
                 )
-            }
-            reconciled += 1
-            if self.control_plane is not None:
+            elif len(attempts) >= self._max_job_attempts:
+                failure_reason = (
+                    f"Job had already reached the max attempt limit "
+                    f"({self._max_job_attempts}) across restarts and "
+                    "will not be resumed automatically. Resubmit it as "
+                    "a new job if you want to try again."
+                )
+
+            if failure_reason is not None:
+                job["status"] = "failed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                job["result"] = {"error": failure_reason}
+                reconciled_failed += 1
                 try:
                     self.control_plane.jobs.set_status(
                         job_id, "failed", result=job["result"], completed=True,
@@ -417,10 +491,46 @@ class GCONCoordinator:
                         f"[RESTORE] Failed to persist reconciled status "
                         f"for job {job_id}: {e!r}"
                     )
-        if reconciled:
+                continue
+
+            # Safe to resume: seed the in-memory attempt counter from
+            # durable history (so GCON_MAX_JOB_ATTEMPTS keeps counting
+            # across restarts instead of silently getting a fresh
+            # budget -- see the cap check above, which already used
+            # this same count) and re-queue for a fresh dispatch.
+            # queue_job() -> scheduler_loop() -> assign_job() is the
+            # exact same path every other retry already goes through;
+            # assign_job() increments attempt_number itself, and
+            # send_job() records the new job_attempts row -- nothing
+            # here creates either directly, so a late completion from
+            # the pre-crash attempt (job_attempts already correctly
+            # scopes it by attempt_id; GrpcTransport.send_job's
+            # is_latest_attempt check -- see its comment -- refuses to
+            # let it overwrite the durable job status once this new
+            # attempt exists) can't clobber the resumed attempt's
+            # outcome or receipt.
+            job["attempt_number"] = len(attempts)
+            job["status"] = "pending"
+            job["node_id"] = None
+            try:
+                self.control_plane.jobs.set_status(job_id, "pending", completed=False)
+            except Exception as e:
+                print(f"[RESTORE] Failed to persist resumed status for '{job_id}': {e!r}")
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC),
+                event_type="JOB_RESUMED_AFTER_RESTART",
+                source="Coordinator",
+                payload={"job_id": job_id, "prior_attempts": len(attempts)},
+            ))
+            self.queue_job(job_id)
+            resumed += 1
+
+        if resumed:
+            print(f"[RESTORE] Re-queued {resumed} in-flight job(s) for a fresh attempt after coordinator restart.")
+        if reconciled_failed:
             print(
-                f"[RESTORE] Marked {reconciled} in-flight job(s) as "
-                "failed after coordinator restart (interrupted, not resumed)."
+                f"[RESTORE] Marked {reconciled_failed} in-flight job(s) as "
+                "failed after coordinator restart (could not be safely resumed)."
             )
 
         try:
@@ -772,6 +882,15 @@ class GCONCoordinator:
     )
             return
 
+        # Every real dispatch -- first attempt or a retry -- passes
+        # through here exactly once (submit_job only ever queues;
+        # scheduler_loop and recover_jobs are the only two callers of
+        # assign_job itself). Counting here, not at each individual
+        # call site, is what makes the cap in recover_jobs/retry_job/
+        # retry_failed_jobs correct regardless of which of those
+        # queued this particular pass.
+        job["attempt_number"] = job.get("attempt_number", 0) + 1
+
         verify_cfg = job.get("verify")
         if verify_cfg:
             self._assign_replicated_job(job_id, job, verify_cfg)
@@ -821,10 +940,17 @@ class GCONCoordinator:
 
         job["status"] = "running"
         job["node_id"] = node.node_id
-        
+
+        # Captured now, not read fresh inside the thread -- this is
+        # the specific attempt this dispatch IS, fixed at launch time,
+        # so _run_job can tell a late/stale outcome (the job having
+        # since moved to a newer attempt) from its own current one.
+        # See _run_job's docstring.
+        dispatch_attempt_number = job["attempt_number"]
+
         thread = threading.Thread(
         target=self._run_job,
-        args=(node, job_id),
+        args=(node, job_id, dispatch_attempt_number),
         daemon=True
     )
 
@@ -914,9 +1040,18 @@ class GCONCoordinator:
         job["node_id"] = nodes[0].node_id
         job["replica_node_ids"] = [n.node_id for n in nodes]
 
+        # Captured now, not read fresh inside the thread -- same
+        # reasoning as the single-node path's dispatch_attempt_number
+        # (see _run_job's docstring): this group dispatch IS attempt
+        # dispatch_attempt_number, fixed at launch time, so
+        # _run_replicated_job can tell a late/stale group outcome (the
+        # job having since moved to a newer attempt) from its own
+        # current one.
+        dispatch_attempt_number = job["attempt_number"]
+
         thread = threading.Thread(
             target=self._run_replicated_job,
-            args=(nodes, job_id),
+            args=(nodes, job_id, dispatch_attempt_number),
             daemon=True,
         )
 
@@ -962,6 +1097,47 @@ class GCONCoordinator:
         if info is None:
             return None
         return info.get("auth_fingerprint")
+
+    def _build_worker_attestation(self, result, node_id):
+        """
+        Turns the raw worker_attestation_payload_json/
+        worker_attestation_signature fields GrpcTransport.send_job
+        passed through (see its own comment -- transport just moves
+        bytes, doesn't verify them) into the dict
+        verifier.create_receipt expects, by looking up node_id's
+        currently-registered Ed25519 public key (see
+        gcon.execution.worker_identity and the node_ed25519_public_key
+        migration) and attaching it alongside.
+
+        Returns None -- not an error -- when there's nothing to
+        attach: no attestation on this result at all (older agent
+        build, or LocalTransport, which has no per-node identity), no
+        control_plane to look a public key up in, or no public key on
+        file for this node. create_receipt treats None as "no
+        worker_attestation block," not "attested and empty."
+        Deliberately does NOT verify the signature here -- that's
+        validate_worker_attestation's job, on demand, every time it's
+        asked, never a value computed once and trusted forever (see
+        its own docstring for why).
+        """
+        payload_json = result.get("worker_attestation_payload_json")
+        signature = result.get("worker_attestation_signature")
+        if not payload_json or not signature or self.control_plane is None:
+            return None
+        try:
+            info = self.control_plane.nodes.get(node_id)
+        except Exception as e:
+            print(f"[WARN] Could not look up ed25519_public_key for '{node_id}': {e!r}")
+            return None
+        public_key_pem = info.get("ed25519_public_key") if info else None
+        if not public_key_pem:
+            return None
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError) as e:
+            print(f"[WARN] Malformed worker_attestation_payload_json for '{node_id}': {e!r}")
+            return None
+        return {"payload": payload, "signature": signature, "public_key_pem": public_key_pem}
 
     def receive_receipt(self, job_id, receipt):
         """
@@ -1306,6 +1482,45 @@ class GCONCoordinator:
 
                 if job["node_id"] == node_id and job["status"] == "running":
 
+                    if job.get("attempt_number", 0) >= self._max_job_attempts:
+                        # Already tried self._max_job_attempts times
+                        # (assign_job increments attempt_number on
+                        # every dispatch, including this job's
+                        # original one) -- reassigning again would be
+                        # an unbounded retry loop for a job that keeps
+                        # losing its worker or keeps failing. Mark it
+                        # permanently failed instead, with a message
+                        # that says why, rather than silently retrying
+                        # forever or leaving it stuck.
+                        print(
+                            f"Job '{job_id}' lost node '{node_id}' after "
+                            f"{job.get('attempt_number', 0)} attempt(s) -- "
+                            f"max ({self._max_job_attempts}) reached, not retrying."
+                        )
+                        job["status"] = "failed"
+                        job["node_id"] = None
+                        job["completed_at"] = datetime.now(UTC).isoformat()
+                        job["result"] = {
+                            "status": "error",
+                            "message": (
+                                f"Exceeded max attempts "
+                                f"({self._max_job_attempts}); last attempt "
+                                f"lost its worker node ('{node_id}')."
+                            ),
+                        }
+                        self._persist_job_status(job_id, job)
+                        self.event_bus.publish(Event(
+                            timestamp=datetime.now(UTC),
+                            event_type="JOB_FAILED",
+                            source="Coordinator",
+                            payload={
+                                "job_id": job_id,
+                                "node_id": node_id,
+                                "reason": "max_attempts_exceeded",
+                            },
+                        ))
+                        continue
+
                     print(f"Recovering job '{job_id}'")
 
                     # Reset the job
@@ -1323,7 +1538,27 @@ class GCONCoordinator:
                         self.assign_job(job_id)
                         print(f"Job '{job_id}' reassigned successfully.")
                     except RuntimeError as e:
-                        print(f"Recovery failed for '{job_id}': {e}")
+                        # No idle node exists at this exact instant
+                        # (e.g. the only other node hasn't registered
+                        # yet). This is scheduler_loop's own normal
+                        # "nothing available right now" case -- see
+                        # its docstring -- and it always requeues via
+                        # queue_job() rather than dropping the job.
+                        # This call site did not: it left the job
+                        # sitting at status="pending" without ever
+                        # putting it back on self.job_queue, so
+                        # nothing -- not scheduler_loop, not a later
+                        # capacity change -- would ever look at it
+                        # again. Found via a real end-to-end test
+                        # (kill the only node mid-job, bring up a
+                        # replacement a moment later): the job stayed
+                        # "pending" forever instead of picking up the
+                        # replacement once it registered. Matches
+                        # scheduler_loop's handling now: requeue and
+                        # let the normal dispatch loop retry it once a
+                        # node is actually idle.
+                        print(f"Recovery failed for '{job_id}': {e} -- requeuing.")
+                        self.queue_job(job_id)
     
     
     def receive_heartbeat(self, heartbeat):
@@ -1409,24 +1644,32 @@ class GCONCoordinator:
             print(f"[WARN] workflow advancement failed for job "
                   f"'{job_id}' (workflow '{workflow_id}'): {e}")
 
-    def _run_job(self, node, job_id):
+    def _run_job(self, node, job_id, dispatch_attempt_number):
         """
         Execute a job in a background thread.
 
-        Every mutation of the shared `job` dict below holds
-        self.jobs_lock. Without it, this method races with
-        recover_jobs() -- a concurrent heartbeat-timeout/disconnect
-        for `node` (a real, observed scenario over a flaky remote
-        connection, not just a theoretical one) can see this job
-        still "running" at the same moment this method is mid-flight
-        waiting on a slow remote execution, reset its status back to
-        "pending" and node_id to None, and reassign it elsewhere --
-        while this method, unaware that happened, goes on to write
-        the *real* completion result a moment later. The net effect
-        used to be a job correctly marked "completed" with a real
-        result, but node_id stuck at whatever the race left it at
-        (typically None) -- right, but with the audit trail silently
-        wrong about which node actually did the work.
+        `dispatch_attempt_number` is the job["attempt_number"] value
+        assign_job() set right before spawning this thread -- this
+        specific dispatch's identity. Every mutation of the shared
+        `job` dict below holds self.jobs_lock. That lock stops two
+        writers from corrupting the dict mid-write, but it does NOT
+        stop a *stale* writer: if recover_jobs() reassigns this job to
+        a second attempt while this thread is still blocked on its own
+        (now-abandoned) network call, this thread eventually unblocks
+        -- success or failure -- with an outcome for an attempt the
+        job has already moved past. Before the dispatch_attempt_number
+        staleness check below, that outcome still got written
+        unconditionally: a dead first attempt's late failure could
+        silently overwrite a second attempt's real, in-progress-or-
+        completed result. Found via a real two-node kill/replace
+        integration test (see
+        tests/transport/test_coordinator_receipt_attempt_linking.py).
+        Every job-state/workflow/notification side effect below is
+        skipped when this dispatch is no longer current; freeing the
+        node back to idle happens regardless, since the node really is
+        free either way, and a successful-but-stale result's receipt
+        is still recorded (see the success branch) so "what happened
+        on every attempt" stays answerable even for a stale one.
         """
 
         job = self.jobs[job_id]
@@ -1448,6 +1691,11 @@ class GCONCoordinator:
             )
 
             result = response["result"]
+            # See Transport.send_job's docstring -- real (GrpcTransport)
+            # dispatches carry the job_attempts row id created for this
+            # specific attempt; None on LocalTransport, which has no
+            # durable attempt tracking.
+            attempt_id = response.get("attempt_id")
 
         except Exception as e:
             # Anything going wrong here (network error, agent crash,
@@ -1485,6 +1733,35 @@ class GCONCoordinator:
                     f"'{job_id}' on '{node.node_id}' (proceeding "
                     f"anyway): {cancel_error}"
                 )
+
+            with self.jobs_lock:
+                is_stale = job.get("attempt_number") != dispatch_attempt_number
+
+            if is_stale:
+                # See _run_job's docstring. The job has already moved
+                # to a newer attempt (recover_jobs reassigned it while
+                # this dispatch was still in flight) -- this failure
+                # belongs to an attempt that's no longer current, so
+                # it must not touch job state, advance the workflow,
+                # fire a JOB_FAILED/JOB_CANCELLED notification, or
+                # persist a status the job doesn't actually have.
+                # Freeing the node is still correct: it really is idle
+                # now, independent of which attempt this was.
+                self.telemetry.warning(
+                    f"[STALE] Discarding a failure for '{job_id}' "
+                    f"attempt {dispatch_attempt_number} on "
+                    f"'{node.node_id}' -- job is now on attempt "
+                    f"{job.get('attempt_number')}: {e}",
+                    event_type="stale_attempt_discarded", trace_id=job.get("trace_id"),
+                    job_id=job_id, node_id=node.node_id,
+                    payload={"dispatch_attempt_number": dispatch_attempt_number, "error": str(e)},
+                )
+                node.status = "idle"
+                self.registry.heartbeat(
+                    node.node_id, "idle", node.heartbeat()["timestamp"]
+                )
+                self._evict_completed_if_over_capacity()
+                return
 
             self._advance_workflow(job_id, job, success=False)
 
@@ -1533,25 +1810,66 @@ class GCONCoordinator:
         self.receive_resource_report(resources)
 
         with self.jobs_lock:
-            # Re-affirm node_id here too (not just at original
-            # dispatch) -- this is the actual node that produced
-            # `result`, and this write happens under the same lock
-            # recover_jobs() uses, so the two can no longer interleave.
-            job["node_id"] = node.node_id
+            is_stale = job.get("attempt_number") != dispatch_attempt_number
 
-            if result["status"] == "success":
-                job["status"] = "completed"
-                job["completed_at"] = datetime.now(UTC).isoformat()
-            else:
-                cancelled = job.get("cancel_requested", False)
-                job["status"] = "cancelled" if cancelled else "failed"
-                job["completed_at"] = datetime.now(UTC).isoformat()
+        if is_stale and result["status"] != "success":
+            # See _run_job's docstring. A failed/cancelled outcome for
+            # an attempt that's no longer current carries nothing
+            # worth recording on its own (no receipt is created for a
+            # non-success result either way) -- discard, same as the
+            # exception-path staleness check above.
+            self.telemetry.warning(
+                f"[STALE] Discarding a non-success result for '{job_id}' "
+                f"attempt {dispatch_attempt_number} on '{node.node_id}' "
+                f"-- job is now on attempt {job.get('attempt_number')}.",
+                event_type="stale_attempt_discarded", trace_id=job.get("trace_id"),
+                job_id=job_id, node_id=node.node_id,
+                payload={"dispatch_attempt_number": dispatch_attempt_number},
+            )
+            self._evict_completed_if_over_capacity()
+            return
 
-            job["result"] = result
+        if is_stale:
+            # A genuinely successful result, just late -- the job has
+            # already been resolved by a newer attempt. Job state,
+            # the webhook, and the JOB_COMPLETED notification all
+            # belong to whichever attempt is actually current (it
+            # already fired them, or will) -- not touched here. The
+            # receipt below is still created and persisted, tagged
+            # with this attempt's own attempt_id, so "what happened on
+            # every attempt" stays a real, durable answer even for a
+            # stale one instead of the outcome just vanishing.
+            self.telemetry.warning(
+                f"[STALE] A successful result arrived for '{job_id}' "
+                f"attempt {dispatch_attempt_number} on '{node.node_id}' "
+                f"after the job moved to attempt "
+                f"{job.get('attempt_number')} -- recording its receipt, "
+                f"not touching job state.",
+                event_type="stale_attempt_discarded", trace_id=job.get("trace_id"),
+                job_id=job_id, node_id=node.node_id,
+                payload={"dispatch_attempt_number": dispatch_attempt_number},
+            )
+        else:
+            with self.jobs_lock:
+                # Re-affirm node_id here too (not just at original
+                # dispatch) -- this is the actual node that produced
+                # `result`, and this write happens under the same lock
+                # recover_jobs() uses, so the two can no longer interleave.
+                job["node_id"] = node.node_id
 
-        self._persist_job_status(job_id, job)
-        self._dispatch_webhook(job_id, job, "JOB_COMPLETED" if job["status"] == "completed"
-                                else ("JOB_CANCELLED" if job["status"] == "cancelled" else "JOB_FAILED"))
+                if result["status"] == "success":
+                    job["status"] = "completed"
+                    job["completed_at"] = datetime.now(UTC).isoformat()
+                else:
+                    cancelled = job.get("cancel_requested", False)
+                    job["status"] = "cancelled" if cancelled else "failed"
+                    job["completed_at"] = datetime.now(UTC).isoformat()
+
+                job["result"] = result
+
+            self._persist_job_status(job_id, job)
+            self._dispatch_webhook(job_id, job, "JOB_COMPLETED" if job["status"] == "completed"
+                                    else ("JOB_CANCELLED" if job["status"] == "cancelled" else "JOB_FAILED"))
 
         if result["status"] == "success":
             # Generate a real, cryptographically signed receipt for
@@ -1583,6 +1901,7 @@ class GCONCoordinator:
                 receipt = self.verifier.create_receipt(
                     job_id, node.node_id, result, input_hash, output_hash,
                     attested_node_id=self._attested_node_id(node.node_id),
+                    worker_attestation=self._build_worker_attestation(result, node.node_id),
                 )
                 # Unsigned sibling field, same precedent as
                 # execution_proof/usage/policy_report -- lets a later
@@ -1613,6 +1932,7 @@ class GCONCoordinator:
                             job_id=job_id,
                             payload=receipt,
                             receipt_hash=self.verifier.hash_data(receipt),
+                            attempt_id=attempt_id,
                             node_id=node.node_id,
                             signature=receipt["proof"]["signature"],
                         )
@@ -1639,7 +1959,14 @@ class GCONCoordinator:
                 # on failure, published as a real notification the
                 # same way offline nodes and failed jobs already are.
                 policy_report = self.policy_engine.evaluate(receipt)
-                job["policy_report"] = policy_report
+                if not is_stale:
+                    # Only the currently-authoritative attempt's
+                    # policy result belongs on job["policy_report"] --
+                    # a stale attempt's own result is still evaluated
+                    # (its receipt gets one either way) but must not
+                    # overwrite what the real, current attempt already
+                    # reported.
+                    job["policy_report"] = policy_report
                 self._record_policy_result(policy_report)
                 if not policy_report["trusted"]:
                     failed_checks = [
@@ -1666,18 +1993,24 @@ class GCONCoordinator:
                     trace_id=job.get("trace_id"), job_id=job_id,
                 )
 
-            self.event_bus.publish(
-                Event(
-                    timestamp=datetime.now(UTC),
-                    event_type="JOB_COMPLETED",
-                    source="Coordinator",
-                    payload={
-                        "job_id": job_id,
-                        "node_id": node.node_id,
-                    },
+            if not is_stale:
+                # The is_stale-and-success case already recorded its
+                # receipt above; a JOB_COMPLETED notification and
+                # workflow advance for it would be wrong -- the
+                # current attempt (a different one) already fired
+                # these, or will, when it finishes.
+                self.event_bus.publish(
+                    Event(
+                        timestamp=datetime.now(UTC),
+                        event_type="JOB_COMPLETED",
+                        source="Coordinator",
+                        payload={
+                            "job_id": job_id,
+                            "node_id": node.node_id,
+                        },
+                    )
                 )
-            )
-            self._advance_workflow(job_id, job, success=True)
+                self._advance_workflow(job_id, job, success=True)
         else:
             cancelled = job.get("cancel_requested", False)
             self.event_bus.publish(
@@ -1695,7 +2028,7 @@ class GCONCoordinator:
 
         self._evict_completed_if_over_capacity()
 
-    def _run_replicated_job(self, nodes, job_id):
+    def _run_replicated_job(self, nodes, job_id, dispatch_attempt_number):
         """
         Execute a verify-tagged job on all `nodes` in parallel and
         compare their results for agreement (see
@@ -1711,6 +2044,22 @@ class GCONCoordinator:
         -- see replication.py's module docstring for why). The
         agreement result across replicas is attached as a receipt-level
         "execution_proof" field, outside the signed "proof" dict.
+
+        `dispatch_attempt_number` fences this whole group dispatch the
+        same way _run_job's does for a single-node one (see its
+        docstring for the real bug this closes): unlike _run_job,
+        there's only one staleness check here, made once after every
+        per-node thread has joined, not per node -- the whole group
+        was dispatched as a single attempt (assign_job increments
+        attempt_number once for the group, not once per replica), so
+        it either belongs to the job's current attempt or it doesn't.
+        When it doesn't, every replica's own receipt is still created
+        and persisted (each tagged with its own real attempt_id, from
+        job_attempts -- the audit trail this closes a gap in is
+        per-node, not per-group), but none of it is allowed to
+        overwrite job state, become the job's "primary" receipt, or
+        fire a completion notification for an attempt the job has
+        already moved past.
         """
         job = self.jobs[job_id]
 
@@ -1719,7 +2068,7 @@ class GCONCoordinator:
             dispatch_metadata = {"kind": "staged", "stages": job.get("stages")}
 
         results_lock = threading.Lock()
-        successes = []  # list of (node, result) for nodes that completed
+        successes = []  # list of (node, result, attempt_id) for nodes that completed
         failures = []   # list of (node, exception) for nodes that errored
 
         def run_one(node):
@@ -1731,6 +2080,7 @@ class GCONCoordinator:
                     metadata=dispatch_metadata,
                 )
                 result = response["result"]
+                attempt_id = response.get("attempt_id")
             except Exception as e:
                 self.telemetry.error(
                     f"[ERROR] _run_replicated_job failed for '{job_id}' on "
@@ -1769,7 +2119,7 @@ class GCONCoordinator:
             self.receive_resource_report(resources)
 
             with results_lock:
-                successes.append((node, result))
+                successes.append((node, result, attempt_id))
 
         threads = [threading.Thread(target=run_one, args=(node,), daemon=True) for node in nodes]
         for t in threads:
@@ -1778,15 +2128,31 @@ class GCONCoordinator:
             t.join()
 
         with self.jobs_lock:
-            job["replica_failures"] = [
-                {"node_id": n.node_id, "error": str(e)} for n, e in failures
-            ]
+            is_stale = job.get("attempt_number") != dispatch_attempt_number
+            if not is_stale:
+                job["replica_failures"] = [
+                    {"node_id": n.node_id, "error": str(e)} for n, e in failures
+                ]
 
         # No replica produced a result at all -- fail the job exactly the
         # way the single-node path fails on a dispatch error. Every node
         # has already been freed to idle in run_one above.
-        successful_results = [r for _, r in successes if r.get("status") == "success"]
+        successful_results = [r for _, r, _ in successes if r.get("status") == "success"]
         if not successful_results:
+            if is_stale:
+                # See this method's docstring. Nothing succeeded, so
+                # there's no receipt to preserve either -- same as
+                # _run_job's non-success staleness case, just discard.
+                self.telemetry.warning(
+                    f"[STALE] Discarding an all-replicas-failed result "
+                    f"for '{job_id}' attempt {dispatch_attempt_number} "
+                    f"-- job is now on attempt {job.get('attempt_number')}.",
+                    event_type="stale_attempt_discarded", trace_id=job.get("trace_id"),
+                    job_id=job_id,
+                    payload={"dispatch_attempt_number": dispatch_attempt_number},
+                )
+                self._evict_completed_if_over_capacity()
+                return
             self._advance_workflow(job_id, job, success=False)
             with self.jobs_lock:
                 cancelled = job.get("cancel_requested", False)
@@ -1810,20 +2176,39 @@ class GCONCoordinator:
         # Primary result: the first replica to complete successfully.
         # Kept as job["node_id"]/job["result"] for every existing
         # consumer that expects a single node/result per job.
-        primary_node, primary_result = successes[0]
-        for n, r in successes:
+        primary_node, primary_result, _ = successes[0]
+        for n, r, _ in successes:
             if r.get("status") == "success":
                 primary_node, primary_result = n, r
                 break
 
-        with self.jobs_lock:
-            job["node_id"] = primary_node.node_id
-            job["status"] = "completed"
-            job["completed_at"] = datetime.now(UTC).isoformat()
-            job["result"] = primary_result
+        if is_stale:
+            # See this method's docstring. The group succeeded, just
+            # late -- the job has already been resolved by a newer
+            # attempt. Job state/webhook are left alone (the current
+            # attempt already set them, or will); every replica's
+            # receipt below is still created and persisted, just never
+            # allowed to become job["policy_report"] or self.receipts'
+            # "primary" slot for this job.
+            self.telemetry.warning(
+                f"[STALE] A successful replicated result arrived for "
+                f"'{job_id}' attempt {dispatch_attempt_number} after "
+                f"the job moved to attempt {job.get('attempt_number')} "
+                f"-- recording each replica's receipt, not touching "
+                f"job state.",
+                event_type="stale_attempt_discarded", trace_id=job.get("trace_id"),
+                job_id=job_id,
+                payload={"dispatch_attempt_number": dispatch_attempt_number},
+            )
+        else:
+            with self.jobs_lock:
+                job["node_id"] = primary_node.node_id
+                job["status"] = "completed"
+                job["completed_at"] = datetime.now(UTC).isoformat()
+                job["result"] = primary_result
 
-        self._persist_job_status(job_id, job)
-        self._dispatch_webhook(job_id, job, "JOB_COMPLETED")
+            self._persist_job_status(job_id, job)
+            self._dispatch_webhook(job_id, job, "JOB_COMPLETED")
 
         # Build one input_hash for the whole group -- every replica ran
         # the same command against the same declared inputs, so this is
@@ -1846,11 +2231,13 @@ class GCONCoordinator:
             # Per-successful-node output_hash + comparison inputs.
             comparable = []
             per_node_output_hash = {}
-            for node, result in successes:
+            per_node_attempt_id = {}
+            for node, result, attempt_id in successes:
                 if result.get("status") != "success":
                     continue
                 output_hash = self.verifier.hash_data(result.get("stdout", ""))
                 per_node_output_hash[node.node_id] = output_hash
+                per_node_attempt_id[node.node_id] = attempt_id
                 comparable.append({
                     "output_hash": output_hash,
                     "metrics": result.get("metrics", {}),
@@ -1860,7 +2247,7 @@ class GCONCoordinator:
             verify_cfg = job.get("verify") or {}
             tolerance = verify_cfg.get("tolerance", 0.02)
             comparison = compare_results(comparable, tolerance=tolerance)
-            witnesses = [node.node_id for node, r in successes if r.get("status") == "success"]
+            witnesses = [node.node_id for node, r, _ in successes if r.get("status") == "success"]
             execution_proof = build_execution_proof(
                 witnesses=witnesses,
                 comparison=comparison,
@@ -1868,14 +2255,16 @@ class GCONCoordinator:
             )
 
             first_success_seen = False
-            for node, result in successes:
+            for node, result, _attempt_id in successes:
                 if result.get("status") != "success":
                     continue
                 output_hash = per_node_output_hash[node.node_id]
+                node_attempt_id = per_node_attempt_id.get(node.node_id)
                 try:
                     receipt = self.verifier.create_receipt(
                         job_id, node.node_id, result, input_hash, output_hash,
                         attested_node_id=self._attested_node_id(node.node_id),
+                        worker_attestation=self._build_worker_attestation(result, node.node_id),
                     )
                 except ValueError as mismatch_error:
                     # create_receipt refuses to sign when the claimed
@@ -1917,8 +2306,15 @@ class GCONCoordinator:
                 receipt["policy_report"] = policy_report
                 self._record_policy_result(policy_report)
 
-                is_primary = not first_success_seen
+                is_primary = not first_success_seen and not is_stale
                 first_success_seen = True
+                # is_primary is forced False above when this group is
+                # stale -- receive_replica_receipt still appends this
+                # receipt to the full per-replica audit trail either
+                # way, it just never becomes self.receipts[job_id] (the
+                # slot every existing consumer treats as THIS job's
+                # current receipt) for an attempt the job has already
+                # moved past.
                 self.receive_replica_receipt(job_id, receipt, is_primary=is_primary)
                 if is_primary:
                     # Keep job["policy_report"] pointing at the primary
@@ -1960,6 +2356,7 @@ class GCONCoordinator:
                             job_id=job_id,
                             payload=receipt,
                             receipt_hash=self.verifier.hash_data(receipt),
+                            attempt_id=node_attempt_id,
                             node_id=node.node_id,
                             signature=receipt["proof"]["signature"],
                         )
@@ -2008,13 +2405,19 @@ class GCONCoordinator:
                 trace_id=job.get("trace_id"), job_id=job_id,
             )
 
-        self.event_bus.publish(Event(
-            timestamp=datetime.now(UTC),
-            event_type="JOB_COMPLETED",
-            source="Coordinator",
-            payload={"job_id": job_id, "node_id": primary_node.node_id},
-        ))
-        self._advance_workflow(job_id, job, success=True)
+        if not is_stale:
+            # The is_stale case already recorded every replica's
+            # receipt above; a JOB_COMPLETED notification and workflow
+            # advance for it would be wrong -- the current attempt (a
+            # different dispatch) already fired these, or will, when
+            # it finishes.
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC),
+                event_type="JOB_COMPLETED",
+                source="Coordinator",
+                payload={"job_id": job_id, "node_id": primary_node.node_id},
+            ))
+            self._advance_workflow(job_id, job, success=True)
         self._evict_completed_if_over_capacity()
 
     def _dispatch_webhook(self, job_id, job, event_type):
@@ -2684,10 +3087,19 @@ class GCONCoordinator:
         Re-queue every currently failed job for another attempt.
         """
         retried = []
+        skipped_max_attempts = []
 
         with self.jobs_lock:
             for job_id, job in self.jobs.items():
                 if job["status"] == "failed":
+                    if job.get("attempt_number", 0) >= self._max_job_attempts:
+                        # Same cap as retry_job/recover_jobs, applied
+                        # silently-per-job here rather than raising --
+                        # this is a bulk "retry everything failed"
+                        # sweep, one already-exhausted job shouldn't
+                        # abort retrying the rest.
+                        skipped_max_attempts.append(job_id)
+                        continue
                     job["status"] = "pending"
                     job["node_id"] = None
                     job["completed_at"] = None
@@ -2697,9 +3109,13 @@ class GCONCoordinator:
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="FAILED_JOBS_RETRIED",
-            source="Coordinator", payload={"job_ids": retried},
+            source="Coordinator",
+            payload={"job_ids": retried, "skipped_max_attempts": skipped_max_attempts},
         ))
-        print(f"[QUEUE] Retrying {len(retried)} failed job(s).")
+        print(
+            f"[QUEUE] Retrying {len(retried)} failed job(s); "
+            f"{len(skipped_max_attempts)} skipped (max attempts reached)."
+        )
         return retried
 
     def retry_job(self, job_id):
@@ -2721,6 +3137,13 @@ class GCONCoordinator:
                 raise ValueError(
                     f"Job '{job_id}' has status '{job['status']}'; only "
                     "'failed' or 'pending' jobs can be retried."
+                )
+            if job.get("attempt_number", 0) >= self._max_job_attempts:
+                raise ValueError(
+                    f"Job '{job_id}' has already reached the max attempt "
+                    f"limit ({self._max_job_attempts}) and will not be "
+                    "retried automatically. Resubmit it as a new job if "
+                    "you want to try again."
                 )
             job["status"] = "pending"
             job["node_id"] = None
@@ -3616,6 +4039,9 @@ class GCONCoordinator:
 
         proof = receipt.get("proof", {})
         is_valid, message = self.verifier.validate_proof(proof)
+        worker_attestation_valid, worker_attestation_message = (
+            self.verifier.validate_worker_attestation(receipt)
+        )
 
         job_id = receipt.get("job_id")
         with self.jobs_lock:
@@ -3715,6 +4141,27 @@ class GCONCoordinator:
                 "stages": proof.get("metrics", {}).get("stages", []),
                 "signature": proof.get("signature"),
             },
+            # The node's OWN Ed25519 signature over its own result
+            # (see gcon.execution.worker_identity), independent of
+            # GCON's HMAC key above -- None when this receipt has none
+            # (older agent build, or a transport with no per-node
+            # identity), not a fabricated failing block. `verified`
+            # here is recomputed fresh on every call (see
+            # validate_worker_attestation's own docstring for why it's
+            # never a value stored on the receipt and just read back).
+            "worker_attestation": (
+                {
+                    "verified": worker_attestation_valid,
+                    "verification_message": worker_attestation_message,
+                    "node_id": (receipt.get("worker_attestation") or {}).get("payload", {}).get("node_id"),
+                    "job_spec_hash": (receipt.get("worker_attestation") or {}).get("payload", {}).get("job_spec_hash"),
+                    "attempt_id": (receipt.get("worker_attestation") or {}).get("payload", {}).get("attempt_id"),
+                    "signature": (receipt.get("worker_attestation") or {}).get("signature"),
+                    "public_key_pem": (receipt.get("worker_attestation") or {}).get("public_key_pem"),
+                }
+                if receipt.get("worker_attestation")
+                else None
+            ),
             "execution": {
                 "node_id": job.get("node_id"),
                 "created_at": job.get("created_at"),
@@ -3774,6 +4221,29 @@ class GCONCoordinator:
             "verified": verified,
             "verification_message": verification_message,
         }
+
+    def get_job_attempts(self, job_id):
+        """
+        Return the durable dispatch-attempt history for one job, most
+        recent first: attempt_number, which node it was dispatched to,
+        its status, and when it was dispatched/completed. This is
+        what answers "how many times was this job attempted, where,
+        by which worker, and what happened on each attempt" --
+        previously unanswerable even though every real (GrpcTransport)
+        dispatch already recorded a durable row for it (see
+        JobAttemptRepository); nothing ever read it back.
+
+        Returns [] (not an error) when there's no control_plane (a
+        LocalTransport-only coordinator, e.g. most tests) or the job
+        has no recorded attempts yet -- both real, non-error cases,
+        not "job not found" (callers that need to distinguish "job
+        doesn't exist" should check get_jobs/get_execution_detail
+        first, same pattern as get_node_enrollment_history).
+        """
+        if self.control_plane is None:
+            return []
+        attempts = self.control_plane.job_attempts.list_for_job(job_id)
+        return list(reversed(attempts))
 
     def get_node_summary(self):
         """
