@@ -8,9 +8,12 @@ untouched, imported and used exactly as-is) with everything the
 "persistent daemon" requirement asks for: automatic registration,
 mutual authentication (its own client certificate), heartbeats,
 automatic reconnect with exponential backoff, receiving job
-submissions and cancellations, streaming logs, uploading signed
-receipts (via the existing `gcon.execution.receipt.ReceiptGenerator`,
-also untouched), and graceful shutdown.
+submissions and cancellations, streaming logs, signing each of its
+own job results with a per-node Ed25519 key before ever sending them
+(`gcon.execution.worker_identity` -- real worker attestation, not the
+still-present-but-unused `gcon.execution.receipt.ReceiptGenerator`/
+`_upload_receipt`; see _run_job's comment for why that one stayed
+disabled), and graceful shutdown.
 
 Connection model: the daemon is the gRPC *client*. It dials the
 coordinator and keeps the `Control` bidirectional stream open for its
@@ -21,6 +24,7 @@ dial out rather than the coordinator dialing in.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +40,11 @@ import grpc
 
 from gcon.execution.agent import GCONAgent
 from gcon.execution.receipt import ReceiptGenerator
+from gcon.execution.worker_identity import (
+    build_attestation_payload,
+    ensure_node_keypair,
+    sign_attestation,
+)
 from gcon.transport import tls
 from gcon.transport.config import TransportConfig
 from gcon.transport.idempotency import SequenceCounter
@@ -95,6 +104,18 @@ class AgentDaemon:
         self._hb_sequence = SequenceCounter()
         self._active_jobs: Dict[str, object] = {}
         self._run_thread: Optional[threading.Thread] = None
+
+        # This node's own Ed25519 identity for signing its own job
+        # results before they're ever sent anywhere -- see
+        # gcon.execution.worker_identity's module docstring for why
+        # this is a genuinely separate, per-node scheme from
+        # ReceiptGenerator/KeyManager (still present, still unused --
+        # see _run_job's comment). Generated once and persisted
+        # alongside this node's mTLS cert in cert_dir; the private key
+        # never leaves this object.
+        self._ed25519_private_key, self._ed25519_public_key_pem = ensure_node_keypair(
+            cert_dir, node_id
+        )
 
     # ------------------------------------------------------------- control
     def start(self) -> None:
@@ -258,6 +279,7 @@ class AgentDaemon:
                     hostname=self.hostname,
                     agent_version="1.0.0",
                     capabilities=self.capabilities,
+                    ed25519_public_key_pem=self._ed25519_public_key_pem,
                 ),
                 timeout=15,
             )
@@ -449,6 +471,29 @@ class AgentDaemon:
         if result.get("stages"):
             metrics = dict(metrics)
             metrics["stages"] = result["stages"]
+
+        status = str(result.get("status", "unknown"))
+        stdout = str(result.get("stdout", "") or "")
+        timestamp = str(result.get("timestamp", _now_iso()))
+        # Signed before this message is ever put on the wire -- see
+        # gcon.execution.worker_identity's module docstring. job_spec_hash
+        # is computed from job_assign.command, i.e. what THIS node was
+        # actually told to run (from its own JobAssign, not whatever the
+        # coordinator might claim later); output_hash is this node's own
+        # attestation of its own stdout, matching (but computed
+        # independently of) what the coordinator separately hashes from
+        # the same bytes once this result arrives.
+        attestation_payload = build_attestation_payload(
+            job_id=job_assign.job_id,
+            attempt_id=job_assign.attempt_id,
+            node_id=self.node_id,
+            job_spec_hash=hashlib.sha256(job_assign.command.encode()).hexdigest(),
+            output_hash=hashlib.sha256(stdout.encode()).hexdigest(),
+            status=status,
+            timestamp=timestamp,
+        )
+        attestation_signature = sign_attestation(self._ed25519_private_key, attestation_payload)
+
         outbound.put(
             pb.AgentEnvelope(
                 node_id=self.node_id,
@@ -456,14 +501,16 @@ class AgentDaemon:
                 job_result=pb.JobResult(
                     job_id=job_assign.job_id,
                     request_message_id=job_assign.request_message_id,
-                    status=str(result.get("status", "unknown")),
+                    status=status,
                     return_code=int(result.get("return_code", 0) or 0),
                     runtime_seconds=float(result.get("runtime_seconds", 0.0) or 0.0),
-                    stdout=str(result.get("stdout", "") or ""),
+                    stdout=stdout,
                     stderr=str(result.get("stderr", "") or ""),
                     error=str(result.get("error", "") or ""),
                     metrics_json=_json.dumps(metrics),
-                    timestamp=str(result.get("timestamp", _now_iso())),
+                    timestamp=timestamp,
+                    worker_attestation_payload_json=_json.dumps(attestation_payload, sort_keys=True),
+                    worker_attestation_signature=attestation_signature,
                 ),
             )
         )

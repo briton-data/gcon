@@ -66,9 +66,13 @@ class Transport(ABC):
     ) -> Dict[str, Any]:
         """Dispatch a job to `node_id` and block for its result (or
         raise on failure/timeout). Returns
-        `{"status": "success", "result": {...}}` on success, matching
-        the shape the coordinator has always received from
-        `CommunicationManager.send_job`.
+        `{"status": "success", "result": {...}, "attempt_id": str | None}`
+        on success, matching the shape the coordinator has always
+        received from `CommunicationManager.send_job`. `attempt_id`
+        identifies the durable `job_attempts` row for this specific
+        dispatch when the transport records one (GrpcTransport, backed
+        by a control_plane); None on transports/configurations with no
+        durable attempt tracking (LocalTransport).
 
         `metadata` carries job-kind information the execution side
         needs but that isn't part of `command` itself -- currently

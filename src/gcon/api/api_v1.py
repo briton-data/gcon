@@ -20,7 +20,7 @@ import threading
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Depends, Request
+from fastapi import FastAPI, Header, HTTPException, Depends, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
@@ -772,7 +772,12 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Submit a new job",
         responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
     )
-    def submit_job(payload: JobSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
+    def submit_job(
+        payload: JobSubmitRequest,
+        response: Response,
+        auth=Depends(require_scope("Submit workflows")),
+        idempotency_key: str = Header(default=None, alias="Idempotency-Key"),
+    ):
         owner = auth["owner"]
         # A job is attributed to a company via its submitter's
         # organization_id -- not the API key itself, since scopes/keys
@@ -781,6 +786,21 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # a system/internal key with no user attached) or a user with
         # no organization both legitimately resolve to org_id=None.
         org_id = getattr(owner, "organization_id", None) if owner else None
+
+        # Durable idempotency, scoped per-org (see
+        # IdempotencyKeyRepository) -- a client retrying an ambiguous-
+        # outcome submission (timed-out response, etc.) with the same
+        # Idempotency-Key gets back the job that request actually
+        # created, instead of risking a second one. This checks BEFORE
+        # doing anything else, so a replayed request never re-runs
+        # policy checks, concurrent-job limits, etc. -- it's genuinely
+        # a no-op past the lookup, matching what "idempotent" means.
+        if idempotency_key:
+            existing_job_id = presentation.get_idempotent_job_id(org_id, idempotency_key)
+            if existing_job_id is not None:
+                response.headers["Idempotent-Replayed"] = "true"
+                return {"job_id": existing_job_id, "submitted": True}
+
         try:
             presentation.submit_job(
                 payload.job_id,
@@ -815,6 +835,8 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             # retry, ideally against the leader. See
             # gcon.cluster.leader_election / GCONCoordinator.submit_job.
             raise HTTPException(status_code=503, detail=str(e))
+        if idempotency_key:
+            presentation.record_idempotency_key(org_id, idempotency_key, payload.job_id)
         return {"job_id": payload.job_id, "submitted": True}
 
     @app.post(
@@ -873,6 +895,25 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return jsonable_encoder(result)
+
+    @app.get(
+        "/jobs/{job_id}/attempts",
+        tags=["Jobs"],
+        summary="Durable dispatch-attempt history for a job",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def get_job_attempts(job_id: str, auth=Depends(require_scope("View monitoring"))):
+        # Same org-scoping + same-404-either-way pattern as
+        # get_node_enrollment_history -- an org-scoped key can only
+        # pull attempt history for jobs that are actually theirs, and
+        # gets the same 404 for "doesn't exist" vs "belongs to a
+        # different company" so this can't be used to probe which job
+        # ids exist elsewhere in the cluster.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+        return jsonable_encoder(presentation.get_job_attempts(job_id))
 
     @app.post(
         "/jobs/{job_id}/retry",

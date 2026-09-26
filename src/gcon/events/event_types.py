@@ -19,6 +19,15 @@ class EventType:
     JOB_COMPLETED = "JOB_COMPLETED"
     JOB_FAILED = "JOB_FAILED"
     JOB_CANCELLED = "JOB_CANCELLED"
+    # Published by restore_from_persistence() when a job that was
+    # still pending/running at coordinator shutdown/crash is
+    # re-queued for a fresh attempt on restart, instead of the old
+    # behavior of unconditionally marking it failed -- see
+    # coordinator.py's restore_from_persistence for the full
+    # reasoning (why this is safe, and the two cases -- replicated
+    # jobs, jobs already at the max-attempts cap -- that still fail
+    # instead, with JOB_FAILED, same as before).
+    JOB_RESUMED_AFTER_RESTART = "JOB_RESUMED_AFTER_RESTART"
 
     # Scheduler Events
     SCHEDULER_PAUSED = "SCHEDULER_PAUSED"

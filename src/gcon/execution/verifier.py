@@ -18,6 +18,8 @@ from datetime import datetime, UTC
 from typing import Dict, Any, Optional, Tuple
 import logging
 
+from gcon.execution.worker_identity import verify_attestation as _verify_worker_attestation
+
 from gcon.execution.hmac_keyring import HmacKeyring
 
 logger = logging.getLogger(__name__)
@@ -302,7 +304,46 @@ class ExecutionVerifier:
             return False, "Invalid timestamp format"
         
         return True, "Proof is valid"
-    
+
+    @staticmethod
+    def validate_worker_attestation(receipt: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Re-checks a receipt's worker_attestation block (see
+        create_receipt) fresh, every call -- there is no stored
+        verified: bool anywhere in this scheme, deliberately, for
+        exactly the reason validate_proof's own callers already learned
+        the hard way with the HMAC scheme: a receipt that's re-read
+        later must never trust a verdict computed (and possibly wrong,
+        or computed against a since-rotated key) at creation time.
+
+        Independent of validate_proof: this checks the node's OWN
+        Ed25519 signature against the public key embedded in the
+        block, not GCON's HMAC key -- a caller with no access to (or
+        no trust in) GCON's own signing key can still run this check.
+
+        Returns (False, "No worker attestation on this receipt") --
+        not an error -- for a receipt with none (older agent build, or
+        a transport with no per-node identity); that's a real,
+        unremarkable case, not a validation failure to alarm over.
+        """
+        attestation = receipt.get("worker_attestation")
+        if not attestation:
+            return False, "No worker attestation on this receipt"
+
+        payload = attestation.get("payload")
+        signature = attestation.get("signature")
+        public_key_pem = attestation.get("public_key_pem")
+        if not payload or not signature or not public_key_pem:
+            return False, "Worker attestation is missing payload, signature, or public key"
+
+        if not _verify_worker_attestation(public_key_pem, payload, signature):
+            return False, "Worker attestation signature is invalid"
+
+        if payload.get("job_id") != receipt.get("job_id"):
+            return False, "Worker attestation job_id does not match the receipt's"
+
+        return True, "Worker attestation is valid"
+
     def create_receipt(
         self,
         job_id: str,
@@ -311,6 +352,7 @@ class ExecutionVerifier:
         input_hash: str,
         output_hash: str,
         attested_node_id: Optional[str] = None,
+        worker_attestation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a complete execution receipt.
@@ -332,6 +374,21 @@ class ExecutionVerifier:
                 bookkeeping bug; either way, silently picking one and
                 signing it would hide the problem instead of surfacing
                 it.
+            worker_attestation: {"payload": dict, "signature": str,
+                "public_key_pem": str} -- the node's OWN Ed25519
+                signature over its own result, made before it ever
+                sent it (see gcon.execution.worker_identity), plus the
+                public key that was on file for that node at the time.
+                Deliberately embedded here as raw, re-checkable data
+                (payload + signature + key), not a precomputed
+                verified: bool -- see validate_worker_attestation and
+                validate_proof's own docstring for why a stored
+                verdict is exactly the mistake this codebase already
+                made once with the HMAC scheme. None when the node has
+                no keypair registered (older agent build, or a
+                transport with no per-node identity) -- the receipt
+                simply has no worker_attestation block, not a
+                fabricated failing one.
 
         Returns:
             Complete receipt with proof
@@ -375,6 +432,14 @@ class ExecutionVerifier:
             ),
             "issued_at": datetime.now(UTC).isoformat()
         }
-        
+        if worker_attestation is not None:
+            # Also deliberately outside "proof": it has its own,
+            # separate signature (the node's, not GCON's HMAC key) --
+            # folding it into "proof" would make it look like part of
+            # what GCON's own signature covers, when the entire point
+            # is that it's independently checkable without GCON's key
+            # at all.
+            receipt["worker_attestation"] = worker_attestation
+
         logger.info(f"Receipt created: {receipt['receipt_id']} for job {job_id}")
         return receipt

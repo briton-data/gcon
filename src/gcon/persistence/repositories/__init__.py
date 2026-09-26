@@ -14,10 +14,12 @@ from gcon.persistence.repositories.leases import LeaseRepository
 from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
 from gcon.persistence.repositories.telemetry import TelemetryRepository
 from gcon.persistence.repositories.node_enrollment_audit import NodeEnrollmentAuditRepository
+from gcon.persistence.repositories.idempotency_keys import IdempotencyKeyRepository
 
 __all__ = [
     "EnrollTokenRepository",
     "NodeEnrollmentAuditRepository",
+    "IdempotencyKeyRepository",
     "NodeRepository",
     "NodeCapabilityRepository",
     "JobRepository",

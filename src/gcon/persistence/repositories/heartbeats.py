@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
@@ -49,7 +48,7 @@ class HeartbeatRepository:
                 ),
             )
             return True
-        except sqlite3.IntegrityError:
+        except self.db.IntegrityError:
             return False
 
     def latest_for_node(self, node_id: str) -> Optional[Dict[str, Any]]:

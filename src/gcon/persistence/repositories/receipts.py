@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
@@ -54,7 +53,7 @@ class ReceiptRepository:
                     datetime.now(UTC).isoformat(),
                 ),
             )
-        except sqlite3.IntegrityError as e:
+        except self.db.IntegrityError as e:
             # UNIQUE(receipt_hash) really can legitimately race (two
             # concurrent uploads of the identical receipt) -- but this
             # bare except used to swallow EVERY IntegrityError the same
