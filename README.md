@@ -59,7 +59,7 @@ Full detail: [SECURITY.md](SECURITY.md).
 
 ## Get started
 
-Works the same on Linux, macOS and Windows. You need Python 3.12+ (on Linux and macOS, use `python3` wherever this page says `python`).
+GCON's Python components support Python 3.12+ on Linux, macOS, and Windows. Production worker deployments should be validated on the target OS and execution backend.
 
 ```bash
 git clone https://github.com/briton-data/GCON.git
