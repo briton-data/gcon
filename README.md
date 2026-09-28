@@ -1,174 +1,195 @@
 # GCON
 
-**A self-hosted job coordinator that gives every execution a signed, verifiable receipt.**
+**GCON is a cloud-managed platform that runs your jobs on a fleet of machines and gives you signed proof of what actually ran.**
 
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/Version-v0.10-orange)
-![Status](https://img.shields.io/badge/Status-Alpha-red)
 
 ---
 
-## What it is
+## What is GCON?
 
-GCON lets you run jobs on machines you own or rent — your own GPUs, a friend's spare workstation, a fleet of rented servers — and get proof of what actually happened, not just a log file you have to take someone's word for.
+You give GCON a command. It picks a machine, runs it, and hands back the result **plus a receipt**: a small, tamper-evident record of what ran, where, for how long, and what came out. Anyone can check the receipt's signature later, so you don't have to just trust a log file.
 
-Here's the shape of it: one machine runs the **coordinator**. Every other machine runs an **agent** and connects to the coordinator, ready to take work. You submit a job — a command to run — and the coordinator hands it to a free machine. When the job finishes, that machine's result gets hashed and signed, producing a **receipt**: a small, tamper-evident record of what ran, on what hardware, for how long, and what came out. Anyone holding that receipt can check the signature themselves and know it wasn't altered after the fact.
-
-For work where a wrong answer actually matters, you can ask GCON to run the same job on several machines at once and compare their answers before trusting the result — agreement across independent machines is much harder to fake than a single machine's say-so.
-
-Connections between machines are encrypted and mutually authenticated, so a machine can't show up pretending to be one it isn't. If the coordinator itself goes down, you can run a backup coordinator that takes over automatically. Everything — job history, receipts, which machines are online — survives a restart; nothing lives only in memory.
-
-There's a live dashboard to watch it all happen, and an API if you'd rather script it.
-
-It's honest about what it isn't yet, too: it doesn't prove a specific machine physically ran your job the way a notarized document would — it proves the coordinator's own signature vouches for the record, which is real protection but not the strongest guarantee possible. Where that distinction matters for what you're building, [ARCHITECTURE.md](docs/ARCHITECTURE.md) spells it out in full.
+One machine runs the **coordinator** (the brain). Every other machine runs a **worker** and connects to it. That's the whole shape.
 
 ---
 
 ## Core capabilities
 
-- **Signed receipts for every job** — proof of what ran, where, and with what result, checkable by anyone who has the receipt
-- **Receipts tied to the machine that ran them** — a receipt can be bound to the specific machine's verified identity, not just its say-so
-- **Run-it-twice verification** — for jobs where a wrong answer is costly, run it on multiple machines and require agreement before trusting the result
-- **A live trust score** for the whole cluster, based on real verification and machine health, not a static badge
-- **Encrypted, authenticated connections** between every machine and the coordinator — a machine can't impersonate another
-- **A backup coordinator** can take over automatically if the main one goes down
-- **Roles and an audit log** — who can do what, and a record of who did what
-- **Automatic recovery** — if a machine drops out mid-job, the coordinator notices and handles it
-- **Multi-step jobs** — chain jobs together with dependencies between them
-- **Scale up or down automatically** within the capacity you already have
-- **A live dashboard** to watch the cluster in real time
-- **An API and Python client** if you'd rather script it than click through a dashboard
+GCON does five jobs, in order:
 
-Technical specifics — exact fields, flags, and function names — live in [docs/](docs/), not here.
+| | What it does | In plain words |
+|---|---|---|
+| **Orchestration** | Queues jobs, picks the best free worker, retries and recovers when a worker drops, chains jobs into workflows | *Who runs it, and what happens if something breaks* |
+| **Execution** | Runs the command on the worker and measures runtime, CPU, memory and GPU use | *The actual work* |
+| **Verification** | Checks the result. For important jobs, runs it on several machines and compares their answers | *Did we get the right answer?* |
+| **Evidence & receipts** | Turns every run into a signed, stored receipt: hashes of the command and output, the machine, the timing | *The paper trail* |
+| **Proof & assurance** | Checks the signatures (GCON's and the worker's own), the policy limits and the replica agreement, then gives **one clear verdict** | *Can I trust this run, yes or no?* |
 
----
+The assurance verdict is one of: `verified`, `policy_violation`, `attestation_mismatch`, `disputed`, `invalid`. Only `verified` means every check passed.
 
-## Status
-
-This is active, early-stage development — not a finished product. Some things worth knowing before you dig in:
-
-- There's one main coordinator by default. A backup can take over if it dies, but only if both are running on the same machine — not yet across separate machines. See [FAILOVER.md](docs/FAILOVER.md).
-- Auto-scaling only works in local test setups right now — it won't spin up real new machines on a real deployment yet, and says so honestly instead of pretending to.
-- A receipt's signature comes from the coordinator, not independently from the machine that ran the job — real protection, but not the strongest possible guarantee. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the honest version.
-- Multi-step jobs work, but retries, timeouts, and branching logic for them aren't built yet.
-- Not everything you can do through Python is available through the web API yet — the run-it-twice verification feature, for one. See [API.md](docs/API.md).
-
-Building all of this out. If you hit rough edges, that's expected at this stage.
+**And also:** encrypted, mutually-authenticated connections (a machine can't pretend to be another), separate organizations that can't see each other's jobs, roles and an audit log, a backup coordinator that takes over if the main one dies, a live dashboard, and a REST API plus Python SDK.
 
 ---
 
-## Install
+## Security and trust
+
+GCON is built for work where you need to *prove* what happened.
+
+**What GCON protects**
+
+- **Connections.** Every link between a worker and the coordinator is encrypted and mutually authenticated. A machine can't pose as another.
+- **Results.** Each receipt is signed by the coordinator, and by the worker with its own key (covering the job, the command, the output and the result). Change anything afterwards and the check fails.
+- **Separation.** Each organization only sees its own jobs, workers and receipts.
+- **Critical answers.** Run a job on several machines and GCON compares their answers before you trust the result.
+
+**Hardening for sensitive jobs**
+
+1. Turn on sandboxing on each worker (needs Docker installed there): set `GCON_EXECUTION_BACKEND=docker` in the worker's environment. Add `GCON_JOB_DOCKER_NETWORK=none` if the job doesn't need the internet. Set a variable with `export NAME=value` on Linux and macOS, or `$env:NAME="value"` in PowerShell.
+2. Never expose the coordinator directly. Put it behind TLS (`GCON_FORCE_HTTPS=1` or a reverse proxy).
+3. Encrypt the disk that holds the coordinator's `data/` folder.
+4. Use `verify={"replicas": 2}` for results you can't afford to get wrong.
+5. Act on a result only when `receipt["assurance"]["level"]` is `"verified"`.
+6. Keep certificates and signing keys private (file permissions `0600`).
+
+Full detail: [SECURITY.md](SECURITY.md).
+
+---
+
+## Get started
+
+Works the same on Linux, macOS and Windows. You need Python 3.12+ (on Linux and macOS, use `python3` wherever this page says `python`).
 
 ```bash
 git clone https://github.com/briton-data/GCON.git
 cd GCON
 pip install -r requirements.txt
+pip install -e sdk/
 ```
 
----
+### 1. Create certificates
 
-## Quickstart
-
-**1. Generate dev certs** (`--cert-dir` is required — this issues the CA plus one cert per `--node`)
+Machines talk over encrypted, authenticated connections, so each worker needs a certificate.
 
 ```bash
-python scripts/generate_dev_certs.py --cert-dir certs --node worker-01
+python scripts/generate_dev_certs.py --cert-dir keys/grpc --node worker-01
 ```
 
-**2. Start the coordinator**
-
-Point it at the same cert directory via `GCON_TLS_CERT_DIR` (or pass
-`--db`/`--data-dir` for where the control-plane database lives — see
-`scripts/run_coordinator.py --help` and its module docstring for the
-full environment-variable list, including `--ha` for coordinator
-failover):
+### 2. Start the coordinator
 
 ```bash
-GCON_TLS_CERT_DIR=certs python scripts/run_coordinator.py
+python scripts/run_coordinator.py
 ```
 
-This starts the mTLS gRPC transport (default `0.0.0.0:50051`) and the
-dashboard/API (default `127.0.0.1:8000`) in the same process.
+Leave it running. It serves the dashboard and API at `http://127.0.0.1:8000`, and accepts workers on port `50051`.
 
-**3. Start an agent**
+### 3. Create your account and API key
 
-Every identifying value is a real required flag or env var — there's no
-hardcoded node identity to edit in the script itself:
-
-```bash
-python scripts/run_worker.py \
-  --node-id worker-01 \
-  --coordinator localhost:50051 \
-  --cert-dir certs
-```
-
-(`--node-id` and `--coordinator` are required — the script exits with a
-clear error if either is missing and `GCON_NODE_ID`/
-`GCON_COORDINATOR_ADDRESS` aren't set instead. `--org-id`,
-`--hostname`, and repeatable `--capability KEY=VALUE` flags are optional
-— see `scripts/run_worker.py --help`.)
-
-**4. Or just run a job directly and see a receipt**
-
-No coordinator or agent needed for this path — a single-machine,
-standalone execution + verification pipeline:
+In a second terminal:
 
 ```python
-from gcon.execution.run_job import JobRunner
+import requests
 
-runner = JobRunner(agent_id="example-agent-1")
-result = runner.run_job(
-    job_script="python -c \"print('hello from GCON')\"",
-    job_id="example-job-001",
-    timeout=10
-)
-
-print(runner.print_receipt(result["receipt"]["receipt_id"], format="summary"))
+r = requests.post("http://127.0.0.1:8000/api/v1/auth/signup", json={
+    "org_name": "Acme", "name": "Ann",
+    "email": "ann@acme.example", "password": "correct-horse-1",
+})
+info = r.json()
+print("org_id:", info["organization"]["org_id"])
+print("api key:", info["api_key"]["secret"])   # shown once, save it
 ```
 
-More examples in [`examples/`](examples/). Full multi-node walkthrough:
-[QUICKSTART.md](docs/QUICKSTART.md).
+### 4. Start a worker
+
+A worker only runs jobs for the organization it belongs to, so pass your `org_id`:
+
+```bash
+python scripts/run_worker.py --node-id worker-01 --coordinator localhost:50051 --cert-dir keys/grpc --org-id <your org_id>
+```
+
+Add more workers the same way (a new `--node-id` and certificate each). For a worker on another machine, copy `ca.cert.pem`, `agent-<node-id>.cert.pem` and `agent-<node-id>.key.pem` into its cert folder and point `--coordinator` at the coordinator's address.
 
 ---
 
-## Structure
+## Submit a job
+
+```python
+from gcon_sdk import GconClient
+
+client = GconClient(api_key="gcon_...", base_url="http://127.0.0.1:8000")
+
+client.submit_job("hello-1", "echo hello from GCON")
+job = client.get_job("hello-1")
+print(job["status"], job["output"])        # completed  hello from GCON
+```
+
+A job goes `pending` → `running` → `completed` (or `failed`). Once finished it has a `receipt_id`.
+
+Prefer the command line? On Linux, macOS or Git Bash:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs -H "Authorization: Bearer <your api key>" -H "Content-Type: application/json" -d '{"job_id":"hello-1","command":"echo hello from GCON"}'
+curl http://127.0.0.1:8000/api/v1/jobs/hello-1 -H "Authorization: Bearer <your api key>"
+```
+
+---
+
+## Get your proof
+
+Every finished job has a receipt. Ask for it and read the verdict:
+
+```python
+receipt = client.get_receipt(job["receipt_id"])
+print(receipt["assurance"]["level"])       # "verified"
+print(receipt["assurance"]["reasons"])     # why
+```
+
+---
+
+## More job types
+
+```python
+# Needs a GPU: only runs on a worker that has one
+client.submit_job("train-1", "python train.py",
+                  kind="resourced", requires={"gpu": True, "min_vram_gb": 12})
+
+# Run on 2 machines and compare answers (for jobs where a wrong result is costly)
+client.submit_job("calc-1", "python critical_calc.py",
+                  verify={"replicas": 2, "tolerance": 0.02})
+
+# Cancel or retry
+client.cancel_job("train-1")
+client.retry_job("calc-1")
+
+# Chain jobs: "train" starts only after "fetch" succeeds
+client.submit_workflow("wf-1", jobs=[
+    {"job_id": "fetch", "command": "python fetch.py"},
+    {"job_id": "train", "command": "python train.py", "depends_on": ["fetch"]},
+])
+```
+
+Full SDK guide: [sdk/README.md](sdk/README.md). Interactive API docs: `http://127.0.0.1:8000/api/v1/docs`.
+
+---
+
+## Project layout
 
 ```text
-src/gcon/       Core package — coordinator, agents, scheduling, workflows, verification
-sdk/            Python SDK (gcon_sdk) — see sdk/README.md
-scripts/        Entry points: coordinator, agent, cert setup
-docs/           Architecture, API, deployment, failover docs
-tests/          Test suites
-templates/      Dashboard templates
-static/         Dashboard CSS/JS
+src/gcon/     The core: coordinator, workers, scheduling, verification
+sdk/          Python client (gcon_sdk)
+scripts/      Start the coordinator and workers, make certificates
+docs/         Architecture, API, deployment, failover
+tests/        Test suites
 ```
-
----
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [API Reference](docs/API.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Coordinator Failover (HA)](docs/FAILOVER.md)
-- [Transport & Persistence](docs/TRANSPORT_AND_PERSISTENCE.md)
-- [Quickstart Guide](docs/QUICKSTART.md)
-- [Python SDK](sdk/README.md)
+[Architecture](docs/ARCHITECTURE.md) · [API](docs/API.md) · [Deployment](docs/DEPLOYMENT.md) · [Failover](docs/FAILOVER.md) · [Quickstart](docs/QUICKSTART.md) · [SDK](sdk/README.md)
 
----
+## Contributing & security
 
-## Contributing
-
-Open an issue before big changes. Make sure tests pass before a PR. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## Security
-
-Found a vulnerability? See [SECURITY.md](SECURITY.md) — please don't open a public issue for it.
-
----
+Open an issue before big changes and make sure tests pass. See [CONTRIBUTING.md](CONTRIBUTING.md). Found a vulnerability? See [SECURITY.md](SECURITY.md), and please don't open a public issue for it.
 
 ## License
 
