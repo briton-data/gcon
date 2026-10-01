@@ -10,7 +10,7 @@ from datetime import datetime, UTC, timedelta
 
 import pytest
 
-from gcon.management.auth import SessionManager
+from gcon.management.auth import SessionManager, hash_token
 from gcon.management.rate_limit import LoginRateLimiter, EVICT_SIZE_THRESHOLD
 from gcon.storage.database import Database
 
@@ -45,12 +45,13 @@ def test_expired_db_session_is_rejected_and_cleaned_up(tmp_path):
     token = sm.create_session("user-1")
 
     # Force it into the past directly in the DB, as if it were
-    # created a long time before a restart.
+    # created a long time before a restart. (The table stores the token's
+    # hash, never the raw token -- see management/auth.py.)
     expired = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-    db.execute("UPDATE sessions SET expires_at = ? WHERE token = ?", (expired, token))
+    db.execute("UPDATE sessions SET expires_at = ? WHERE token = ?", (expired, hash_token(token)))
 
     assert sm.get_user_id(token) is None
-    assert db.query_one("SELECT * FROM sessions WHERE token = ?", (token,)) is None
+    assert db.query_one("SELECT * FROM sessions WHERE token = ?", (hash_token(token),)) is None
 
 
 def test_destroy_all_for_user_db_backed(tmp_path):
