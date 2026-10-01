@@ -9,6 +9,8 @@ that it's actually wired through registration -> JobAssign ->
 signing -> JobResult -> verification -> receipt for real.
 """
 import datetime
+import json
+import os
 
 import pytest
 
@@ -170,3 +172,86 @@ def test_local_transport_jobs_have_no_worker_attestation(coordinator_over_grpc):
     assert wait_until(lambda: coordinator.jobs["job-local-1"]["status"] == "completed", timeout=5)
     assert coordinator.receipts["job-local-1"].get("worker_attestation") is None
     coordinator.shutdown()
+
+
+# ------------------------------------------------ execution_backend is attested
+def _install_stand_in_docker(bin_dir):
+    """A `docker` executable that runs the trailing `sh -c <script>` of
+    `docker run ... <image> sh -c <script>` directly, and no-ops the rest --
+    enough to drive the agent's real docker code path without a Docker daemon."""
+    bin_dir.mkdir()
+    script = bin_dir / "docker"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import subprocess, sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == 'run':\n"
+        "    sys.exit(subprocess.run(sys.argv[-3:]).returncode)\n"
+        "sys.exit(0)\n"
+    )
+    script.chmod(0o755)
+
+
+def _run_one_job(coordinator, transport, address, cert_dir, tmp_path, node_id, job_id):
+    daemon = _start_agent(node_id, address, cert_dir, tmp_path)
+    try:
+        assert wait_until(
+            lambda: (
+                node_id in [n.node_id for n in coordinator.registry.available_nodes()]
+                and node_id in transport.list_node_ids()
+            )
+        )
+        coordinator.submit_job(job_id, "echo backend-check")
+        assert wait_until(lambda: coordinator.jobs[job_id]["status"] == "completed", timeout=15)
+        assert wait_until(lambda: coordinator.control_plane.receipts.list_for_job(job_id), timeout=10)
+        return coordinator.control_plane.receipts.list_for_job(job_id)[0]["payload"]
+    finally:
+        daemon.stop()
+
+
+def test_receipt_attests_a_subprocess_backend(coordinator_over_grpc, tmp_path, monkeypatch):
+    coordinator, transport, address, cert_dir = coordinator_over_grpc
+    monkeypatch.delenv("GCON_EXECUTION_BACKEND", raising=False)
+    receipt = _run_one_job(coordinator, transport, address, cert_dir, tmp_path, "node-be-1", "job-be-1")
+
+    attestation = receipt["worker_attestation"]
+    assert attestation["payload"]["execution_backend"] == "subprocess"
+    assert verify_attestation(
+        attestation["public_key_pem"], attestation["payload"], attestation["signature"]
+    ) is True
+    detail = coordinator.get_receipt_detail(receipt["receipt_id"])
+    assert detail["worker_attestation"]["execution_backend"] == "subprocess"
+
+
+def test_receipt_attests_a_docker_backend(coordinator_over_grpc, tmp_path, monkeypatch):
+    coordinator, transport, address, cert_dir = coordinator_over_grpc
+    _install_stand_in_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    monkeypatch.setenv("GCON_EXECUTION_BACKEND", "docker")
+    receipt = _run_one_job(coordinator, transport, address, cert_dir, tmp_path, "node-be-2", "job-be-2")
+
+    attestation = receipt["worker_attestation"]
+    assert attestation["payload"]["execution_backend"] == "docker"
+    assert verify_attestation(
+        attestation["public_key_pem"], attestation["payload"], attestation["signature"]
+    ) is True
+    detail = coordinator.get_receipt_detail(receipt["receipt_id"])
+    assert detail["worker_attestation"]["verified"] is True
+    assert detail["worker_attestation"]["execution_backend"] == "docker"
+
+
+def test_rewriting_the_attested_backend_breaks_the_receipt(coordinator_over_grpc, tmp_path, monkeypatch):
+    """The coordinator (or anyone holding the receipt) can't relabel how the job
+    ran: the node signed it, so a changed value fails validation, and that
+    surfaces through assurance as an attestation mismatch."""
+    from gcon.execution.verifier import ExecutionVerifier
+
+    coordinator, transport, address, cert_dir = coordinator_over_grpc
+    monkeypatch.delenv("GCON_EXECUTION_BACKEND", raising=False)
+    receipt = _run_one_job(coordinator, transport, address, cert_dir, tmp_path, "node-be-3", "job-be-3")
+
+    assert ExecutionVerifier.validate_worker_attestation(receipt)[0] is True
+
+    relabelled = json.loads(json.dumps(receipt))
+    relabelled["worker_attestation"]["payload"]["execution_backend"] = "docker"
+    valid, message = ExecutionVerifier.validate_worker_attestation(relabelled)
+    assert valid is False and "invalid" in message.lower()

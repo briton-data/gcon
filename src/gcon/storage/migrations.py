@@ -226,4 +226,27 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_customer_reset_tokens_user ON customer_password_reset_tokens (customer_user_id)",
         ],
     ),
+
+    Migration(
+        version=5,
+        name="api_key_hashed_storage",
+        up_sql=[
+            # Raw API secrets are no longer stored (see api_keys.py's
+            # module docstring). The two new columns hold the SHA-256
+            # of the secret (auth lookup key) and its display mask.
+            # Nullable on purpose: existing rows get them filled in by
+            # APIKeyManager's one-time backfill on next boot, which also
+            # blanks the old raw `secret` column -- SQL alone can't do
+            # that, SQLite has no built-in SHA-256. The `secret` column
+            # itself is kept (NOT NULL, now always '') rather than
+            # dropped, to avoid a table rebuild for no benefit.
+            "ALTER TABLE api_keys ADD COLUMN secret_hash TEXT",
+            "ALTER TABLE api_keys ADD COLUMN secret_masked TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_secret_hash ON api_keys (secret_hash)",
+            # Index over the raw plaintext column -- nothing looks keys
+            # up by it any more, and it would keep a copy of every
+            # unconverted secret in a second place.
+            "DROP INDEX IF EXISTS idx_api_keys_secret",
+        ],
+    ),
 ]

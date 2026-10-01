@@ -18,7 +18,6 @@ The agent:
 import threading
 import time
 import os
-import tempfile
 import sys
 import signal
 import subprocess
@@ -123,17 +122,49 @@ class GCONAgent:
         self.docker_image = os.environ.get("GCON_JOB_DOCKER_IMAGE", "python:3.12-slim")
         self.docker_memory_limit = os.environ.get("GCON_JOB_DOCKER_MEMORY_LIMIT")  # e.g. "2g"
         self.docker_cpu_limit = os.environ.get("GCON_JOB_DOCKER_CPU_LIMIT")  # e.g. "1.5"
-        # Unset by default -- Docker's own default bridge network, so
-        # jobs that legitimately need network access (e.g. this repo's
-        # own "python fetch.py" workflow example) keep working. Set to
-        # "none" explicitly for stronger isolation once you've
-        # confirmed your real workloads don't need outbound network.
-        self.docker_network = os.environ.get("GCON_JOB_DOCKER_NETWORK")
+        # No network by default ("none"). Docker's own default bridge gives a
+        # job outbound internet and, on a cloud host, the instance-metadata
+        # endpoint (169.254.169.254) with its credentials -- not something a
+        # sandbox should hand to arbitrary job code. A job that genuinely
+        # needs the network (e.g. the "python fetch.py" workflow example)
+        # needs the operator to opt in: GCON_JOB_DOCKER_NETWORK=bridge (or a
+        # named network). "host" is refused. See run_worker.py for the
+        # startup warning that accompanies an opt-in.
+        self.docker_network = docker_executor.validate_network(
+            os.environ.get("GCON_JOB_DOCKER_NETWORK", "none")
+        )
         # Unset by default -- GPU passthrough requires the
         # nvidia-container-toolkit on the host, which this doesn't
         # assume is present. Set to e.g. "all" once confirmed working
         # on your actual GPU worker.
         self.docker_gpus = os.environ.get("GCON_JOB_DOCKER_GPUS")
+        # Max processes per job container (a fork-bomb bound); "-1" = unlimited.
+        self.docker_pids_limit = os.environ.get("GCON_JOB_DOCKER_PIDS_LIMIT", "512")
+        # Optional non-root "uid[:gid]" for job containers; unset = image default.
+        self.docker_user = os.environ.get("GCON_JOB_DOCKER_USER") or None
+
+        # Optional privilege separation for the raw-subprocess backend:
+        # run each job as this OS user instead of as the worker. Without it
+        # a job runs as the worker itself and can read the worker's own
+        # private keys (mTLS + attestation) straight off disk -- enough to
+        # impersonate the node. As a different user, those 0600 files are
+        # unreadable to it. Opt-in because it needs the worker started as
+        # root (to switch user) and a pre-created unprivileged user.
+        # This is NOT a sandbox -- the job still sees the rest of the host
+        # and its network -- it only protects the worker's own identity.
+        self.job_user = None
+        self._job_popen_identity = {}
+        self._job_env_identity = {}
+        self._job_io_gid = None
+        run_as = os.environ.get("GCON_JOB_RUN_AS_USER") or None
+        if run_as:
+            if self.execution_backend == "docker":
+                logger.warning(
+                    "GCON_JOB_RUN_AS_USER=%s is ignored: it applies to the subprocess "
+                    "backend only, and this worker runs jobs in docker.", run_as,
+                )
+            else:
+                self._configure_job_user(run_as)
 
         # detect_gpu() shells out to nvidia-smi via GPUtil -- cheap on
         # POSIX (fork), genuinely expensive as a subprocess spawn on
@@ -297,6 +328,84 @@ class GCONAgent:
             return True
         return False
 
+
+    def _configure_job_user(self, name):
+        """
+        Resolve GCON_JOB_RUN_AS_USER into the identity jobs will run under.
+        Fails at startup -- never at job time, and never by quietly running
+        jobs as the worker -- if the setup can't actually deliver the
+        separation it promises.
+        """
+        if os.name != "posix":
+            raise RuntimeError(
+                "GCON_JOB_RUN_AS_USER is only supported on Linux/macOS. On Windows, "
+                "use GCON_EXECUTION_BACKEND=docker, or treat this worker as trusted-only."
+            )
+        if os.geteuid() != 0:
+            raise RuntimeError(
+                "GCON_JOB_RUN_AS_USER needs the worker to start as root so it can run "
+                "jobs as a different user; it is running as uid "
+                f"{os.geteuid()}. Start the worker as root, or unset the variable."
+            )
+        import pwd
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            raise RuntimeError(
+                f"GCON_JOB_RUN_AS_USER={name!r}: there is no such user on this host. "
+                "Create an unprivileged account for jobs first."
+            ) from None
+        if entry.pw_uid == 0:
+            raise RuntimeError(
+                f"GCON_JOB_RUN_AS_USER={name!r} is root; jobs must run as an unprivileged user."
+            )
+        self.job_user = name
+        self._job_popen_identity = {
+            "user": entry.pw_uid,
+            "group": entry.pw_gid,
+            # The user's own configured groups (e.g. `video` for GPU access),
+            # not the worker's -- so what a job may touch is set by the
+            # admin via the account, not inherited from root.
+            "extra_groups": os.getgrouplist(name, entry.pw_gid),
+        }
+        self._job_env_identity = {"HOME": entry.pw_dir, "USER": name, "LOGNAME": name}
+        self._job_io_gid = entry.pw_gid
+
+    def _grant_job_user_report_access(self):
+        """
+        Let the job user write its usage/stage report files. They live in the
+        worker's private job-IO directory (0700, owned by the worker), which
+        the job user otherwise can't enter. Group-shared with that user's
+        primary group only -- nobody else on the host gets access.
+        """
+        directory = docker_executor.job_io_dir()
+        os.chown(directory, -1, self._job_io_gid)
+        os.chmod(directory, 0o770)
+
+    @property
+    def sandboxed(self):
+        """True if jobs on this worker run inside a container (the docker
+        backend) rather than as raw host subprocesses. The scheduler reads
+        this to honor the coordinator's GCON_SANDBOX_POLICY."""
+        return self.execution_backend == "docker"
+
+    @staticmethod
+    def _job_environment():
+        """
+        The environment a job process gets: this worker's own, minus every
+        GCON_* variable. Those are the worker's configuration -- notably
+        the base64 cert/key material (GCON_AGENT_KEY_B64 and friends) that
+        worker_bootstrap.sh / the Docker entrypoint inject -- and a job
+        has no business reading them: with the subprocess backend a job
+        otherwise inherited them and could impersonate the node. The two
+        report-path variables the job actually needs are added back by
+        execute_job. (This closes the environment leak only; with the
+        subprocess backend a job still runs as the worker's OS user, so
+        the key FILES on disk stay readable to it -- that isolation is
+        what the docker backend / sandbox policy is for.)
+        """
+        return {k: v for k, v in os.environ.items() if not k.startswith("GCON_")}
+
     def execute_job(
         self,
         job_id,
@@ -351,9 +460,8 @@ class GCONAgent:
         self.status = "busy"
         self._current_job_id = job_id
 
-        job_env = None
+        job_env = self._job_environment()
         if usage_report_path:
-            job_env = dict(os.environ)
             job_env["GCON_USAGE_REPORT_PATH"] = usage_report_path
             # Belt-and-braces: if a stale file from a previous job
             # happens to already exist at this path, don't let its
@@ -368,7 +476,6 @@ class GCONAgent:
         stage_thread = None
         stage_stop = None
         if stage_report_path:
-            job_env = job_env or dict(os.environ)
             job_env["GCON_STAGE_REPORT_PATH"] = stage_report_path
             try:
                 if os.path.exists(stage_report_path):
@@ -415,13 +522,18 @@ class GCONAgent:
                     job_id=job_id,
                     job_script=job_script,
                     image=self.docker_image,
-                    host_temp_dir=tempfile.gettempdir(),
+                    # Only the job's own report-file directory is mounted --
+                    # not the whole system temp dir. Callers build
+                    # usage/stage_report_path with docker_executor.job_io_path.
+                    host_temp_dir=docker_executor.job_io_dir(),
                     usage_report_path=usage_report_path,
                     stage_report_path=stage_report_path,
                     memory_limit=self.docker_memory_limit,
                     cpu_limit=self.docker_cpu_limit,
                     network=self.docker_network,
                     gpus=self.docker_gpus,
+                    pids_limit=self.docker_pids_limit,
+                    user=self.docker_user,
                 )
                 use_shell = False
             elif os.path.isfile(job_script) and job_script.endswith('.py'):
@@ -440,6 +552,9 @@ class GCONAgent:
                 command = job_script
                 use_shell = True
             logger.info(f"Executing command: {command if use_shell else ' '.join(command)}")
+            if self._job_popen_identity:
+                self._grant_job_user_report_access()
+                job_env.update(self._job_env_identity)
             
             # Execute the job
             self.process = subprocess.Popen(
@@ -457,6 +572,9 @@ class GCONAgent:
                 # process group so cancel() can kill all of it at
                 # once via os.killpg, not just the shell wrapper.
                 start_new_session=(os.name == "posix"),
+                # Empty unless GCON_JOB_RUN_AS_USER is configured (subprocess
+                # backend only): then the job runs as that user, not as us.
+                **self._job_popen_identity,
             )
             
             # Monitor execution

@@ -27,7 +27,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -75,6 +75,7 @@ def ensure_node_keypair(cert_dir: str, node_id: str) -> Tuple[Ed25519PrivateKey,
 def build_attestation_payload(
     *, job_id: str, attempt_id: str, node_id: str, job_spec_hash: str,
     output_hash: str, status: str, timestamp: str,
+    execution_backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     The exact fields a worker attestation commits to.
@@ -84,8 +85,21 @@ def build_attestation_payload(
     attestation of its own stdout, computed independently of (though
     expected to agree with) whatever the coordinator separately
     computes from the same bytes once the result arrives.
+
+    `execution_backend` ("docker" or "subprocess") is how the node ran
+    the job: inside a container, or as a raw host subprocess with the
+    worker's own privileges. Signing it makes it the NODE's statement,
+    which neither the coordinator nor anyone relaying the receipt can
+    alter or invent without breaking the signature. It is still the
+    node's own claim -- a dishonest node could sign "docker" while
+    running the job raw -- so it proves who said it and that it wasn't
+    tampered with, not that it is true. Left out of the payload
+    entirely when not given (an older worker), so a payload from before
+    this field existed is byte-for-byte what it always was, and every
+    receipt already issued keeps verifying: verification checks the
+    payload stored with the receipt, exactly as signed.
     """
-    return {
+    payload = {
         "job_id": job_id,
         "attempt_id": attempt_id,
         "node_id": node_id,
@@ -94,6 +108,9 @@ def build_attestation_payload(
         "status": status,
         "timestamp": timestamp,
     }
+    if execution_backend is not None:
+        payload["execution_backend"] = execution_backend
+    return payload
 
 
 def _canonical_bytes(payload: Dict[str, Any]) -> bytes:

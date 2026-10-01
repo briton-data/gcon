@@ -31,10 +31,20 @@ CERT_DIR="${GCON_TLS_CERT_DIR:-/etc/gcon/certs}"
 GCON_REF="${GCON_GIT_REF:-main}"
 
 mkdir -p "$CERT_DIR"
-echo "$GCON_CA_CERT_B64"    | base64 -d > "$CERT_DIR/ca.cert.pem"
-echo "$GCON_AGENT_CERT_B64" | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.cert.pem"
-echo "$GCON_AGENT_KEY_B64"  | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
+# umask in a subshell so the key is never created readable, and so it doesn't
+# leak into jobs the worker starts later.
+(
+  umask 077
+  echo "$GCON_CA_CERT_B64"    | base64 -d > "$CERT_DIR/ca.cert.pem"
+  echo "$GCON_AGENT_CERT_B64" | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.cert.pem"
+  echo "$GCON_AGENT_KEY_B64"  | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
+)
 chmod 600 "$CERT_DIR"/agent-"${GCON_NODE_ID}".key.pem
+
+# Nothing in the worker reads these variables -- the files are the source of
+# truth. Leaving them set keeps the private key readable by any same-user
+# process via /proc/<pid>/environ, which is where job code runs.
+unset GCON_CA_CERT_B64 GCON_AGENT_CERT_B64 GCON_AGENT_KEY_B64
 
 # Install the `gcon` package straight from git -- no clone/cd needed,
 # and it's idempotent (pip no-ops if already installed at this ref).

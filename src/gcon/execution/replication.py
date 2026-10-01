@@ -49,13 +49,16 @@ DEFAULT_TOLERANCE = 0.02  # 2% relative tolerance on comparable numeric fields
 # output, not just noisy timing.
 _STRICT_FIELDS = ("output_hash",)
 
-# Numeric fields that legitimately vary a little between honest runs
-# on different hardware (clock speed, thermal throttling, etc.) --
-# compared within `tolerance` instead of exactly. Deliberately does
-# NOT include cpu_percent/memory_percent/gpu_memory_used -- those
-# reflect the *node's* load at the time, not the computation's
-# correctness, and comparing them would produce false disagreements
-# between two perfectly honest nodes.
+# Numeric fields that legitimately vary between honest runs on
+# different hardware (clock speed, thermal throttling, scheduling
+# jitter, ...). Measured against `tolerance` and REPORTED
+# (compare_results()'s "metric_outliers" / "max_deviation") but they do
+# NOT decide agreement: timing says nothing about whether the
+# computation was performed correctly, and letting it decide made
+# honest replicas disagree -- 18 of 20 identical `echo hi` runs on two
+# healthy nodes came out "disputed" on runtime alone. Also
+# deliberately excludes cpu_percent/memory_percent/gpu_memory_used --
+# those reflect the *node's* load, not the computation.
 _TOLERANT_METRIC_FIELDS = ("runtime_seconds",)
 
 
@@ -66,26 +69,38 @@ def compare_results(
     """
     Compare N replicas' execution results for agreement.
 
+    Agreement is decided by the strict fields only (_STRICT_FIELDS --
+    currently output_hash, which must match exactly on every replica).
+    Timing-style metrics (_TOLERANT_METRIC_FIELDS) are measured and
+    reported but never cause a disagreement; see the comment on that
+    constant for why.
+
     Args:
         results: one dict per successful replica, each shaped like:
             {"output_hash": <str>, "metrics": {"runtime_seconds": ..., ...}}
             (see coordinator.py's _run_replicated_job for how these
             are built from the same `result`/output_hash values the
             single-node path already computes).
-        tolerance: relative tolerance (0.02 == 2%) applied to
-            _TOLERANT_METRIC_FIELDS.
+        tolerance: relative spread (0.02 == 2%) beyond which a metric
+            is listed in "metric_outliers". Informational only.
 
     Returns:
         {
             "agree": bool,
-            "compared_fields": [str, ...],
-            "max_deviation": float,   # 0.0 if nothing tolerant-compared
-            "mismatches": [{"field": ..., "values": [...], ...}, ...],
+            "compared_fields": [str, ...],   # the fields that decided "agree"
+            "max_deviation": float,          # largest metric spread, 0.0 if none
+            "mismatches": [{"field": ..., "values": [...]}, ...],
+            "metric_outliers": [{"field": ..., "values": [...],
+                                 "deviation": ..., "tolerance": ...}, ...],
         }
 
-    Fewer than 2 results can't be compared -- returns agree=False
-    with an explicit "not enough replicas" mismatch rather than
-    silently claiming agreement on a single, unwitnessed result.
+    Cases that are NOT agreement, returned as agree=False with an
+    explicit reason rather than a silent True:
+      - fewer than 2 results: a single, unwitnessed result.
+      - no strict field present on every replica: nothing was
+        actually compared, so there is nothing to agree ON. (Missing
+        data on one replica is skipped rather than compared as
+        None-vs-value, but only as long as at least one field remains.)
     """
     if len(results) < 2:
         return {
@@ -96,11 +111,11 @@ def compare_results(
                 "field": None,
                 "reason": f"only {len(results)} successful replica(s) to compare; need at least 2",
             }],
+            "metric_outliers": [],
         }
 
     compared_fields: List[str] = []
     mismatches: List[Dict[str, Any]] = []
-    max_deviation = 0.0
 
     for field in _STRICT_FIELDS:
         values = [r.get(field) for r in results]
@@ -110,6 +125,28 @@ def compare_results(
         if len(set(values)) > 1:
             mismatches.append({"field": field, "values": values})
 
+    if not compared_fields:
+        return {
+            "agree": False,
+            "compared_fields": [],
+            "max_deviation": 0.0,
+            "mismatches": [{
+                "field": None,
+                "reason": (
+                    "no strict field (" + ", ".join(_STRICT_FIELDS) + ") was present "
+                    "on every replica, so nothing could be compared"
+                ),
+            }],
+            "metric_outliers": [],
+        }
+
+    # Informational only -- never affects "agree". The spread is taken
+    # over the whole set and scaled by the largest magnitude, so it
+    # doesn't depend on which replica happened to be listed first
+    # (measuring against results[0] made the same two runtimes agree or
+    # disagree depending on completion order).
+    max_deviation = 0.0
+    metric_outliers: List[Dict[str, Any]] = []
     for field in _TOLERANT_METRIC_FIELDS:
         raw_values = [r.get("metrics", {}).get(field) for r in results]
         if any(v is None for v in raw_values):
@@ -118,23 +155,15 @@ def compare_results(
             values = [float(v) for v in raw_values]
         except (TypeError, ValueError):
             continue
-        compared_fields.append(field)
-        base = values[0]
-        field_max_deviation = 0.0
-        for v in values[1:]:
-            if base == 0 and v == 0:
-                deviation = 0.0
-            elif base == 0:
-                deviation = float("inf")
-            else:
-                deviation = abs(v - base) / abs(base)
-            field_max_deviation = max(field_max_deviation, deviation)
-        max_deviation = max(max_deviation, field_max_deviation)
-        if field_max_deviation > tolerance:
-            mismatches.append({
+        spread = max(values) - min(values)
+        scale = max(abs(v) for v in values)
+        deviation = 0.0 if spread == 0 else spread / scale
+        max_deviation = max(max_deviation, deviation)
+        if deviation > tolerance:
+            metric_outliers.append({
                 "field": field,
                 "values": values,
-                "deviation": field_max_deviation,
+                "deviation": deviation,
                 "tolerance": tolerance,
             })
 
@@ -143,6 +172,7 @@ def compare_results(
         "compared_fields": compared_fields,
         "max_deviation": max_deviation,
         "mismatches": mismatches,
+        "metric_outliers": metric_outliers,
     }
 
 

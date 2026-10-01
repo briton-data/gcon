@@ -478,10 +478,15 @@ Enhancements," which was no longer accurate:
   agreement, with each replica keeping its own independently
   HMAC-signed receipt (`self.replica_receipts`). Surfaced in the
   dashboard's Receipt Inspector as a "Replicated Execution" panel
-  (witnesses, agreement, max deviation, mismatches). Not yet exposed via
-  the public `/api/v1` — `POST /jobs`'s `JobSubmitRequest` model doesn't
-  have a `verify` field yet; only reachable through
-  `GCONCoordinator.submit_job()` directly. See
+  (witnesses, agreement, max deviation, mismatches). Available on the
+  public `/api/v1` as the `verify` field of `POST /jobs`. Replicas agree
+  only if their output hash is identical; runtime spread is measured and
+  reported but never decides agreement (timing says nothing about
+  correctness, and letting it decide flagged healthy replicas). The outcome
+  is on the job as `verification` (`agreed` / `disputed` / `unavailable`)
+  and in the `JOB_COMPLETED` webhook payload; a dispute also fires an
+  `EXECUTION_DISPUTED` webhook. A disputed job keeps status `completed`. A
+  job is only marked completed once its receipt exists. See
   [Security Model](#security-model) below for what this mechanism does
   and does not prove.
 - **Node-attested receipts** — a receipt's signed payload can carry

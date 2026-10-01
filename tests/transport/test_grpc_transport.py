@@ -8,6 +8,7 @@ stub. No networking is mocked or simulated.
 """
 
 import os
+import threading
 import time
 
 import grpc
@@ -386,3 +387,40 @@ def test_graceful_daemon_shutdown_notifies_coordinator(running_transport, tmp_pa
 
     events = [e["event_type"] for e in transport.control_plane.cluster_events.recent()]
     assert "NODE_DISCONNECTED" in events
+
+
+# ------------------------------------------------------- worker lost mid-job
+def test_worker_lost_mid_job_raises_node_unavailable_not_a_timeout(running_transport, tmp_path):
+    """When a worker's connection goes away while a job is running, send_job
+    must say so (NodeUnavailableError) -- not raise JobDispatchTimeoutError,
+    which is what a job that genuinely ran out of time raises. The two used
+    to be indistinguishable (the error even claimed a ~1 hour timeout for a
+    worker that had just died), so the coordinator could not tell "retry this
+    job elsewhere" from "this job failed" and failed it permanently."""
+    transport, address = running_transport
+    cert_dir = transport.config.tls_cert_dir
+
+    daemon = _start_agent("node-lost-1", address, cert_dir, tmp_path)
+    try:
+        assert wait_until(lambda: "node-lost-1" in transport.list_node_ids())
+
+        outcome = {}
+
+        def dispatch():
+            try:
+                transport.send_job("node-lost-1", "job-lost", "sleep 4", timeout=60)
+            except Exception as exc:  # captured for the assertions below
+                outcome["exc"] = exc
+
+        thread = threading.Thread(target=dispatch, daemon=True)
+        thread.start()
+        assert wait_until(lambda: transport.control_plane.job_attempts.list_for_job("job-lost"))
+
+        transport.unregister_node("node-lost-1")  # closes the session under the waiting send_job
+
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "send_job should be released promptly when the worker is lost"
+        assert isinstance(outcome["exc"], NodeUnavailableError), repr(outcome["exc"])
+        assert "job-lost" in str(outcome["exc"]) and "node-lost-1" in str(outcome["exc"])
+    finally:
+        daemon.stop()

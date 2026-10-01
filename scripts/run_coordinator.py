@@ -168,7 +168,10 @@ def main():
         })
 
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
-        proxy = RemoteNodeProxy(node_id, transport, org_id=org_id, address=address)
+        proxy = RemoteNodeProxy(
+            node_id, transport, org_id=org_id, address=address,
+            sandboxed=(capabilities or {}).get("sandbox") == "docker",
+        )
         coordinator.register_agent(proxy)
         logger.info(
             "'%s' registered with scheduler from %s, org=%s, capabilities=%s",

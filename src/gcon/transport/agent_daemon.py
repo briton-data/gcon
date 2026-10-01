@@ -30,7 +30,6 @@ import logging
 import os
 import queue
 import socket
-import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +38,7 @@ from typing import Dict, Optional
 import grpc
 
 from gcon.execution.agent import GCONAgent
+from gcon.execution.docker_executor import job_io_path
 from gcon.execution.receipt import ReceiptGenerator
 from gcon.execution.worker_identity import (
     build_attestation_payload,
@@ -400,10 +400,7 @@ class AgentDaemon:
             except ValueError:
                 job_metadata = {}
             if job_metadata.get("kind") == "staged":
-                stage_report_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"gcon-stages-{job_assign.job_id}.jsonl",
-                )
+                stage_report_path = job_io_path("stages", job_assign.job_id, ".jsonl")
 
         # usage_report_path applies to every job kind, not just staged
         # ones -- any job's subprocess (an AI-agent workload calling
@@ -413,9 +410,7 @@ class AgentDaemon:
         # was previously never derived at all on this path, which
         # meant GCONAgent.execute_job's usage_report_path parameter
         # was permanently unreachable for every job run over gRPC too.
-        usage_report_path = os.path.join(
-            tempfile.gettempdir(), f"gcon-usage-{job_assign.job_id}.json"
-        )
+        usage_report_path = job_io_path("usage", job_assign.job_id, ".json")
 
         try:
             result = self.agent.execute_job(
@@ -491,6 +486,10 @@ class AgentDaemon:
             output_hash=hashlib.sha256(stdout.encode()).hexdigest(),
             status=status,
             timestamp=timestamp,
+            # How THIS node actually ran the job (container or raw host
+            # subprocess) -- signed along with the rest, so a receipt says
+            # so in the node's own words. See build_attestation_payload.
+            execution_backend=getattr(self.agent, "execution_backend", None),
         )
         attestation_signature = sign_attestation(self._ed25519_private_key, attestation_payload)
 

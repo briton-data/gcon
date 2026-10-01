@@ -178,6 +178,11 @@ class _PendingResult:
     def __init__(self):
         self.event = threading.Event()
         self.envelope: Optional[pb.JobResult] = None
+        # True when the waiter was released because the node's session
+        # closed (worker disconnected / was removed), rather than because a
+        # result arrived or the wait ran out. send_job uses it to report
+        # "worker lost" instead of "timed out" -- see NodeSession.close().
+        self.session_closed = False
 
 
 class NodeSession:
@@ -218,6 +223,7 @@ class NodeSession:
         self.outbound.put(None)
         with self._lock:
             for pending in self.pending_results.values():
+                pending.session_closed = True
                 pending.event.set()
             self.pending_results.clear()
 
@@ -789,6 +795,16 @@ class GrpcTransport(Transport):
         # execution timeout, since the agent enforces the same
         # deadline locally and needs time to report back.
         got_result = pending.event.wait(timeout=wait_timeout + 15)
+
+        if pending.envelope is None and pending.session_closed:
+            # The wait was cut short because the worker's connection went
+            # away with this job still in flight. That is not a timeout --
+            # the job never got its time -- and the caller needs to be able
+            # to tell the two apart: a lost worker means "run it elsewhere",
+            # a timeout means the job itself ran too long.
+            raise NodeUnavailableError(
+                f"Node '{node_id}' disconnected while job '{job_id}' was running."
+            )
 
         if not got_result or pending.envelope is None:
             raise JobDispatchTimeoutError(

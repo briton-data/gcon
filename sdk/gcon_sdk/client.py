@@ -114,13 +114,31 @@ class GconClient:
         """Get a single node by id."""
         return self._request("GET", f"/nodes/{node_id}")
 
+    def get_node_enrollment_history(self, node_id: str) -> List[Dict[str, Any]]:
+        """Durable audit trail of Enroll RPC attempts for this
+        node_id -- source IPs and which enroll_token_id was used for
+        each attempt."""
+        return self._request("GET", f"/nodes/{node_id}/enrollment-history")
+
     # ------------------------------------------------------------
     # Jobs
     # ------------------------------------------------------------
 
-    def list_jobs(self) -> List[Dict[str, Any]]:
-        """List all jobs."""
-        return self._request("GET", "/jobs")
+    def list_jobs(self, status: Optional[str] = None,
+                  limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """List jobs, newest first.
+
+        `status`/`limit` are optional -- omit both for the original
+        "every job" behavior. `status` filters to a single job status
+        (e.g. "failed", "pending", "running", "completed"); `limit`
+        caps how many are returned.
+        """
+        params: Dict[str, Any] = {}
+        if status is not None:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+        return self._request("GET", "/jobs", params=params or None)
 
     def get_job(self, job_id: str) -> Dict[str, Any]:
         """Get a single job by id."""
@@ -204,6 +222,22 @@ class GconClient:
         """Cancel a running job."""
         return self._request("POST", f"/jobs/{job_id}/cancel")
 
+    def retry_job(self, job_id: str) -> Dict[str, Any]:
+        """Retry a failed or stuck-pending job. Raises GconAPIError
+        (status_code=400) if the job isn't in a retryable state, or
+        404 if it doesn't exist (or isn't yours)."""
+        return self._request("POST", f"/jobs/{job_id}/retry")
+
+    def clear_jobs(self, job_ids: List[str]) -> Dict[str, Any]:
+        """Permanently clear failed or cancelled jobs (at most 200
+        per call, and only jobs that are failed/cancelled with no
+        receipt -- receipts are never deleted). Returns
+        {"cleared": [...], "skipped": [{"job_id", "reason",
+        "message"}, ...]} -- a job that can't be cleared is reported
+        in `skipped` with why, not raised as an error, so one
+        unclearable id in a batch doesn't fail the whole call."""
+        return self._request("POST", "/jobs/clear", json={"job_ids": job_ids})
+
     # ------------------------------------------------------------
     # Workflows
     # ------------------------------------------------------------
@@ -238,13 +272,54 @@ class GconClient:
     # Receipts & artifacts
     # ------------------------------------------------------------
 
-    def list_receipts(self) -> List[Dict[str, Any]]:
-        """List all job receipts."""
-        return self._request("GET", "/receipts")
+    def list_receipts(self, verified: Optional[bool] = None,
+                       limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """List job receipts. `verified`/`limit` are optional -- omit
+        both for the original "every receipt" behavior. `verified`
+        filters to only genuinely HMAC-valid (or only invalid)
+        receipts; `limit` caps how many are returned (most recent
+        first)."""
+        params: Dict[str, Any] = {}
+        if verified is not None:
+            params["verified"] = verified
+        if limit is not None:
+            params["limit"] = limit
+        return self._request("GET", "/receipts", params=params or None)
+
+    def get_receipt(self, receipt_id: str) -> Dict[str, Any]:
+        """Full evidence detail for a single receipt: the signed
+        proof, worker attestation (if any), policy report, execution
+        proof + replica agreement for a replicated job (if any), and
+        the reconciled `assurance` decision combining all of them --
+        see the GCON API reference's Verification section for the
+        assurance level precedence."""
+        return self._request("GET", f"/receipts/{receipt_id}")
 
     def list_artifacts(self) -> List[Dict[str, Any]]:
         """List all registered artifacts."""
         return self._request("GET", "/artifacts")
+
+    # ------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------
+
+    def get_telemetry_events(self, job_id: Optional[str] = None,
+                              node_id: Optional[str] = None,
+                              since: Optional[str] = None,
+                              limit: int = 200) -> List[Dict[str, Any]]:
+        """Job-lifecycle telemetry events, most recent first, scoped
+        to your own org. `job_id`/`node_id` narrow to one job/node;
+        `since` is an ISO-8601 timestamp filtering to events at or
+        after it; `limit` caps how many are returned (default 200,
+        matching the server's own default)."""
+        params: Dict[str, Any] = {"limit": limit}
+        if job_id is not None:
+            params["job_id"] = job_id
+        if node_id is not None:
+            params["node_id"] = node_id
+        if since is not None:
+            params["since"] = since
+        return self._request("GET", "/telemetry/events", params=params)
 
     def close(self):
         self._session.close()

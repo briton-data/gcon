@@ -164,7 +164,10 @@ message JobResult {
   // before this message was ever sent, over a canonical JSON payload
   // (worker_attestation_payload_json) binding job_id + attempt_id +
   // a hash of the exact command it was assigned + a hash of its own
-  // stdout + status + timestamp. See gcon.execution.worker_identity.
+  // stdout + status + timestamp + (newer workers) the execution backend
+  // it ran the job under, "docker" or "subprocess". The payload is an
+  // opaque JSON string to the wire schema, so adding a signed key needed
+  // no change here. See gcon.execution.worker_identity.
   // Both empty for a node with no keypair (see RegisterRequest.
   // ed25519_public_key_pem) -- real, not an error.
   string worker_attestation_payload_json = 11;
