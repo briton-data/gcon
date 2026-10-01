@@ -161,6 +161,40 @@ def main():
             parser.error(f"--capability must be KEY=VALUE, got: {item}")
         key, value = item.split("=", 1)
         capabilities[key] = value
+    # "sandbox" is reserved like org_id: always derived from the backend
+    # this worker really runs, set AFTER --capability so a flag can't
+    # override it. The coordinator only hands jobs to a "docker" worker
+    # under its default GCON_SANDBOX_POLICY=required.
+    capabilities["sandbox"] = "docker" if agent.sandboxed else "none"
+    if not agent.sandboxed:
+        logger.warning(
+            "This worker is UNSANDBOXED: jobs run as raw host subprocesses. Under "
+            "the coordinator's default GCON_SANDBOX_POLICY=required it will be "
+            "given no jobs. Set GCON_EXECUTION_BACKEND=docker here to sandbox "
+            "jobs, or set GCON_SANDBOX_POLICY=trusted on the coordinator if every "
+            "workload is your own."
+        )
+        if agent.job_user:
+            logger.warning(
+                "Jobs run as the separate OS user %r, so they cannot read this "
+                "worker's private keys. That is not a sandbox: they still see the "
+                "rest of the host and its network.", agent.job_user,
+            )
+        else:
+            logger.warning(
+                "Jobs run as THIS worker's own user and can read its private keys "
+                "(mTLS + attestation) from disk -- enough to impersonate this node. "
+                "On Linux/macOS, start the worker as root and set "
+                "GCON_JOB_RUN_AS_USER=<unprivileged user> to prevent that."
+            )
+    elif agent.docker_network != "none":
+        logger.warning(
+            "Job containers have network access (GCON_JOB_DOCKER_NETWORK=%s). On a "
+            "cloud host that also exposes the instance-metadata service "
+            "(169.254.169.254) and its credentials to job code. Block it on the "
+            "host, e.g.: iptables -I DOCKER-USER -d 169.254.169.254 -j DROP -- or "
+            "leave the network at its default, 'none'.", agent.docker_network,
+        )
     if args.org_id:
         # "org_id" is a reserved capability key, not a real hardware
         # capability -- the coordinator's Register handler
