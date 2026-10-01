@@ -16,10 +16,10 @@ in-process. It exists so that:
 from __future__ import annotations
 
 import os
-import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
+from gcon.execution.docker_executor import job_io_path
 from gcon.transport.errors import NodeUnavailableError
 from gcon.transport.interfaces import Transport
 
@@ -72,9 +72,7 @@ class LocalTransport(Transport):
         # usage_report_path parameter was permanently unreachable for
         # any job run through LocalTransport -- confirmed empirically
         # (a real job's receipt always came back with usage: null).
-        usage_report_path = os.path.join(
-            tempfile.gettempdir(), f"gcon-usage-{job_id}.json"
-        )
+        usage_report_path = job_io_path("usage", job_id, ".json")
 
         result = node.execute_job(
             job_id, command, timeout=timeout, usage_report_path=usage_report_path

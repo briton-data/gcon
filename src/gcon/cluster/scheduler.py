@@ -34,7 +34,7 @@ class Scheduler:
             from gcon.execution.staking import StakeLedger
             self.stake_ledger = StakeLedger(control_plane)
 
-    def select_node(self, requires=None, org_id=None):
+    def select_node(self, requires=None, org_id=None, require_sandbox=False):
         """
         Select the least-loaded idle node satisfying `requires` (if
         given) and atomically claim it (marks it busy in the
@@ -65,6 +65,11 @@ class Scheduler:
         that ALSO have org_id=None; it is never allowed to land on a
         node that belongs to a real org, since that node is presumed
         dedicated/trusted to that org's jobs only.
+
+        `require_sandbox` restricts candidates to nodes running jobs
+        inside a container (node.sandboxed) -- the coordinator's
+        GCON_SANDBOX_POLICY=required. A node that doesn't declare
+        `sandboxed` at all is treated as NOT sandboxed.
         """
 
         def score(info):
@@ -79,6 +84,8 @@ class Scheduler:
             filters.append(lambda info: self._satisfies(info, requires))
         if self.stake_ledger is not None and self.stake_ledger.staking_required:
             filters.append(lambda info: self.stake_ledger.meets_minimum(info["node"].node_id))
+        if require_sandbox:
+            filters.append(lambda info: bool(getattr(info["node"], "sandboxed", False)))
         filters.append(lambda info: info.get("org_id") == org_id)
 
         filter_fn = None

@@ -5,6 +5,15 @@ Passwords are hashed with PBKDF2-HMAC-SHA256 (stdlib `hashlib`,
 no extra dependency) using a per-password random salt and a high
 iteration count. Plaintext passwords are never stored or logged.
 
+Session and password-reset tokens (staff and customer) are never
+stored raw. The `token` column of the sessions / password_reset_tokens /
+customer_sessions / customer_password_reset_tokens tables holds
+SHA-256(token); the raw value exists only in the caller's cookie or reset
+link. A leaked database, backup or query log therefore can't be replayed as
+live sessions or reset links. Tokens are 256 bits of randomness, so a plain
+fast hash is sufficient (nothing to brute-force) and keeps every request's
+lookup cheap -- the same reasoning as API keys (management/api_keys.py).
+
 Sessions are random opaque tokens mapped to a user id, with an
 expiry. When SessionManager is given a `db` (a
 gcon.storage.database.Database, see storage/migrations.py's
@@ -16,13 +25,58 @@ SessionManager() with no arguments continues to get.
 
 import hashlib
 import hmac
+import logging
 import secrets
 from datetime import datetime, UTC, timedelta
+
+logger = logging.getLogger(__name__)
 
 PBKDF2_ITERATIONS = 260_000
 SESSION_TTL_HOURS = 24
 SESSION_COOKIE_NAME = "gcon_session"
 RESET_TOKEN_TTL_MINUTES = 30
+
+# A raw token is secrets.token_urlsafe(32) -- always 43 characters. A stored
+# SHA-256 hex digest is always 64. That length difference is how the
+# one-time conversion below tells a legacy raw row from an already-hashed one.
+_HASHED_TOKEN_LENGTH = 64
+
+
+def hash_token(token):
+    """What is stored in a token column for a given raw token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _convert_legacy_tokens(db, table):
+    """
+    One-time, idempotent in-place conversion of rows written before tokens
+    were hashed: replace each raw token with its hash. Live sessions and
+    unexpired reset links keep working -- the raw token in a user's cookie or
+    link hashes to the new stored value -- they just stop being stored
+    replayably. Does nothing on every boot after the first.
+
+    Blanking isn't enough on its own: SQLite leaves the old bytes in freed
+    pages and the WAL file, so this vacuums and checkpoints afterwards
+    (Database.scrub()). `table` is always one of this module's own table
+    names, never user input.
+    """
+    rows = db.query(f"SELECT token FROM {table} WHERE length(token) != {_HASHED_TOKEN_LENGTH}")
+    if not rows:
+        return
+    with db.transaction() as conn:
+        for row in rows:
+            conn.execute(
+                f"UPDATE {table} SET token = ? WHERE token = ?",
+                (hash_token(row["token"]), row["token"]),
+            )
+    try:
+        db.scrub()
+    except Exception as e:  # conversion itself succeeded; only the cleanup didn't
+        logger.warning(
+            "Hashed %d legacy token(s) in %s but could not vacuum the database to "
+            "remove the old values from free pages: %s", len(rows), table, e,
+        )
+    logger.info("Converted %d legacy raw token(s) in %s to hashed storage.", len(rows), table)
 
 
 def hash_password(password):
@@ -64,6 +118,8 @@ class SessionManager:
         self.sessions = {}
         self.ttl_hours = ttl_hours
         self.db = db
+        if db is not None:
+            _convert_legacy_tokens(db, "sessions")
 
     def create_session(self, user_id):
         token = secrets.token_urlsafe(32)
@@ -74,7 +130,7 @@ class SessionManager:
             self.db.execute(
                 "INSERT INTO sessions (token, user_id, created_at, expires_at) "
                 "VALUES (?, ?, ?, ?)",
-                (token, user_id, created_at.isoformat(), expires_at.isoformat()),
+                (hash_token(token), user_id, created_at.isoformat(), expires_at.isoformat()),
             )
         else:
             self.sessions[token] = {
@@ -94,12 +150,12 @@ class SessionManager:
 
         if self.db is not None:
             row = self.db.query_one(
-                "SELECT user_id, expires_at FROM sessions WHERE token = ?", (token,)
+                "SELECT user_id, expires_at FROM sessions WHERE token = ?", (hash_token(token),)
             )
             if row is None:
                 return None
             if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]):
-                self.db.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                self.db.execute("DELETE FROM sessions WHERE token = ?", (hash_token(token),))
                 return None
             return row["user_id"]
 
@@ -113,7 +169,7 @@ class SessionManager:
 
     def destroy_session(self, token):
         if self.db is not None:
-            self.db.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM sessions WHERE token = ?", (hash_token(token),))
         else:
             self.sessions.pop(token, None)
 
@@ -163,7 +219,9 @@ class SessionManager:
             )
             return [
                 {
-                    "session_id": hashlib.sha256(row["token"].encode("utf-8")).hexdigest()[:12],
+                    # The stored value already IS sha256(token), so this is the
+                    # same id as before hashing was introduced.
+                    "session_id": row["token"][:12],
                     "created_at": row["created_at"],
                     "expires_at": row["expires_at"],
                 }
@@ -196,6 +254,7 @@ class ResetTokenManager:
     def __init__(self, db, ttl_minutes=RESET_TOKEN_TTL_MINUTES):
         self.db = db
         self.ttl_minutes = ttl_minutes
+        _convert_legacy_tokens(db, "password_reset_tokens")
 
     def create_token(self, user_id):
         token = secrets.token_urlsafe(32)
@@ -204,7 +263,7 @@ class ResetTokenManager:
         self.db.execute(
             "INSERT INTO password_reset_tokens (token, user_id, created_at, expires_at) "
             "VALUES (?, ?, ?, ?)",
-            (token, user_id, created_at.isoformat(), expires_at.isoformat()),
+            (hash_token(token), user_id, created_at.isoformat(), expires_at.isoformat()),
         )
         return token
 
@@ -218,7 +277,7 @@ class ResetTokenManager:
             return None
         row = self.db.query_one(
             "SELECT user_id, expires_at, used_at FROM password_reset_tokens WHERE token = ?",
-            (token,),
+            (hash_token(token),),
         )
         if row is None or row["used_at"] is not None:
             return None
@@ -229,7 +288,7 @@ class ResetTokenManager:
     def consume_token(self, token):
         self.db.execute(
             "UPDATE password_reset_tokens SET used_at = ? WHERE token = ?",
-            (datetime.now(UTC).isoformat(), token),
+            (datetime.now(UTC).isoformat(), hash_token(token)),
         )
 
     def invalidate_all_for_user(self, user_id):
@@ -264,6 +323,7 @@ class CustomerSessionManager:
     def __init__(self, db, ttl_hours=SESSION_TTL_HOURS):
         self.db = db
         self.ttl_hours = ttl_hours
+        _convert_legacy_tokens(db, "customer_sessions")
 
     def create_session(self, customer_user_id):
         token = secrets.token_urlsafe(32)
@@ -272,7 +332,7 @@ class CustomerSessionManager:
         self.db.execute(
             "INSERT INTO customer_sessions (token, customer_user_id, created_at, expires_at) "
             "VALUES (?, ?, ?, ?)",
-            (token, customer_user_id, created_at.isoformat(), expires_at.isoformat()),
+            (hash_token(token), customer_user_id, created_at.isoformat(), expires_at.isoformat()),
         )
         return token
 
@@ -280,17 +340,18 @@ class CustomerSessionManager:
         if not token:
             return None
         row = self.db.query_one(
-            "SELECT customer_user_id, expires_at FROM customer_sessions WHERE token = ?", (token,)
+            "SELECT customer_user_id, expires_at FROM customer_sessions WHERE token = ?",
+            (hash_token(token),),
         )
         if row is None:
             return None
         if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]):
-            self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (hash_token(token),))
             return None
         return row["customer_user_id"]
 
     def destroy_session(self, token):
-        self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (token,))
+        self.db.execute("DELETE FROM customer_sessions WHERE token = ?", (hash_token(token),))
 
     def destroy_all_for_user(self, customer_user_id):
         self.db.execute(
@@ -302,6 +363,7 @@ class CustomerResetTokenManager:
     def __init__(self, db, ttl_minutes=RESET_TOKEN_TTL_MINUTES):
         self.db = db
         self.ttl_minutes = ttl_minutes
+        _convert_legacy_tokens(db, "customer_password_reset_tokens")
 
     def create_token(self, customer_user_id):
         token = secrets.token_urlsafe(32)
@@ -310,7 +372,7 @@ class CustomerResetTokenManager:
         self.db.execute(
             "INSERT INTO customer_password_reset_tokens "
             "(token, customer_user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-            (token, customer_user_id, created_at.isoformat(), expires_at.isoformat()),
+            (hash_token(token), customer_user_id, created_at.isoformat(), expires_at.isoformat()),
         )
         return token
 
@@ -320,7 +382,7 @@ class CustomerResetTokenManager:
         row = self.db.query_one(
             "SELECT customer_user_id, expires_at, used_at FROM customer_password_reset_tokens "
             "WHERE token = ?",
-            (token,),
+            (hash_token(token),),
         )
         if row is None or row["used_at"] is not None:
             return None
@@ -331,7 +393,7 @@ class CustomerResetTokenManager:
     def consume_token(self, token):
         self.db.execute(
             "UPDATE customer_password_reset_tokens SET used_at = ? WHERE token = ?",
-            (datetime.now(UTC).isoformat(), token),
+            (datetime.now(UTC).isoformat(), hash_token(token)),
         )
 
     def invalidate_all_for_user(self, customer_user_id):

@@ -89,6 +89,16 @@ class JobOut(BaseModel):
         default=None,
         description="Replicated-execution request the job was submitted with, if any.",
     )
+    verification: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "For a replicated (verify) job, whether the replicas agreed: outcome is "
+            "'agreed', 'disputed' (the replicas produced different output) or "
+            "'unavailable' (they could not be compared). A disputed job still has "
+            "status 'completed' and still carries the first replica's output -- check "
+            "this before acting on it. None for a job that was not replicated."
+        ),
+    )
     error: Optional[str] = Field(
         default=None,
         description="Why a failed/cancelled job ended, when the result carries one.",
@@ -739,13 +749,26 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="List all jobs",
         responses={401: {"model": ErrorOut}},
     )
-    def list_jobs(auth=Depends(require_scope("View monitoring"))):
+    def list_jobs(
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+        auth=Depends(require_scope("View monitoring")),
+    ):
         # Same org-scoping as list_nodes above -- this previously
         # returned every job ever submitted by every company to any
         # key with "View monitoring", not just the caller's own jobs.
+        #
+        # `status`/`limit` were added here as optional query params --
+        # presentation.get_jobs() already accepts and correctly
+        # applies both (used internally by the dashboard's jobs
+        # panel), this route just never exposed them. Both default to
+        # None, which get_jobs() already treats as "no filter" --
+        # so an unfiltered GET /jobs call is byte-for-byte the same
+        # request/response it always was; nothing about the existing,
+        # working default path changes.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        return jsonable_encoder(presentation.get_jobs(org_id=org_id))
+        return jsonable_encoder(presentation.get_jobs(org_id=org_id, status=status, limit=limit))
 
     @app.get(
         "/jobs/{job_id}",
@@ -1004,7 +1027,11 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="List all job receipts",
         responses={401: {"model": ErrorOut}},
     )
-    def list_receipts(auth=Depends(require_scope("View monitoring"))):
+    def list_receipts(
+        verified: Optional[bool] = None,
+        limit: Optional[int] = None,
+        auth=Depends(require_scope("View monitoring")),
+    ):
         # Same org-scoping as list_nodes/list_jobs above -- this
         # previously returned every receipt ever issued to any company
         # to any key with "View monitoring", not just the caller's
@@ -1012,9 +1039,26 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # artifact, so this was the sharpest version of the
         # cross-tenant leak: any org's API key could read every other
         # org's execution receipts.
+        #
+        # `verified`/`limit`: presentation.get_receipts() itself takes
+        # no filter args (only org_id) -- unlike get_jobs(), it was
+        # never extended, so it's left completely untouched here and
+        # still backs the plain, unfiltered call exactly as before.
+        # When a filter IS given, this instead calls the already-
+        # built, already-used-by-the-dashboard get_receipts_page()
+        # (real DB-backed filtering, see its own docstring) and
+        # returns just its `items` -- offset/total pagination isn't
+        # exposed here, this is deliberately just "give me my most
+        # recent N verified/unverified receipts", not a new paging
+        # API surface.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        return jsonable_encoder(presentation.get_receipts(org_id=org_id))
+        if verified is None and limit is None:
+            return jsonable_encoder(presentation.get_receipts(org_id=org_id))
+        items, _total = presentation.get_receipts_page(
+            verified=verified, org_id=org_id, limit=limit or 50, offset=0,
+        )
+        return jsonable_encoder(items)
 
     @app.get(
         "/receipts/{receipt_id}",

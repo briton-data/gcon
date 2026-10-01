@@ -12,7 +12,7 @@ from datetime import datetime, UTC
 
 
 class RemoteNodeProxy:
-    def __init__(self, node_id, transport, org_id=None, address=None):
+    def __init__(self, node_id, transport, org_id=None, address=None, sandboxed=False):
         self.node_id = node_id
         self.transport = transport
         self.status = "idle"
@@ -25,6 +25,12 @@ class RemoteNodeProxy:
         # self-reported, so it can't be spoofed by the connecting
         # agent. Also read by NodeRegistry.register().
         self.address = address
+        # Whether the worker reported (capability "sandbox"="docker") that
+        # it runs jobs in containers. Self-reported by the worker, and
+        # False -- i.e. treated as unsandboxed -- unless it said so, so an
+        # older worker that reports nothing is never assumed isolated.
+        # Read by Scheduler.select_node to honor GCON_SANDBOX_POLICY.
+        self.sandboxed = sandboxed
 
     def execute_job(self, job_id, command, timeout=None):
         self.status = "busy"

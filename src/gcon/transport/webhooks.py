@@ -86,6 +86,10 @@ def dispatch_job_event(
         "completed_at": job.get("completed_at"),
         "result": _redact_result(job.get("result")),
     }
+    # Only present for a replicated job. A receiver that sees "completed"
+    # here should also look at this before trusting the result.
+    if job.get("verification") is not None:
+        payload["verification"] = job["verification"]
 
     callback_url = job.get("callback_url")
     if callback_url:

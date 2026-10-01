@@ -201,6 +201,19 @@ class Database:
         with self._lock:
             return self._conn.execute(sql, params).fetchone()
 
+    def scrub(self):
+        """
+        Physically remove deleted/overwritten data from the file. After
+        an UPDATE that blanks a sensitive column, the old bytes still
+        sit in freed pages and in the WAL file until they're vacuumed
+        and checkpointed. Only call this after a one-off data
+        conversion, not on a hot path -- VACUUM rewrites the whole file.
+        """
+        with self._lock:
+            self._conn.commit()
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     def close(self):
         with self._lock:
             self._conn.close()
