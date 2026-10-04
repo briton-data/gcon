@@ -83,6 +83,8 @@ def main():
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from gcon.monitoring.logfmt import apply_log_format_from_env
+    apply_log_format_from_env()
     logger = logging.getLogger("gcon.run_coordinator")
 
     control_plane = ControlPlane(path=args.db)
@@ -170,7 +172,13 @@ def main():
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
         proxy = RemoteNodeProxy(
             node_id, transport, org_id=org_id, address=address,
-            sandboxed=(capabilities or {}).get("sandbox") == "docker",
+            # Declared AND verified: the worker reports "sandbox"="docker" only
+            # alongside a passed startup probe ("sandbox_verified"="1"). A worker
+            # that reports only the first (an older build) counts as unsandboxed.
+            sandboxed=(
+                (capabilities or {}).get("sandbox") == "docker"
+                and (capabilities or {}).get("sandbox_verified") == "1"
+            ),
         )
         coordinator.register_agent(proxy)
         logger.info(

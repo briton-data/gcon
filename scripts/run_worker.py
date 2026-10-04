@@ -166,13 +166,37 @@ def main():
     # override it. The coordinator only hands jobs to a "docker" worker
     # under its default GCON_SANDBOX_POLICY=required.
     capabilities["sandbox"] = "docker" if agent.sandboxed else "none"
+    if agent.sandboxed:
+        # "docker" is a claim until proven: run a throwaway container built the
+        # same way every job's is and check, from inside it, that it has no
+        # capabilities, no network, no credentials and so on. A worker that
+        # cannot show that never declares itself sandboxed -- it refuses to
+        # start, rather than quietly serving customer jobs unisolated (or
+        # silently serving none).
+        from gcon.execution import docker_executor as _probe_executor
+        _probe_executor.register_credential_dir(args.cert_dir)
+        verdict = _probe_executor.verify_sandbox(
+            image=agent.docker_image, network=agent.docker_network, user=agent.docker_user,
+            memory_limit=agent.docker_memory_limit, cpu_limit=agent.docker_cpu_limit,
+            pids_limit=agent.docker_pids_limit,
+        )
+        if not verdict["ok"]:
+            logger.error(
+                "Sandbox verification FAILED -- this worker will not start as a sandboxed "
+                "worker: %s", "; ".join(verdict["failures"]),
+            )
+            raise SystemExit(2)
+        capabilities["sandbox_verified"] = "1"
+        logger.info("Sandbox verified: %s", ", ".join(sorted(verdict["checks"])))
+    else:
+        capabilities["sandbox_verified"] = "0"
     if not agent.sandboxed:
         logger.warning(
-            "This worker is UNSANDBOXED: jobs run as raw host subprocesses. Under "
-            "the coordinator's default GCON_SANDBOX_POLICY=required it will be "
-            "given no jobs. Set GCON_EXECUTION_BACKEND=docker here to sandbox "
-            "jobs, or set GCON_SANDBOX_POLICY=trusted on the coordinator if every "
-            "workload is your own."
+            "This worker is UNSANDBOXED: jobs run as raw host subprocesses. It will "
+            "never be given a job from the public API or an organization, under any "
+            "GCON_SANDBOX_POLICY. Set GCON_EXECUTION_BACKEND=docker here to sandbox "
+            "jobs; leave it unsandboxed only for INTERNAL infrastructure (and run the "
+            "coordinator with GCON_SANDBOX_POLICY=trusted for it to receive internal jobs)."
         )
         if agent.job_user:
             logger.warning(
@@ -209,6 +233,10 @@ def main():
         args.node_id, args.coordinator, args.cert_dir, args.org_id or "(none)",
         args.hostname or "(auto)", capabilities,
     )
+
+    # Job containers may never mount anything that overlaps this directory.
+    from gcon.execution import docker_executor as _docker_executor
+    _docker_executor.register_credential_dir(args.cert_dir)
 
     daemon = AgentDaemon(
         node_id=args.node_id,
