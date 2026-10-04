@@ -44,20 +44,21 @@ GCON is built for work where you need to *prove* what happened.
 - **Separation.** Each organization only sees its own jobs, workers and receipts.
 - **Critical answers.** Run a job on several machines and GCON compares their answers before you trust the result.
 
-**Hardening for sensitive jobs**
+**Running code safely**
 
-1. Turn on sandboxing on each worker (needs Docker installed there): set `GCON_EXECUTION_BACKEND=docker` in the worker's environment. Job containers have **no network by default**; a job that needs the internet (e.g. downloading a dataset) needs `GCON_JOB_DOCKER_NETWORK=bridge`. If you do that on a cloud host, also block the instance-metadata endpoint (`iptables -I DOCKER-USER -d 169.254.169.254 -j DROP`), which otherwise hands the host's cloud credentials to job code; `host` networking is refused. Job containers run with no Linux capabilities, no privilege escalation and a 512-process cap (`GCON_JOB_DOCKER_PIDS_LIMIT`, `-1` for unlimited), see only their own report-file directory rather than the host's `/tmp`, and run as the image's default user; set `GCON_JOB_DOCKER_USER=1000:1000` to run as non-root if your image and job allow it. By default the coordinator only hands jobs to sandboxed workers (`GCON_SANDBOX_POLICY=required`); a worker without sandboxing gets none. If every job on your deployment is your own, set `GCON_SANDBOX_POLICY=trusted` on the coordinator to allow unsandboxed workers. For a worker that must run unsandboxed (only with `GCON_SANDBOX_POLICY=trusted`), start it as root on Linux/macOS and set `GCON_JOB_RUN_AS_USER=<an unprivileged account>`: jobs then run as that user and cannot read the worker's private keys. That protects the worker's identity only; it is not a sandbox. Set a variable with `export NAME=value` on Linux and macOS, or `$env:NAME="value"` in PowerShell.
-2. Never expose the coordinator directly. Put it behind TLS (`GCON_FORCE_HTTPS=1` or a reverse proxy).
-3. Encrypt the disk that holds the coordinator's `data/` folder.
-4. Use `verify={"replicas": 2}` for results you can't afford to get wrong.
-5. Act on a result only when `receipt["assurance"]["level"]` is `"verified"`. For a `verify` job the job itself also says so: `job["verification"]["outcome"]` is `"agreed"`, `"disputed"` or `"unavailable"`. A disputed job still has status `completed` and still carries the first replica's output, so check it before using the result.
-6. Keep certificates and signing keys private (file permissions `0600`).
+- **Sandboxed execution.** Jobs submitted through the API only ever run inside isolated containers, on workers that have proven they can do that. You can't ask for, and never get, a less isolated run.
+- **Critical answers.** Use `verify={"replicas": 2}` for results you can't afford to get wrong.
+- **Act on verified results.** Trust a result only when `receipt["assurance"]["level"]` is `"verified"`. For a `verify` job the job itself also says so: `job["verification"]["outcome"]` is `"agreed"`, `"disputed"` or `"unavailable"`. A disputed job still has status `completed` and still carries the first replica's output, so check it before using the result.
+
+Operating your own workers or coordinator? See [Sandboxed workers](docs/WORKER_SANDBOX.md) and [Deployment](docs/DEPLOYMENT.md).
 
 Full detail: [SECURITY.md](SECURITY.md).
 
 ---
 
 ## Get started
+
+GCON is cloud-managed: GCON runs the coordinator, and you can optionally connect machines of your own as workers. The steps below run the whole thing locally, which is how developers try it out.
 
 Works the same on Linux, macOS and Windows. You need Python 3.12+ (on Linux and macOS, use `python3` wherever this page says `python`).
 
@@ -119,18 +120,22 @@ from gcon_sdk import GconClient
 
 client = GconClient(api_key="gcon_...", base_url="http://127.0.0.1:8000")
 
-client.submit_job("hello-1", "echo hello from GCON")
-job = client.get_job("hello-1")
+submitted = client.submit_job("hello-1", "echo hello from GCON")   # "hello-1" is just your label
+job_id = submitted["job_id"]                                       # GCON generates the real id
+job = client.get_job(job_id)
 print(job["status"], job["output"])        # completed  hello from GCON
 ```
+
+GCON generates the job's id and returns it; use that id to fetch, cancel or retry the job. The label you pass in is stored as the job's `client_reference`, so you can match jobs to your own records and search by it (`client.list_jobs(client_reference="hello-1")`).
 
 A job goes `pending` → `running` → `completed` (or `failed`). Once finished it has a `receipt_id`.
 
 Prefer the command line? On Linux, macOS or Git Bash:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/jobs -H "Authorization: Bearer <your api key>" -H "Content-Type: application/json" -d '{"job_id":"hello-1","command":"echo hello from GCON"}'
-curl http://127.0.0.1:8000/api/v1/jobs/hello-1 -H "Authorization: Bearer <your api key>"
+curl -X POST http://127.0.0.1:8000/api/v1/jobs -H "Authorization: Bearer <your api key>" -H "Content-Type: application/json" -d '{"client_reference":"hello-1","command":"echo hello from GCON"}'
+# the response contains the job_id GCON generated; use it here:
+curl http://127.0.0.1:8000/api/v1/jobs/<job_id> -H "Authorization: Bearer <your api key>"
 ```
 
 ---
@@ -151,20 +156,22 @@ print(receipt["assurance"]["reasons"])     # why
 
 ```python
 # Needs a GPU: only runs on a worker that has one
-client.submit_job("train-1", "python train.py",
-                  kind="resourced", requires={"gpu": True, "min_vram_gb": 12})
+train = client.submit_job("train-1", "python train.py",
+                          kind="resourced", requires={"gpu": True, "min_vram_gb": 12})
 
 # Run on 2 machines and compare answers (for jobs where a wrong result is costly).
 # The replicas agree only if their output is identical; "tolerance" just flags a
 # large runtime difference between them and never decides agreement.
-client.submit_job("calc-1", "python critical_calc.py",
-                  verify={"replicas": 2, "tolerance": 0.02})
+calc = client.submit_job("calc-1", "python critical_calc.py",
+                         verify={"replicas": 2, "tolerance": 0.02})
 
 # Cancel or retry
-client.cancel_job("train-1")
-client.retry_job("calc-1")
+client.cancel_job(train["job_id"])
+client.retry_job(calc["job_id"])
 
-# Chain jobs: "train" starts only after "fetch" succeeds
+# Chain jobs: "train" starts only after "fetch" succeeds.
+# Inside a workflow, job_id is just a label for depends_on; the response maps
+# each label to the id GCON generated.
 client.submit_workflow("wf-1", jobs=[
     {"job_id": "fetch", "command": "python fetch.py"},
     {"job_id": "train", "command": "python train.py", "depends_on": ["fetch"]},
