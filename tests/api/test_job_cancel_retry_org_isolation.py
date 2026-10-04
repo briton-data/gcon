@@ -16,7 +16,7 @@ test_telemetry_lifecycle.py.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -66,44 +66,44 @@ class TestCancelJobOrgIsolation:
         # A slow command so it's genuinely still "running" when we
         # try to cancel it, not already finished.
         client.post(
-            "/jobs", json={"job_id": "job-acme-slow", "command": "sleep 5"},
+            "/jobs", json={"client_reference": "job-acme-slow", "command": "sleep 5"},
             headers={"X-API-Key": acme_key},
         )
         deadline = time.time() + 5
         while time.time() < deadline:
-            if coordinator.jobs.get("job-acme-slow", {}).get("status") == "running":
+            if coordinator.jobs.get(client.ids["job-acme-slow"], {}).get("status") == "running":
                 break
             time.sleep(0.05)
 
-        resp = client.post("/jobs/job-acme-slow/cancel", headers={"X-API-Key": acme_key})
+        resp = client.post(f"/jobs/{client.ids['job-acme-slow']}/cancel", headers={"X-API-Key": acme_key})
         assert resp.status_code == 200
 
     def test_a_different_org_cannot_cancel_this_orgs_job(self, two_org_setup):
         client, coordinator, acme_key, globex_key = two_org_setup
         client.post(
-            "/jobs", json={"job_id": "job-acme-slow2", "command": "sleep 5"},
+            "/jobs", json={"client_reference": "job-acme-slow2", "command": "sleep 5"},
             headers={"X-API-Key": acme_key},
         )
         deadline = time.time() + 5
         while time.time() < deadline:
-            if coordinator.jobs.get("job-acme-slow2", {}).get("status") == "running":
+            if coordinator.jobs.get(client.ids["job-acme-slow2"], {}).get("status") == "running":
                 break
             time.sleep(0.05)
 
         # THE actual security fix under test: Globex's key must not
         # be able to touch Acme's job at all.
-        resp = client.post("/jobs/job-acme-slow2/cancel", headers={"X-API-Key": globex_key})
+        resp = client.post(f"/jobs/{client.ids['job-acme-slow2']}/cancel", headers={"X-API-Key": globex_key})
         assert resp.status_code == 404
 
         # And the job must genuinely still be running -- the
         # rejected cross-org attempt must not have cancelled it as a
         # side effect before the org check (order of operations
         # matters: check-then-act).
-        assert coordinator.jobs["job-acme-slow2"]["status"] == "running"
+        assert coordinator.jobs[client.ids["job-acme-slow2"]]["status"] == "running"
 
     def test_unknown_job_id_is_404(self, two_org_setup):
         client, _coordinator, acme_key, _ = two_org_setup
-        resp = client.post("/jobs/does-not-exist/cancel", headers={"X-API-Key": acme_key})
+        resp = client.post(f"/jobs/does-not-exist/cancel", headers={"X-API-Key": acme_key})
         assert resp.status_code == 404
 
 
@@ -111,37 +111,37 @@ class TestRetryJobOrgIsolation:
     def test_owner_can_retry_their_own_failed_job(self, two_org_setup):
         client, coordinator, acme_key, _ = two_org_setup
         client.post(
-            "/jobs", json={"job_id": "job-acme-fail", "command": "exit 1"},
+            "/jobs", json={"client_reference": "job-acme-fail", "command": "exit 1"},
             headers={"X-API-Key": acme_key},
         )
         deadline = time.time() + 5
         while time.time() < deadline:
-            if coordinator.jobs.get("job-acme-fail", {}).get("status") == "failed":
+            if coordinator.jobs.get(client.ids["job-acme-fail"], {}).get("status") == "failed":
                 break
             time.sleep(0.05)
-        assert coordinator.jobs["job-acme-fail"]["status"] == "failed"
+        assert coordinator.jobs[client.ids["job-acme-fail"]]["status"] == "failed"
 
-        resp = client.post("/jobs/job-acme-fail/retry", headers={"X-API-Key": acme_key})
+        resp = client.post(f"/jobs/{client.ids['job-acme-fail']}/retry", headers={"X-API-Key": acme_key})
         assert resp.status_code == 200
-        assert coordinator.jobs["job-acme-fail"]["status"] == "pending"
+        assert coordinator.jobs[client.ids["job-acme-fail"]]["status"] == "pending"
 
     def test_a_different_org_cannot_retry_this_orgs_job(self, two_org_setup):
         client, coordinator, acme_key, globex_key = two_org_setup
         client.post(
-            "/jobs", json={"job_id": "job-acme-fail2", "command": "exit 1"},
+            "/jobs", json={"client_reference": "job-acme-fail2", "command": "exit 1"},
             headers={"X-API-Key": acme_key},
         )
         deadline = time.time() + 5
         while time.time() < deadline:
-            if coordinator.jobs.get("job-acme-fail2", {}).get("status") == "failed":
+            if coordinator.jobs.get(client.ids["job-acme-fail2"], {}).get("status") == "failed":
                 break
             time.sleep(0.05)
 
-        resp = client.post("/jobs/job-acme-fail2/retry", headers={"X-API-Key": globex_key})
+        resp = client.post(f"/jobs/{client.ids['job-acme-fail2']}/retry", headers={"X-API-Key": globex_key})
         assert resp.status_code == 404
-        assert coordinator.jobs["job-acme-fail2"]["status"] == "failed"
+        assert coordinator.jobs[client.ids["job-acme-fail2"]]["status"] == "failed"
 
     def test_unknown_job_id_is_404(self, two_org_setup):
         client, _coordinator, acme_key, _ = two_org_setup
-        resp = client.post("/jobs/does-not-exist/retry", headers={"X-API-Key": acme_key})
+        resp = client.post(f"/jobs/does-not-exist/retry", headers={"X-API-Key": acme_key})
         assert resp.status_code == 404

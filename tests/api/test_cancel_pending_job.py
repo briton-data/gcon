@@ -11,7 +11,7 @@ run later if a matching worker shows up afterwards.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -56,23 +56,23 @@ class TestCancelWhileStillQueued:
         acme = _signup(client)
         key = acme["api_key"]["secret"]
         # No workers registered at all -> the job can never leave "pending" on its own.
-        r = client.post("/jobs", json={"job_id": "stuck-1", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
+        r = client.post("/jobs", json={"client_reference": "stuck-1", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
         assert r.status_code == 200
-        assert client.get("/jobs/stuck-1", headers=_h(key)).json()["status"] == "pending"
+        assert client.get(f"/jobs/{client.ids['stuck-1']}", headers=_h(key)).json()["status"] == "pending"
 
-        cancel = client.post("/jobs/stuck-1/cancel", headers=_h(key))
+        cancel = client.post(f"/jobs/{client.ids['stuck-1']}/cancel", headers=_h(key))
         assert cancel.status_code == 200, cancel.text
-        assert cancel.json() == {"job_id": "stuck-1", "cancelled": True, "process_killed": False}
-        job = client.get("/jobs/stuck-1", headers=_h(key)).json()
+        assert cancel.json() == {"job_id": client.ids["stuck-1"], "cancelled": True, "process_killed": False}
+        job = client.get(f"/jobs/{client.ids['stuck-1']}", headers=_h(key)).json()
         assert job["status"] == "cancelled" and job["completed_at"] is not None
 
     def test_a_cancelled_queued_job_never_runs_even_if_a_worker_appears_later(self, env):
         client, coordinator, _ = env
         acme = _signup(client)
         key = acme["api_key"]["secret"]
-        client.post("/jobs", json={"job_id": "race-1", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
-        assert client.get("/jobs/race-1", headers=_h(key)).json()["status"] == "pending"
-        assert client.post("/jobs/race-1/cancel", headers=_h(key)).status_code == 200
+        client.post("/jobs", json={"client_reference": "race-1", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
+        assert client.get(f"/jobs/{client.ids['race-1']}", headers=_h(key)).json()["status"] == "pending"
+        assert client.post(f"/jobs/{client.ids['race-1']}/cancel", headers=_h(key)).status_code == 200
 
         # The matching worker shows up only now, after cancellation, and the job
         # is still (deliberately) sitting in the coordinator's dispatch queue.
@@ -88,7 +88,7 @@ class TestCancelWhileStillQueued:
         )
 
         time.sleep(0.6)  # give the real scheduler loop several ticks to try dispatching it
-        job = client.get("/jobs/race-1", headers=_h(key)).json()
+        job = client.get(f"/jobs/{client.ids['race-1']}", headers=_h(key)).json()
         assert job["status"] == "cancelled", f"a cancelled queued job started running: {job}"
         assert job["node_id"] is None
 
@@ -96,13 +96,14 @@ class TestCancelWhileStillQueued:
         client, coordinator, db = env
         acme = _signup(client)
         key = acme["api_key"]["secret"]
-        client.post("/jobs", json={"job_id": "stuck-2", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
-        client.post("/jobs/stuck-2/cancel", headers=_h(key))
+        client.post("/jobs", json={"client_reference": "stuck-2", "command": "python x.py", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
+        client.post(f"/jobs/{client.ids['stuck-2']}/cancel", headers=_h(key))
+        stuck_id = client.ids["stuck-2"]
         coordinator.shutdown()
 
         again = GCONCoordinator(control_plane=ControlPlane(path=db))
         try:
-            row = again.control_plane.jobs.get("stuck-2")
+            row = again.control_plane.jobs.get(stuck_id)
             assert row is not None and row["status"] == "cancelled"
         finally:
             again.shutdown()
@@ -115,9 +116,9 @@ class TestCancelWhileStillQueued:
         client, coordinator, _ = env
         acme = _signup(client)
         key = acme["api_key"]["secret"]
-        client.post("/jobs", json={"job_id": "stuck-3", "command": "echo hi", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
-        client.post("/jobs/stuck-3/cancel", headers=_h(key))
-        r = client.post("/jobs/stuck-3/retry", headers=_h(key))
+        client.post("/jobs", json={"client_reference": "stuck-3", "command": "echo hi", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
+        client.post(f"/jobs/{client.ids['stuck-3']}/cancel", headers=_h(key))
+        r = client.post(f"/jobs/{client.ids['stuck-3']}/retry", headers=_h(key))
         assert r.status_code == 400
         assert "cancelled" in r.json()["detail"]
 
@@ -125,10 +126,10 @@ class TestCancelWhileStillQueued:
         client, coordinator, _ = env
         acme = _signup(client, "a@acme.example")
         globex = _signup(client, "g@globex.example")
-        client.post("/jobs", json={"job_id": "mine-1", "command": "x", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(acme["api_key"]["secret"]))
-        r = client.post("/jobs/mine-1/cancel", headers=_h(globex["api_key"]["secret"]))
+        client.post("/jobs", json={"client_reference": "mine-1", "command": "x", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(acme["api_key"]["secret"]))
+        r = client.post(f"/jobs/{client.ids['mine-1']}/cancel", headers=_h(globex["api_key"]["secret"]))
         assert r.status_code == 404
-        assert client.get("/jobs/mine-1", headers=_h(acme["api_key"]["secret"])).json()["status"] == "pending"
+        assert client.get(f"/jobs/{client.ids['mine-1']}", headers=_h(acme["api_key"]["secret"])).json()["status"] == "pending"
 
     def test_a_standard_command_job_can_also_be_cancelled_while_queued(self, env):
         # Doesn't need a hardware requirement to stay pending -- any job is
@@ -136,10 +137,10 @@ class TestCancelWhileStillQueued:
         client, coordinator, _ = env
         acme = _signup(client)
         key = acme["api_key"]["secret"]
-        client.post("/jobs", json={"job_id": "plain-1", "command": "echo hi"}, headers=_h(key))
-        assert client.get("/jobs/plain-1", headers=_h(key)).json()["status"] == "pending"
-        assert client.post("/jobs/plain-1/cancel", headers=_h(key)).status_code == 200
-        assert client.get("/jobs/plain-1", headers=_h(key)).json()["status"] == "cancelled"
+        client.post("/jobs", json={"client_reference": "plain-1", "command": "echo hi"}, headers=_h(key))
+        assert client.get(f"/jobs/{client.ids['plain-1']}", headers=_h(key)).json()["status"] == "pending"
+        assert client.post(f"/jobs/{client.ids['plain-1']}/cancel", headers=_h(key)).status_code == 200
+        assert client.get(f"/jobs/{client.ids['plain-1']}", headers=_h(key)).json()["status"] == "cancelled"
 
 
 class TestStillRefusesWhatItShould:
@@ -150,18 +151,18 @@ class TestStillRefusesWhatItShould:
         node = GCONAgent(node_id="n1")
         node.org_id = acme["organization"]["org_id"]
         coordinator.register_agent(node)
-        client.post("/jobs", json={"job_id": "done-1", "command": "echo hi"}, headers=_h(key))
-        assert _wait(lambda: client.get("/jobs/done-1", headers=_h(key)).json()["status"] == "completed")
-        r = client.post("/jobs/done-1/cancel", headers=_h(key))
+        client.post("/jobs", json={"client_reference": "done-1", "command": "echo hi"}, headers=_h(key))
+        assert _wait(lambda: client.get(f"/jobs/{client.ids['done-1']}", headers=_h(key)).json()["status"] == "completed")
+        r = client.post(f"/jobs/{client.ids['done-1']}/cancel", headers=_h(key))
         assert r.status_code == 400 and "not pending or running" in r.json()["detail"]
 
     def test_already_cancelled_job_cannot_be_cancelled_again(self, env):
         client, coordinator, _ = env
         acme = _signup(client)
         key = acme["api_key"]["secret"]
-        client.post("/jobs", json={"job_id": "stuck-4", "command": "x", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
-        assert client.post("/jobs/stuck-4/cancel", headers=_h(key)).status_code == 200
-        again = client.post("/jobs/stuck-4/cancel", headers=_h(key))
+        client.post("/jobs", json={"client_reference": "stuck-4", "command": "x", "kind": "resourced", "requires": {"gpu": True}}, headers=_h(key))
+        assert client.post(f"/jobs/{client.ids['stuck-4']}/cancel", headers=_h(key)).status_code == 200
+        again = client.post(f"/jobs/{client.ids['stuck-4']}/cancel", headers=_h(key))
         assert again.status_code == 400 and "not pending or running" in again.json()["detail"]
 
     def test_a_genuinely_running_job_still_cancels_by_killing_its_process(self, env):
@@ -173,8 +174,8 @@ class TestStillRefusesWhatItShould:
         node = GCONAgent(node_id="n1")
         node.org_id = acme["organization"]["org_id"]
         coordinator.register_agent(node)
-        client.post("/jobs", json={"job_id": "run-1", "command": "sleep 30"}, headers=_h(key))
-        assert _wait(lambda: client.get("/jobs/run-1", headers=_h(key)).json()["status"] == "running")
-        r = client.post("/jobs/run-1/cancel", headers=_h(key))
-        assert r.status_code == 200 and r.json()["job_id"] == "run-1"
-        assert _wait(lambda: client.get("/jobs/run-1", headers=_h(key)).json()["status"] == "cancelled")
+        client.post("/jobs", json={"client_reference": "run-1", "command": "sleep 30"}, headers=_h(key))
+        assert _wait(lambda: client.get(f"/jobs/{client.ids['run-1']}", headers=_h(key)).json()["status"] == "running")
+        r = client.post(f"/jobs/{client.ids['run-1']}/cancel", headers=_h(key))
+        assert r.status_code == 200 and r.json()["job_id"] == client.ids["run-1"]
+        assert _wait(lambda: client.get(f"/jobs/{client.ids['run-1']}", headers=_h(key)).json()["status"] == "cancelled")

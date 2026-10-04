@@ -11,7 +11,7 @@ receipts cross-tenant leak earlier this project was.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -72,13 +72,13 @@ class TestTraceIdLifecycle:
         client, coordinator, acme_key, _ = two_org_setup
 
         resp = client.post(
-            "/jobs", json={"job_id": "job-trace-1", "command": "echo hi"},
+            "/jobs", json={"client_reference": "job-trace-1", "command": "echo hi"},
             headers={"X-API-Key": acme_key},
         )
         assert resp.status_code == 200
-        _wait_for_completion(coordinator, "job-trace-1")
+        _wait_for_completion(coordinator, client.ids["job-trace-1"])
 
-        job_trace_id = coordinator.jobs["job-trace-1"]["trace_id"]
+        job_trace_id = coordinator.jobs[client.ids["job-trace-1"]]["trace_id"]
         assert job_trace_id  # minted, not None/empty
 
         # The receipt itself carries the SAME trace_id, not a fresh one.
@@ -88,14 +88,14 @@ class TestTraceIdLifecycle:
         # _wait_for(lambda: job_id in coordinator.receipts)) - waiting on
         # status alone is not enough here.
         deadline = time.time() + 5
-        while "job-trace-1" not in coordinator.receipts and time.time() < deadline:
+        while client.ids["job-trace-1"] not in coordinator.receipts and time.time() < deadline:
             time.sleep(0.05)
-        receipt = coordinator.receipts["job-trace-1"]
+        receipt = coordinator.receipts[client.ids["job-trace-1"]]
         assert receipt["trace_id"] == job_trace_id
 
         # Every telemetry event for this job shares that one trace_id.
         events = client.get(
-            "/telemetry/events?job_id=job-trace-1", headers={"X-API-Key": acme_key},
+            f"/telemetry/events?job_id={client.ids['job-trace-1']}", headers={"X-API-Key": acme_key},
         ).json()
         assert len(events) >= 1
         trace_ids = {e["trace_id"] for e in events}
@@ -110,13 +110,13 @@ class TestTraceIdLifecycle:
     def test_two_jobs_get_two_different_trace_ids(self, two_org_setup):
         client, coordinator, acme_key, _ = two_org_setup
 
-        client.post("/jobs", json={"job_id": "job-a", "command": "echo a"}, headers={"X-API-Key": acme_key})
-        client.post("/jobs", json={"job_id": "job-b", "command": "echo b"}, headers={"X-API-Key": acme_key})
-        _wait_for_completion(coordinator, "job-a")
-        _wait_for_completion(coordinator, "job-b")
+        client.post("/jobs", json={"client_reference": "job-a", "command": "echo a"}, headers={"X-API-Key": acme_key})
+        client.post("/jobs", json={"client_reference": "job-b", "command": "echo b"}, headers={"X-API-Key": acme_key})
+        _wait_for_completion(coordinator, client.ids["job-a"])
+        _wait_for_completion(coordinator, client.ids["job-b"])
 
-        trace_a = coordinator.jobs["job-a"]["trace_id"]
-        trace_b = coordinator.jobs["job-b"]["trace_id"]
+        trace_a = coordinator.jobs[client.ids["job-a"]]["trace_id"]
+        trace_b = coordinator.jobs[client.ids["job-b"]]["trace_id"]
         assert trace_a != trace_b
 
 
@@ -124,30 +124,30 @@ class TestTelemetryEventsAPIOrgIsolation:
     def test_org_only_sees_its_own_telemetry_events(self, two_org_setup):
         client, coordinator, acme_key, globex_key = two_org_setup
 
-        client.post("/jobs", json={"job_id": "job-acme-t", "command": "echo hi"}, headers={"X-API-Key": acme_key})
-        client.post("/jobs", json={"job_id": "job-globex-t", "command": "echo hi"}, headers={"X-API-Key": globex_key})
-        _wait_for_completion(coordinator, "job-acme-t")
-        _wait_for_completion(coordinator, "job-globex-t")
+        client.post("/jobs", json={"client_reference": "job-acme-t", "command": "echo hi"}, headers={"X-API-Key": acme_key})
+        client.post("/jobs", json={"client_reference": "job-globex-t", "command": "echo hi"}, headers={"X-API-Key": globex_key})
+        _wait_for_completion(coordinator, client.ids["job-acme-t"])
+        _wait_for_completion(coordinator, client.ids["job-globex-t"])
 
         acme_events = client.get("/telemetry/events", headers={"X-API-Key": acme_key}).json()
         acme_job_ids = {e["job_id"] for e in acme_events}
-        assert "job-acme-t" in acme_job_ids
-        assert "job-globex-t" not in acme_job_ids, (
+        assert client.ids["job-acme-t"] in acme_job_ids
+        assert client.ids["job-globex-t"] not in acme_job_ids, (
             "acme's API key could see globex's telemetry events"
         )
 
         globex_events = client.get("/telemetry/events", headers={"X-API-Key": globex_key}).json()
         globex_job_ids = {e["job_id"] for e in globex_events}
-        assert "job-globex-t" in globex_job_ids
-        assert "job-acme-t" not in globex_job_ids
+        assert client.ids["job-globex-t"] in globex_job_ids
+        assert client.ids["job-acme-t"] not in globex_job_ids
 
     def test_job_id_query_param_filters_correctly(self, two_org_setup):
         client, coordinator, acme_key, _ = two_org_setup
-        client.post("/jobs", json={"job_id": "job-x", "command": "echo x"}, headers={"X-API-Key": acme_key})
-        client.post("/jobs", json={"job_id": "job-y", "command": "echo y"}, headers={"X-API-Key": acme_key})
-        _wait_for_completion(coordinator, "job-x")
-        _wait_for_completion(coordinator, "job-y")
+        client.post("/jobs", json={"client_reference": "job-x", "command": "echo x"}, headers={"X-API-Key": acme_key})
+        client.post("/jobs", json={"client_reference": "job-y", "command": "echo y"}, headers={"X-API-Key": acme_key})
+        _wait_for_completion(coordinator, client.ids["job-x"])
+        _wait_for_completion(coordinator, client.ids["job-y"])
 
-        events = client.get("/telemetry/events?job_id=job-x", headers={"X-API-Key": acme_key}).json()
+        events = client.get(f"/telemetry/events?job_id={client.ids['job-x']}", headers={"X-API-Key": acme_key}).json()
         assert len(events) >= 1
-        assert all(e["job_id"] == "job-x" for e in events)
+        assert all(e["job_id"] == client.ids["job-x"] for e in events)

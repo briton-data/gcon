@@ -12,7 +12,7 @@ own coverage elsewhere (dashboard tests), not duplicated here.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -65,15 +65,15 @@ def test_unfiltered_get_jobs_is_unchanged(env):
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
 
-    client.post("/jobs", json={"job_id": "j1", "command": "echo one"}, headers=_h(key))
-    client.post("/jobs", json={"job_id": "j2", "command": "exit 1"}, headers=_h(key))
-    assert _wait(lambda: coordinator.jobs["j1"]["status"] == "completed")
-    assert _wait(lambda: coordinator.jobs["j2"]["status"] == "failed")
+    client.post("/jobs", json={"client_reference": "j1", "command": "echo one"}, headers=_h(key))
+    client.post("/jobs", json={"client_reference": "j2", "command": "exit 1"}, headers=_h(key))
+    assert _wait(lambda: coordinator.jobs[client.ids["j1"]]["status"] == "completed")
+    assert _wait(lambda: coordinator.jobs[client.ids["j2"]]["status"] == "failed")
 
     r = client.get("/jobs", headers=_h(key))
     assert r.status_code == 200
     ids = {j["job_id"] for j in r.json()}
-    assert ids == {"j1", "j2"}
+    assert ids == {client.ids["j1"], client.ids["j2"]}
 
 
 def test_status_filter_narrows_to_matching_jobs_only(env):
@@ -84,15 +84,15 @@ def test_status_filter_narrows_to_matching_jobs_only(env):
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
 
-    client.post("/jobs", json={"job_id": "j-ok", "command": "echo one"}, headers=_h(key))
-    client.post("/jobs", json={"job_id": "j-bad", "command": "exit 1"}, headers=_h(key))
-    assert _wait(lambda: coordinator.jobs["j-ok"]["status"] == "completed")
-    assert _wait(lambda: coordinator.jobs["j-bad"]["status"] == "failed")
+    client.post("/jobs", json={"client_reference": "j-ok", "command": "echo one"}, headers=_h(key))
+    client.post("/jobs", json={"client_reference": "j-bad", "command": "exit 1"}, headers=_h(key))
+    assert _wait(lambda: coordinator.jobs[client.ids["j-ok"]]["status"] == "completed")
+    assert _wait(lambda: coordinator.jobs[client.ids["j-bad"]]["status"] == "failed")
 
     r = client.get("/jobs", params={"status": "failed"}, headers=_h(key))
     assert r.status_code == 200
     ids = {j["job_id"] for j in r.json()}
-    assert ids == {"j-bad"}
+    assert ids == {client.ids["j-bad"]}
 
 
 def test_limit_caps_the_number_of_jobs_returned(env):
@@ -104,8 +104,8 @@ def test_limit_caps_the_number_of_jobs_returned(env):
     coordinator.register_agent(node)
 
     for i in range(5):
-        client.post("/jobs", json={"job_id": f"j-{i}", "command": "echo hi"}, headers=_h(key))
-    assert _wait(lambda: all(coordinator.jobs[f"j-{i}"]["status"] == "completed" for i in range(5)))
+        client.post("/jobs", json={"client_reference": f"j-{i}", "command": "echo hi"}, headers=_h(key))
+    assert _wait(lambda: all(coordinator.jobs[client.ids[f"j-{i}"]]["status"] == "completed" for i in range(5)))
 
     r = client.get("/jobs", params={"limit": 2}, headers=_h(key))
     assert r.status_code == 200
@@ -126,17 +126,17 @@ def test_job_filters_stay_org_scoped(env):
     globex_node.org_id = globex["organization"]["org_id"]
     coordinator.register_agent(globex_node)
 
-    client.post("/jobs", json={"job_id": "acme-job", "command": "echo hi"},
+    client.post("/jobs", json={"client_reference": "acme-job", "command": "echo hi"},
                 headers=_h(acme["api_key"]["secret"]))
-    client.post("/jobs", json={"job_id": "globex-job", "command": "echo hi"},
+    client.post("/jobs", json={"client_reference": "globex-job", "command": "echo hi"},
                 headers=_h(globex["api_key"]["secret"]))
-    assert _wait(lambda: coordinator.jobs["acme-job"]["status"] == "completed")
-    assert _wait(lambda: coordinator.jobs["globex-job"]["status"] == "completed")
+    assert _wait(lambda: coordinator.jobs[client.ids["acme-job"]]["status"] == "completed")
+    assert _wait(lambda: coordinator.jobs[client.ids["globex-job"]]["status"] == "completed")
 
     r = client.get("/jobs", params={"status": "completed"}, headers=_h(acme["api_key"]["secret"]))
     assert r.status_code == 200
     ids = {j["job_id"] for j in r.json()}
-    assert ids == {"acme-job"}
+    assert ids == {client.ids["acme-job"]}
 
 
 def test_unfiltered_get_receipts_is_unchanged(env):
@@ -146,12 +146,12 @@ def test_unfiltered_get_receipts_is_unchanged(env):
     node = GCONAgent(node_id="acme-node")
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
-    client.post("/jobs", json={"job_id": "r1", "command": "echo hi"}, headers=_h(key))
-    assert _wait(lambda: "r1" in coordinator.receipts)
+    client.post("/jobs", json={"client_reference": "r1", "command": "echo hi"}, headers=_h(key))
+    assert _wait(lambda: client.ids["r1"] in coordinator.receipts)
 
     r = client.get("/receipts", headers=_h(key))
     assert r.status_code == 200
-    assert any(rc["job_id"] == "r1" for rc in r.json())
+    assert any(rc["job_id"] == client.ids["r1"] for rc in r.json())
 
 
 def test_receipts_verified_filter_uses_the_real_paginated_backend(env):
@@ -172,19 +172,19 @@ def test_receipts_verified_filter_uses_the_real_paginated_backend(env):
     node = GCONAgent(node_id="acme-node")
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
-    client.post("/jobs", json={"job_id": "r2", "command": "echo hi"}, headers=_h(key))
-    assert _wait(lambda: "r2" in coordinator.receipts)
+    client.post("/jobs", json={"client_reference": "r2", "command": "echo hi"}, headers=_h(key))
+    assert _wait(lambda: client.ids["r2"] in coordinator.receipts)
 
     def _r2_is_listed_as_verified():
         r = client.get("/receipts", params={"verified": "true"}, headers=_h(key))
         assert r.status_code == 200
-        return any(rc["job_id"] == "r2" for rc in r.json())
+        return any(rc["job_id"] == client.ids["r2"] for rc in r.json())
 
     assert _wait(_r2_is_listed_as_verified, timeout=15)
 
     r = client.get("/receipts", params={"verified": "false"}, headers=_h(key))
     assert r.status_code == 200
-    assert all(rc["job_id"] != "r2" for rc in r.json())
+    assert all(rc["job_id"] != client.ids["r2"] for rc in r.json())
 
 
 def test_receipts_limit_caps_the_number_returned(env):
@@ -195,8 +195,8 @@ def test_receipts_limit_caps_the_number_returned(env):
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
     for i in range(4):
-        client.post("/jobs", json={"job_id": f"rl-{i}", "command": "echo hi"}, headers=_h(key))
-    assert _wait(lambda: all(f"rl-{i}" in coordinator.receipts for i in range(4)))
+        client.post("/jobs", json={"client_reference": f"rl-{i}", "command": "echo hi"}, headers=_h(key))
+    assert _wait(lambda: all(client.ids[f"rl-{i}"] in coordinator.receipts for i in range(4)))
 
     r = client.get("/receipts", params={"limit": 2}, headers=_h(key))
     assert r.status_code == 200

@@ -18,7 +18,7 @@ actually usable:
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -236,10 +236,10 @@ class TestJobFields:
     def test_successful_job_reports_kind_and_no_error(self, env):
         client, coordinator, _ = env
         key, _ = self._setup(client, coordinator)
-        assert client.post("/jobs", json={"job_id": "ok-1", "command": "echo hello"}, headers=_bearer(key)).status_code == 200
-        assert _wait_for(lambda: coordinator.jobs.get("ok-1", {}).get("status") == "completed")
+        assert client.post("/jobs", json={"client_reference": "ok-1", "command": "echo hello"}, headers=_bearer(key)).status_code == 200
+        assert _wait_for(lambda: coordinator.jobs.get(client.ids["ok-1"], {}).get("status") == "completed")
 
-        job = client.get("/jobs/ok-1", headers=_bearer(key)).json()
+        job = client.get(f"/jobs/{client.ids['ok-1']}", headers=_bearer(key)).json()
         assert job["kind"] == "command"
         assert job["requires"] is None and job["verify"] is None
         assert job["error"] is None
@@ -249,12 +249,12 @@ class TestJobFields:
         client, coordinator, _ = env
         key, _ = self._setup(client, coordinator)
         client.post(
-            "/jobs", json={"job_id": "bad-1", "command": "echo boom-details >&2; exit 3"},
+            "/jobs", json={"client_reference": "bad-1", "command": "echo boom-details >&2; exit 3"},
             headers=_bearer(key),
         )
-        assert _wait_for(lambda: coordinator.jobs.get("bad-1", {}).get("status") == "failed")
+        assert _wait_for(lambda: coordinator.jobs.get(client.ids["bad-1"], {}).get("status") == "failed")
 
-        job = client.get("/jobs/bad-1", headers=_bearer(key)).json()
+        job = client.get(f"/jobs/{client.ids['bad-1']}", headers=_bearer(key)).json()
         assert job["status"] == "failed"
         assert job["return_code"] == 3
         assert "boom-details" in (job["error"] or "")
@@ -264,31 +264,31 @@ class TestJobFields:
         key, _ = self._setup(client, coordinator)
         r = client.post(
             "/jobs",
-            json={"job_id": "v-1", "command": "echo hi", "verify": {"replicas": 2, "tolerance": 0.05}},
+            json={"client_reference": "v-1", "command": "echo hi", "verify": {"replicas": 2, "tolerance": 0.05}},
             headers=_bearer(key),
         )
         assert r.status_code == 200, r.text
-        job = client.get("/jobs/v-1", headers=_bearer(key)).json()
+        job = client.get(f"/jobs/{client.ids['v-1']}", headers=_bearer(key)).json()
         assert job["verify"] == {"replicas": 2, "tolerance": 0.05}
 
     def test_running_job_has_no_error_text(self, env):
         client, coordinator, _ = env
         key, _ = self._setup(client, coordinator)
-        client.post("/jobs", json={"job_id": "slow-1", "command": "sleep 3"}, headers=_bearer(key))
-        assert _wait_for(lambda: coordinator.jobs.get("slow-1", {}).get("status") == "running")
-        job = client.get("/jobs/slow-1", headers=_bearer(key)).json()
+        client.post("/jobs", json={"client_reference": "slow-1", "command": "sleep 3"}, headers=_bearer(key))
+        assert _wait_for(lambda: coordinator.jobs.get(client.ids["slow-1"], {}).get("status") == "running")
+        job = client.get(f"/jobs/{client.ids['slow-1']}", headers=_bearer(key)).json()
         assert job["status"] == "running" and job["error"] is None
-        client.post("/jobs/slow-1/cancel", headers=_bearer(key))
+        client.post(f"/jobs/{client.ids['slow-1']}/cancel", headers=_bearer(key))
 
     def test_another_org_cannot_see_the_job_or_its_error(self, env):
         client, coordinator, _ = env
         key, _ = self._setup(client, coordinator)
         globex = _signup(client, "Globex Inc", "g@globex.example")
-        client.post("/jobs", json={"job_id": "bad-2", "command": "echo secret-detail >&2; exit 1"}, headers=_bearer(key))
-        assert _wait_for(lambda: coordinator.jobs.get("bad-2", {}).get("status") == "failed")
+        client.post("/jobs", json={"client_reference": "bad-2", "command": "echo secret-detail >&2; exit 1"}, headers=_bearer(key))
+        assert _wait_for(lambda: coordinator.jobs.get(client.ids["bad-2"], {}).get("status") == "failed")
 
         gkey = globex["api_key"]["secret"]
-        assert client.get("/jobs/bad-2", headers=_bearer(gkey)).status_code == 404
+        assert client.get(f"/jobs/{client.ids['bad-2']}", headers=_bearer(gkey)).status_code == 404
         assert client.get("/jobs", headers=_bearer(gkey)).json() == []
 
 

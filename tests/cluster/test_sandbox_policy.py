@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.real_sandbox
+
 from gcon.cluster.coordinator import GCONCoordinator
 from gcon.execution.agent import GCONAgent
 from gcon.persistence.control_plane import ControlPlane

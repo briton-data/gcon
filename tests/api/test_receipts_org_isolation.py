@@ -21,7 +21,7 @@ a mocked layer in between would hide exactly this class of bug.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -79,34 +79,35 @@ class TestReceiptsOrgIsolation:
         client, coordinator, acme_key, globex_key = two_org_setup
 
         acme_resp = client.post(
-            "/jobs", json={"job_id": "job-acme-1", "command": "echo hi"},
+            "/jobs", json={"client_reference": "job-acme-1", "command": "echo hi"},
             headers={"X-API-Key": acme_key},
         )
         assert acme_resp.status_code == 200
         globex_resp = client.post(
-            "/jobs", json={"job_id": "job-globex-1", "command": "echo hi"},
+            "/jobs", json={"client_reference": "job-globex-1", "command": "echo hi"},
             headers={"X-API-Key": globex_key},
         )
         assert globex_resp.status_code == 200
+        acme_id, globex_id = acme_resp.json()["job_id"], globex_resp.json()["job_id"]
 
         # Give the background dispatch threads a moment to post a
         # receipt for each job (same wait pattern as
         # tests/cluster/test_org_isolation.py).
         for _ in range(50):
-            if "job-acme-1" in coordinator.receipts and "job-globex-1" in coordinator.receipts:
+            if acme_id in coordinator.receipts and globex_id in coordinator.receipts:
                 break
             time.sleep(0.05)
 
         acme_list = client.get("/receipts", headers={"X-API-Key": acme_key}).json()
         acme_job_ids = {r["job_id"] for r in acme_list}
-        assert "job-acme-1" in acme_job_ids
-        assert "job-globex-1" not in acme_job_ids, (
+        assert acme_id in acme_job_ids
+        assert globex_id not in acme_job_ids, (
             "acme's API key could see globex's receipt via GET /receipts"
         )
 
         globex_list = client.get("/receipts", headers={"X-API-Key": globex_key}).json()
         globex_job_ids = {r["job_id"] for r in globex_list}
-        assert "job-globex-1" in globex_job_ids
-        assert "job-acme-1" not in globex_job_ids, (
+        assert globex_id in globex_job_ids
+        assert acme_id not in globex_job_ids, (
             "globex's API key could see acme's receipt via GET /receipts"
         )

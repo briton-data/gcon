@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -398,8 +399,13 @@ class RealClusterProcesses:
         )
         return self.coordinator_proc
 
-    def start_worker(self, log_name="worker.log"):
+    def start_worker(self, log_name="worker.log", sandboxed=False):
         log_file = open(self.tmp_path / log_name, "w")
+        env = os.environ.copy()
+        if sandboxed:
+            # Jobs from the public API only run on a worker that has verified
+            # its sandbox (run_worker's startup probe), so this one needs Docker.
+            env["GCON_EXECUTION_BACKEND"] = "docker"
         self.worker_proc = subprocess.Popen(
             [
                 sys.executable, "scripts/run_worker.py",
@@ -408,7 +414,7 @@ class RealClusterProcesses:
                 "--cert-dir", str(self.cert_dir),
                 "--log-level", "INFO",
             ],
-            cwd=str(REPO_ROOT), stdout=log_file, stderr=subprocess.STDOUT,
+            cwd=str(REPO_ROOT), env=env, stdout=log_file, stderr=subprocess.STDOUT,
         )
         return self.worker_proc
 
@@ -439,7 +445,21 @@ def real_cluster(tmp_path):
     cluster.shutdown()
 
 
+def _docker_daemon_available():
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 @pytest.mark.slow
+@pytest.mark.skipif(
+    not _docker_daemon_available(),
+    reason="submits through the public API, whose jobs only run on a worker that has "
+           "verified a Docker sandbox -- needs a reachable Docker daemon",
+)
 def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(real_cluster):
     """
     Real coordinator process #1 + real worker process, over real HTTP
@@ -458,10 +478,9 @@ def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(
     Python process's memory.
     """
     api_headers = None
-    job_id = "mp-restart-job-1"
 
     real_cluster.start_coordinator("coordinator-1.log")
-    real_cluster.start_worker()
+    real_cluster.start_worker(sandboxed=True)
     secret = real_cluster.login_and_get_api_key()
     api_headers = {"Authorization": f"Bearer {secret}"}
 
@@ -475,8 +494,9 @@ def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(
     ), "the real worker process should have registered with the real coordinator process"
 
     r = requests.post(f"{real_cluster.base_url}/api/v1/jobs", headers=api_headers,
-                       json={"job_id": job_id, "command": "sleep 6 && echo done"}, timeout=5)
+                       json={"client_reference": "mp-restart-job-1", "command": "sleep 6 && echo done"}, timeout=5)
     assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]            # minted by GCON
 
     def _job_status():
         r = requests.get(f"{real_cluster.base_url}/api/v1/jobs/{job_id}",

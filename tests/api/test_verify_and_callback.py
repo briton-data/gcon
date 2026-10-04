@@ -17,7 +17,7 @@ mocked layer in between would hide exactly this class of bug.
 """
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -55,21 +55,21 @@ class TestVerifyAndCallbackPassthrough:
         client, api_key, coordinator, org_id = api_setup
         resp = client.post(
             "/jobs",
-            json={"job_id": "job-verify-1", "command": "echo hi", "verify": {"replicas": 2}},
+            json={"client_reference": "job-verify-1", "command": "echo hi", "verify": {"replicas": 2}},
             headers={"X-API-Key": api_key},
         )
         assert resp.status_code == 200, resp.text
-        assert coordinator.jobs["job-verify-1"]["verify"] == {"replicas": 2}
+        assert coordinator.jobs[client.ids["job-verify-1"]]["verify"] == {"replicas": 2}
 
     def test_no_verify_param_is_still_none(self, api_setup):
         client, api_key, coordinator, org_id = api_setup
         resp = client.post(
             "/jobs",
-            json={"job_id": "job-plain-1", "command": "echo hi"},
+            json={"client_reference": "job-plain-1", "command": "echo hi"},
             headers={"X-API-Key": api_key},
         )
         assert resp.status_code == 200, resp.text
-        assert coordinator.jobs["job-plain-1"].get("verify") is None
+        assert coordinator.jobs[client.ids["job-plain-1"]].get("verify") is None
 
     def test_callback_url_reaches_the_coordinator(self, api_setup):
         client, api_key, coordinator, org_id = api_setup
@@ -83,7 +83,7 @@ class TestVerifyAndCallbackPassthrough:
             headers={"X-API-Key": api_key},
         )
         assert resp.status_code == 200, resp.text
-        assert coordinator.jobs["job-callback-1"]["callback_url"] == "https://example.com/gcon-callback"
+        assert coordinator.jobs[client.ids["job-callback-1"]]["callback_url"] == "https://example.com/gcon-callback"
 
     def test_org_id_is_derived_from_the_authenticated_user_not_the_request(self, api_setup):
         # A submitter cannot claim a different org_id via the request
@@ -92,8 +92,8 @@ class TestVerifyAndCallbackPassthrough:
         client, api_key, coordinator, org_id = api_setup
         resp = client.post(
             "/jobs",
-            json={"job_id": "job-org-1", "command": "echo hi"},
+            json={"client_reference": "job-org-1", "command": "echo hi"},
             headers={"X-API-Key": api_key},
         )
         assert resp.status_code == 200, resp.text
-        assert coordinator.jobs["job-org-1"]["org_id"] == org_id
+        assert coordinator.jobs[client.ids["job-org-1"]]["org_id"] == org_id

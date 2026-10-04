@@ -15,7 +15,7 @@ What must hold:
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -68,16 +68,42 @@ class World:
             n.org_id = self.org
             coordinator.register_agent(n)
 
+    # Job ids are minted by GCON; tests think in labels (the client_reference
+    # they submitted with). `id()` gives the real id, and responses from
+    # `clear()` are mapped back to labels so assertions stay readable.
+    def id(self, label):
+        return self.client.ids.get(label, label)
+
+    def _relabel(self, value):
+        back = {v: k for k, v in self.client.ids.items()}
+        if isinstance(value, dict):
+            return {k: self._relabel(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._relabel(v) for v in value]
+        return back.get(value, value) if isinstance(value, str) else value
+
     def submit(self, job_id, command="echo hi", key=None, **extra):
-        r = self.client.post("/jobs", json={"job_id": job_id, "command": command, **extra}, headers=_h(key or self.key))
+        r = self.client.post("/jobs", json={"client_reference": job_id, "command": command, **extra}, headers=_h(key or self.key))
         assert r.status_code == 200, r.text
 
     def status(self, job_id, key=None):
-        r = self.client.get(f"/jobs/{job_id}", headers=_h(key or self.key))
+        r = self.client.get(f"/jobs/{self.id(job_id)}", headers=_h(key or self.key))
         return r.json()["status"] if r.status_code == 200 else None
 
     def clear(self, ids, key=None):
-        return self.client.post("/jobs/clear", json={"job_ids": ids}, headers=_h(key or self.key))
+        resp = self.client.post(
+            "/jobs/clear",
+            json={"job_ids": [self.id(i.strip()) if isinstance(i, str) else i for i in ids]},
+            headers=_h(key or self.key),
+        )
+        world = self
+
+        class _Relabelled:
+            status_code = resp.status_code
+            text = resp.text
+            def json(self_inner):
+                return world._relabel(resp.json())
+        return _Relabelled()
 
     def make_failed(self, job_id):
         self.submit(job_id, "exit 3")
@@ -86,13 +112,13 @@ class World:
     def make_cancelled(self, job_id):
         self.submit(job_id, "sleep 30")
         assert _wait(lambda: self.status(job_id) == "running")
-        assert self.client.post(f"/jobs/{job_id}/cancel", headers=_h(self.key)).status_code == 200
+        assert self.client.post(f"/jobs/{self.id(job_id)}/cancel", headers=_h(self.key)).status_code == 200
         assert _wait(lambda: self.status(job_id) == "cancelled")
 
     def make_completed(self, job_id):
         self.submit(job_id, "echo done")
         assert _wait(lambda: self.status(job_id) == "completed")
-        assert _wait(lambda: any(r["job_id"] == job_id for r in self.client.get("/receipts", headers=_h(self.key)).json()))
+        assert _wait(lambda: any(r["job_id"] == self.id(job_id) for r in self.client.get("/receipts", headers=_h(self.key)).json()))
 
     def make_pending(self, job_id):
         # needs a GPU that no worker has, so it stays queued
@@ -141,7 +167,7 @@ class TestRefusesWhatItMust:
         assert r["cleared"] == []
         assert {s["job_id"]: s["reason"] for s in r["skipped"]} == {"run1": "not_clearable", "q1": "not_clearable"}
         assert w.status("run1") == "running" and w.status("q1") == "pending"
-        w.client.post("/jobs/run1/cancel", headers=_h(w.key))
+        w.client.post(f"/jobs/{w.id('run1')}/cancel", headers=_h(w.key))
 
     def test_a_completed_job_is_refused_and_its_receipt_survives(self, w):
         w.make_completed("done1")
@@ -158,10 +184,10 @@ class TestRefusesWhatItMust:
         # Belt and braces: the receipt check applies whatever the status says.
         w.make_completed("odd1")
         with w.coord.jobs_lock:
-            w.coord.jobs["odd1"]["status"] = "failed"
+            w.coord.jobs[w.id("odd1")]["status"] = "failed"
         r = w.clear(["odd1"]).json()
         assert r["cleared"] == [] and r["skipped"][0]["reason"] == "has_receipt"
-        assert "odd1" in w.coord.jobs
+        assert w.id("odd1") in w.coord.jobs
 
     def test_unknown_job_is_skipped_not_an_error(self, w):
         w.make_failed("f1")
@@ -191,7 +217,7 @@ class TestOrganizationIsolation:
         gnode = GCONAgent(node_id="glob-0")
         gnode.org_id = w.gorg
         w.coord.register_agent(gnode)
-        w.client.post("/jobs", json={"job_id": "theirs", "command": "exit 1"}, headers=_h(w.gkey))
+        w.client.post("/jobs", json={"client_reference": "theirs", "command": "exit 1"}, headers=_h(w.gkey))
         assert _wait(lambda: w.status("theirs", key=w.gkey) == "failed")
         r = w.clear(["mine", "theirs"]).json()
         assert r["cleared"] == ["mine"]
@@ -220,7 +246,7 @@ class TestInputAndAuth:
     def test_a_cleared_job_cannot_then_be_retried(self, w):
         w.make_failed("f1")
         w.clear(["f1"])
-        assert w.client.post("/jobs/f1/retry", headers=_h(w.key)).status_code == 404
+        assert w.client.post(f"/jobs/{w.id('f1')}/retry", headers=_h(w.key)).status_code == 404
 
 
 class TestDurability:
@@ -230,14 +256,15 @@ class TestDurability:
         w.make_failed("gone")
         w.make_failed("kept")
         assert w.clear(["gone"]).json()["cleared"] == ["gone"]
+        gone_id, kept_id = w.id("gone"), w.id("kept")
         coordinator.shutdown()
 
         # A fresh coordinator on the same database, as after a restart.
         again = GCONCoordinator(control_plane=ControlPlane(path=db))
         try:
-            assert "gone" not in again.jobs
-            assert again.control_plane.jobs.get("gone") is None
-            assert again.control_plane.jobs.get("kept") is not None      # only what was named was removed
+            assert gone_id not in again.jobs
+            assert again.control_plane.jobs.get(gone_id) is None
+            assert again.control_plane.jobs.get(kept_id) is not None      # only what was named was removed
         finally:
             again.shutdown()
 
@@ -246,5 +273,5 @@ class TestDurability:
         w = World(client, coordinator)
         w.make_failed("gone")
         w.clear(["gone"])
-        rows = coordinator.control_plane.db.execute("SELECT COUNT(*) FROM job_attempts WHERE job_id = ?", ("gone",)).fetchone()
+        rows = coordinator.control_plane.db.execute("SELECT COUNT(*) FROM job_attempts WHERE job_id = ?", (w.id("gone"),)).fetchone()
         assert rows[0] == 0

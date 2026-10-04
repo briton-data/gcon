@@ -41,6 +41,16 @@ def _free_tcp_port():
         return s.getsockname()[1]
 
 
+IDS = {}
+
+
+def _submit(client, label, command):
+    """The client's first argument is only a label now; GCON returns the real id."""
+    result = client.submit_job(label, command)
+    IDS[label] = result["job_id"]
+    return result
+
+
 def _wait_until(predicate, timeout=10.0, interval=0.05):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -122,13 +132,13 @@ def test_get_receipt_returns_full_detail_including_assurance(live_server):
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
 
-    client.submit_job("sdk-job-1", "echo hi")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-job-1"]["status"] == "completed")
-    assert _wait_until(lambda: "sdk-job-1" in live_server.coordinator.receipts)
+    _submit(client, "sdk-job-1", "echo hi")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-job-1"]]["status"] == "completed")
+    assert _wait_until(lambda: IDS["sdk-job-1"] in live_server.coordinator.receipts)
 
-    receipt_id = live_server.coordinator.receipts["sdk-job-1"]["receipt_id"]
+    receipt_id = live_server.coordinator.receipts[IDS["sdk-job-1"]]["receipt_id"]
     detail = client.get_receipt(receipt_id)
-    assert detail["job_id"] == "sdk-job-1"
+    assert detail["job_id"] == IDS["sdk-job-1"]
     # This is #7's field, reached here for the first time via the SDK
     # itself rather than a direct coordinator call.
     assert detail["assurance"]["level"] == "verified"
@@ -148,14 +158,14 @@ def test_retry_job_resubmits_a_failed_job(live_server):
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
 
-    client.submit_job("sdk-job-2", "exit 1")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-job-2"]["status"] == "failed")
+    _submit(client, "sdk-job-2", "exit 1")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-job-2"]]["status"] == "failed")
 
-    result = client.retry_job("sdk-job-2")
+    result = client.retry_job(IDS["sdk-job-2"])
     assert result is not None
     assert _wait_until(
-        lambda: live_server.coordinator.jobs["sdk-job-2"].get("attempt_number", 1) >= 2
-        or live_server.coordinator.jobs["sdk-job-2"]["status"] in ("pending", "running", "completed"),
+        lambda: live_server.coordinator.jobs[IDS["sdk-job-2"]].get("attempt_number", 1) >= 2
+        or live_server.coordinator.jobs[IDS["sdk-job-2"]]["status"] in ("pending", "running", "completed"),
         timeout=10,
     )
 
@@ -166,11 +176,11 @@ def test_clear_jobs_reports_cleared_and_skipped(live_server):
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
 
-    client.submit_job("sdk-job-3", "exit 1")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-job-3"]["status"] == "failed")
+    _submit(client, "sdk-job-3", "exit 1")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-job-3"]]["status"] == "failed")
 
-    result = client.clear_jobs(["sdk-job-3", "does-not-exist"])
-    assert "sdk-job-3" in result["cleared"]
+    result = client.clear_jobs([IDS["sdk-job-3"], "does-not-exist"])
+    assert IDS["sdk-job-3"] in result["cleared"]
     skipped_ids = {s["job_id"] for s in result["skipped"]}
     assert "does-not-exist" in skipped_ids
 
@@ -190,12 +200,12 @@ def test_get_telemetry_events_returns_a_list_and_accepts_filters(live_server):
     node = GCONAgent(node_id="sdk-node-5")
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
-    client.submit_job("sdk-job-5", "echo hi")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-job-5"]["status"] == "completed")
+    _submit(client, "sdk-job-5", "echo hi")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-job-5"]]["status"] == "completed")
 
     events = client.get_telemetry_events()
     assert isinstance(events, list)
-    scoped = client.get_telemetry_events(job_id="sdk-job-5", limit=10)
+    scoped = client.get_telemetry_events(job_id=IDS["sdk-job-5"], limit=10)
     assert isinstance(scoped, list)
 
 
@@ -205,14 +215,14 @@ def test_list_jobs_status_filter_matches_the_http_route(live_server):
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
 
-    client.submit_job("sdk-ok", "echo hi")
-    client.submit_job("sdk-bad", "exit 1")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-ok"]["status"] == "completed")
-    assert _wait_until(lambda: live_server.coordinator.jobs["sdk-bad"]["status"] == "failed")
+    _submit(client, "sdk-ok", "echo hi")
+    _submit(client, "sdk-bad", "exit 1")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-ok"]]["status"] == "completed")
+    assert _wait_until(lambda: live_server.coordinator.jobs[IDS["sdk-bad"]]["status"] == "failed")
 
     failed_only = client.list_jobs(status="failed")
     ids = {j["job_id"] for j in failed_only}
-    assert ids == {"sdk-bad"}
+    assert ids == {IDS["sdk-bad"]}
 
     capped = client.list_jobs(limit=1)
     assert len(capped) == 1
@@ -230,12 +240,25 @@ def test_list_receipts_verified_filter_matches_the_http_route(live_server):
     node = GCONAgent(node_id="sdk-node-7")
     node.org_id = org_id
     live_server.coordinator.register_agent(node)
-    client.submit_job("sdk-job-7", "echo hi")
-    assert _wait_until(lambda: "sdk-job-7" in live_server.coordinator.receipts)
+    _submit(client, "sdk-job-7", "echo hi")
+    assert _wait_until(lambda: IDS["sdk-job-7"] in live_server.coordinator.receipts)
 
     assert _wait_until(
-        lambda: any(r["job_id"] == "sdk-job-7" for r in client.list_receipts(verified=True)),
+        lambda: any(r["job_id"] == IDS["sdk-job-7"] for r in client.list_receipts(verified=True)),
         timeout=15,
     )
     unverified = client.list_receipts(verified=False)
-    assert all(r["job_id"] != "sdk-job-7" for r in unverified)
+    assert all(r["job_id"] != IDS["sdk-job-7"] for r in unverified)
+
+
+def test_submit_job_returns_the_canonical_id_and_the_label_is_a_client_reference(live_server):
+    """The first argument is only the caller's label; GCON mints the id, and the
+    label can be searched with list_jobs(client_reference=...)."""
+    client, _ = _signup_and_client(live_server)
+    result = client.submit_job("my-label", "sleep 5")
+    assert result["job_id"].startswith("job_") and result["job_id"] != "my-label"
+    assert result["client_reference"] == "my-label"
+    explicit = client.submit_job("ignored-label", "sleep 5", client_reference="explicit")
+    assert explicit["client_reference"] == "explicit"
+    found = client.list_jobs(client_reference="my-label")
+    assert [j["job_id"] for j in found] == [result["job_id"]]

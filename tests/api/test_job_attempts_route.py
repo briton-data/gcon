@@ -14,7 +14,7 @@ not a bug in this route.
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support.label_client import LabelClient as TestClient
 
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.cluster.coordinator import GCONCoordinator
@@ -59,7 +59,7 @@ def _wait(pred, timeout=6.0):
 def test_unknown_job_id_is_404(env):
     client, _ = env
     acme = _signup(client)
-    r = client.get("/jobs/does-not-exist/attempts", headers=_h(acme["api_key"]["secret"]))
+    r = client.get(f"/jobs/does-not-exist/attempts", headers=_h(acme["api_key"]["secret"]))
     assert r.status_code == 404
 
 
@@ -72,15 +72,15 @@ def test_org_cannot_see_a_different_orgs_job_attempts(env):
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
     client.post(
-        "/jobs", json={"job_id": "acme-job-1", "command": "echo hi"},
+        "/jobs", json={"client_reference": "acme-job-1", "command": "echo hi"},
         headers=_h(acme["api_key"]["secret"]),
     )
-    assert _wait(lambda: coordinator.jobs["acme-job-1"]["status"] == "completed")
+    assert _wait(lambda: coordinator.jobs[client.ids["acme-job-1"]]["status"] == "completed")
 
     # Globex's key asking about Acme's job -- must be 404, not 403,
     # same "don't confirm the job_id exists elsewhere" pattern as the
     # existing GET /jobs/{job_id} route and the enrollment-history route.
-    r = client.get("/jobs/acme-job-1/attempts", headers=_h(globex["api_key"]["secret"]))
+    r = client.get(f"/jobs/{client.ids['acme-job-1']}/attempts", headers=_h(globex["api_key"]["secret"]))
     assert r.status_code == 404
 
 
@@ -92,10 +92,10 @@ def test_owner_can_query_their_own_jobs_attempt_history(env):
     node = GCONAgent(node_id="acme-node")
     node.org_id = acme["organization"]["org_id"]
     coordinator.register_agent(node)
-    client.post("/jobs", json={"job_id": "acme-job-2", "command": "echo hi"}, headers=_h(key))
-    assert _wait(lambda: coordinator.jobs["acme-job-2"]["status"] == "completed")
+    client.post("/jobs", json={"client_reference": "acme-job-2", "command": "echo hi"}, headers=_h(key))
+    assert _wait(lambda: coordinator.jobs[client.ids["acme-job-2"]]["status"] == "completed")
 
-    r = client.get("/jobs/acme-job-2/attempts", headers=_h(key))
+    r = client.get(f"/jobs/{client.ids['acme-job-2']}/attempts", headers=_h(key))
     assert r.status_code == 200
     # LocalTransport (this fixture's default) never records durable
     # attempts -- see this file's module docstring. An empty list is
