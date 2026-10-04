@@ -4,7 +4,7 @@ See migrations/registry.py's job_submission_idempotency_keys
 migration for the full reasoning; this repository is deliberately
 small (two operations) since that's the entire contract this needs.
 """
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 class IdempotencyKeyRepository:
@@ -26,7 +26,19 @@ class IdempotencyKeyRepository:
         )
         return row["job_id"] if row else None
 
-    def record(self, org_id: Optional[str], idempotency_key: str, job_id: str, created_at: str) -> str:
+    def get(self, org_id: Optional[str], idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """The full stored mapping (job_id, request_hash, created_at), or None."""
+        row = self.db.query_one(
+            "SELECT job_id, request_hash, created_at FROM job_submission_idempotency_keys "
+            "WHERE org_id = ? AND idempotency_key = ?",
+            (self._norm_org_id(org_id), idempotency_key),
+        )
+        return dict(row) if row else None
+
+    def record(
+        self, org_id: Optional[str], idempotency_key: str, job_id: str, created_at: str,
+        request_hash: Optional[str] = None,
+    ) -> str:
         """
         Record that `idempotency_key` (scoped to `org_id`) resolves to
         `job_id`. Returns the job_id that's actually durably recorded
@@ -45,8 +57,9 @@ class IdempotencyKeyRepository:
             with self.db.transaction() as conn:
                 conn.execute(
                     "INSERT INTO job_submission_idempotency_keys "
-                    "(org_id, idempotency_key, job_id, created_at) VALUES (?, ?, ?, ?)",
-                    (norm_org_id, idempotency_key, job_id, created_at),
+                    "(org_id, idempotency_key, job_id, created_at, request_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (norm_org_id, idempotency_key, job_id, created_at, request_hash),
                 )
         except self.db.IntegrityError:
             existing = self.get_job_id(norm_org_id, idempotency_key)

@@ -13,16 +13,19 @@ available at /api/v1/docs (Swagger UI) and /api/v1/redoc, with the
 raw schema at /api/v1/openapi.json.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
 import threading
+import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Request, Response
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
 from gcon.management.rate_limit import LoginRateLimiter
@@ -66,6 +69,7 @@ class NodeOut(BaseModel):
 
 class JobOut(BaseModel):
     job_id: str
+    client_reference: Optional[str] = None
     status: str
     node_id: Optional[str] = None
     created_at: object = None
@@ -131,8 +135,35 @@ _CLEAR_MESSAGES = {
 }
 
 
+# Fields that decide HOW or WHERE a job runs (privilege, backend, image, node,
+# tenant). They belong to the platform, never to the submitter: a request that
+# names one is refused outright rather than silently ignored, so nobody can
+# believe they asked for, say, an unsandboxed run and got it (or didn't).
+_PLATFORM_ONLY_FIELDS = frozenset({
+    "sandbox", "sandbox_policy", "sandboxed", "sandbox_required", "require_sandbox",
+    "trusted", "privileged", "execution_backend", "backend", "image",
+    "docker_image", "docker", "network", "user", "run_as", "node_id", "node",
+    "org_id", "created_by",
+})
+
+
 class JobSubmitRequest(BaseModel):
-    job_id: str = Field(..., description="Unique identifier for the job")
+    job_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "DEPRECATED and NOT a job identifier: GCON generates the canonical "
+            "job_id and returns it. If sent (and `client_reference` is not), "
+            "this value is stored as `client_reference`."
+        ),
+    )
+    client_reference: Optional[str] = Field(
+        default=None,
+        description=(
+            "Your own label for this job (up to 128 printable characters), "
+            "returned on the job so you can correlate it with your systems. "
+            "Not unique and never used to look a job up or authorise anything."
+        ),
+    )
     command: str = Field(..., description="Shell command the job will run")
     artifacts: Optional[List[str]] = Field(
         default=None, description="Optional list of file paths to register as artifacts"
@@ -195,10 +226,24 @@ class JobSubmitRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_platform_only_fields(cls, data):
+        if isinstance(data, dict):
+            named = sorted(k for k in data if isinstance(k, str) and k.lower() in _PLATFORM_ONLY_FIELDS)
+            if named:
+                raise ValueError(
+                    "Not accepted on job submission: " + ", ".join(named)
+                    + ". How and where a job runs (sandbox, privilege, image, "
+                    "node, organization) is decided by GCON, not by the request."
+                )
+        return data
+
 
 class JobSubmitResponse(BaseModel):
     job_id: str
     submitted: bool = True
+    client_reference: Optional[str] = None
 
 
 class JobCancelResponse(BaseModel):
@@ -343,6 +388,58 @@ def _validate_signup(payload):
     if not _EMAIL_RE.match((payload.email or "").strip()):
         raise ValueError("Enter a valid email address.")
     _validate_password(payload.password)
+
+
+_CLIENT_REFERENCE_MAX = 128
+_IDEMPOTENCY_KEY_MAX = 255
+# Serialises "look up key -> submit -> record key" per (org, key). Only the
+# leader accepts submissions, so one process-local lock set is enough; striped
+# so unrelated keys never wait on each other.
+_IDEMPOTENCY_LOCKS = [threading.Lock() for _ in range(64)]
+
+
+def _new_job_id() -> str:
+    """Canonical, server-minted job id: unguessable and globally unique, so
+    no submitter can pick, collide with, or probe for another tenant's id."""
+    return "job_" + uuid.uuid4().hex
+
+
+def _new_workflow_id() -> str:
+    return "wf_" + uuid.uuid4().hex
+
+
+def _clean_client_reference(value):
+    """Validate the submitter's own label: a correlation tag, nothing more."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="client_reference must be a string.")
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > _CLIENT_REFERENCE_MAX or not value.isprintable():
+        raise HTTPException(
+            status_code=400,
+            detail=f"client_reference must be at most {_CLIENT_REFERENCE_MAX} printable characters.",
+        )
+    return value
+
+
+def _request_fingerprint(payload) -> str:
+    """Hash of what a submission asks GCON to DO. `client_reference` is only a
+    label, so changing it does not make a retry a different request."""
+    material = {
+        name: getattr(payload, name)
+        for name in ("command", "artifacts", "kind", "requires", "stages",
+                     "dataset_artifacts", "callback_url", "verify")
+    }
+    blob = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _idempotency_lock(org_id, key):
+    digest = hashlib.sha256(f"{org_id or ''}\0{key}".encode("utf-8")).digest()
+    return _IDEMPOTENCY_LOCKS[digest[0] % len(_IDEMPOTENCY_LOCKS)]
 
 
 def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None, mailer=None):
@@ -752,6 +849,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     def list_jobs(
         status: Optional[str] = None,
         limit: Optional[int] = None,
+        client_reference: Optional[str] = None,
         auth=Depends(require_scope("View monitoring")),
     ):
         # Same org-scoping as list_nodes above -- this previously
@@ -768,7 +866,15 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # working default path changes.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        return jsonable_encoder(presentation.get_jobs(org_id=org_id, status=status, limit=limit))
+        if client_reference is None:
+            return jsonable_encoder(presentation.get_jobs(org_id=org_id, status=status, limit=limit))
+        # Look up your own jobs by the label you gave them (still scoped to the
+        # caller's organization, like every other read here).
+        matches = [
+            j for j in presentation.get_jobs(org_id=org_id, status=status)
+            if j.get("client_reference") == client_reference
+        ]
+        return jsonable_encoder(matches[:limit] if limit is not None else matches)
 
     @app.get(
         "/jobs/{job_id}",
@@ -810,57 +916,85 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # no organization both legitimately resolve to org_id=None.
         org_id = getattr(owner, "organization_id", None) if owner else None
 
-        # Durable idempotency, scoped per-org (see
-        # IdempotencyKeyRepository) -- a client retrying an ambiguous-
-        # outcome submission (timed-out response, etc.) with the same
-        # Idempotency-Key gets back the job that request actually
-        # created, instead of risking a second one. This checks BEFORE
-        # doing anything else, so a replayed request never re-runs
-        # policy checks, concurrent-job limits, etc. -- it's genuinely
-        # a no-op past the lookup, matching what "idempotent" means.
-        if idempotency_key:
-            existing_job_id = presentation.get_idempotent_job_id(org_id, idempotency_key)
-            if existing_job_id is not None:
-                response.headers["Idempotent-Replayed"] = "true"
-                return {"job_id": existing_job_id, "submitted": True}
+        # The submitter's label. The deprecated `job_id` field is only ever
+        # read as a label -- it never becomes the canonical id.
+        client_reference = _clean_client_reference(
+            payload.client_reference if payload.client_reference is not None else payload.job_id
+        )
 
-        try:
-            presentation.submit_job(
-                payload.job_id,
-                payload.command,
-                payload.artifacts,
-                created_by=owner.user_id if owner else None,
-                org_id=org_id,
-                kind=payload.kind,
-                requires=payload.requires,
-                stages=payload.stages,
-                dataset_artifacts=payload.dataset_artifacts,
-                callback_url=payload.callback_url,
-                verify=payload.verify,
+        def _do_submit(job_id):
+            try:
+                presentation.submit_job(
+                    job_id,
+                    payload.command,
+                    payload.artifacts,
+                    created_by=owner.user_id if owner else None,
+                    org_id=org_id,
+                    kind=payload.kind,
+                    requires=payload.requires,
+                    stages=payload.stages,
+                    dataset_artifacts=payload.dataset_artifacts,
+                    callback_url=payload.callback_url,
+                    verify=payload.verify,
+                    client_reference=client_reference,
+                    # Everything arriving through this route is a public job:
+                    # only ever dispatched to a sandboxed worker, whatever
+                    # GCON_SANDBOX_POLICY says.
+                    sandbox_required=True,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except PolicyRejectionError as e:
+                # Same handling as ValueError above -- a policy-rejected
+                # submission is a client-facing 400 (the request itself
+                # was fine, but policy says no), not a 500.
+                raise HTTPException(status_code=400, detail=str(e))
+            except NotLeaderError as e:
+                # 503 (not 400/404): the request itself is fine, this
+                # coordinator process just isn't the one that should
+                # handle it right now -- a client/load-balancer should
+                # retry, ideally against the leader. See
+                # gcon.cluster.leader_election / GCONCoordinator.submit_job.
+                raise HTTPException(status_code=503, detail=str(e))
+
+        if not idempotency_key:
+            job_id = _new_job_id()
+            _do_submit(job_id)
+            return {"job_id": job_id, "submitted": True, "client_reference": client_reference}
+
+        # Durable idempotency, scoped per-org (see IdempotencyKeyRepository).
+        # Job ids are now minted here, so two concurrent requests with the same
+        # key would otherwise each create a job: the lookup, the submission and
+        # the record therefore happen under one per-(org, key) lock.
+        if len(idempotency_key) > _IDEMPOTENCY_KEY_MAX or not idempotency_key.isprintable():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX} printable characters.",
             )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except PolicyRejectionError as e:
-            # Same handling as ValueError above -- a policy-rejected
-            # submission is a client-facing 400 (the request itself
-            # was fine, but policy says no), not a 500. Without this,
-            # PolicyRejectionError (a RuntimeError subclass, so not
-            # caught by `except ValueError` above) propagated as an
-            # unhandled exception straight through to a raw 500 with
-            # a full server stack trace -- confirmed live while
-            # building the SDK's error-handling path, not a
-            # hypothetical concern.
-            raise HTTPException(status_code=400, detail=str(e))
-        except NotLeaderError as e:
-            # 503 (not 400/404): the request itself is fine, this
-            # coordinator process just isn't the one that should
-            # handle it right now -- a client/load-balancer should
-            # retry, ideally against the leader. See
-            # gcon.cluster.leader_election / GCONCoordinator.submit_job.
-            raise HTTPException(status_code=503, detail=str(e))
-        if idempotency_key:
-            presentation.record_idempotency_key(org_id, idempotency_key, payload.job_id)
-        return {"job_id": payload.job_id, "submitted": True}
+        request_hash = _request_fingerprint(payload)
+        with _idempotency_lock(org_id, idempotency_key):
+            record = presentation.get_idempotency_record(org_id, idempotency_key)
+            if record is not None:
+                stored_hash = record.get("request_hash")
+                if stored_hash and stored_hash != request_hash:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This Idempotency-Key was already used for a different request.",
+                    )
+                response.headers["Idempotent-Replayed"] = "true"
+                original_id = record["job_id"]
+                original = presentation.coordinator.jobs.get(original_id)
+                if original is None and presentation.coordinator.control_plane is not None:
+                    original = presentation.coordinator.control_plane.jobs.get(original_id)
+                return {
+                    "job_id": original_id,
+                    "submitted": True,
+                    "client_reference": (original or {}).get("client_reference"),
+                }
+            job_id = _new_job_id()
+            _do_submit(job_id)
+            presentation.record_idempotency_key(org_id, idempotency_key, job_id, request_hash)
+        return {"job_id": job_id, "submitted": True, "client_reference": client_reference}
 
     @app.post(
         "/jobs/clear",
@@ -964,12 +1098,17 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     # ------------------------------------------------------------
 
     class WorkflowJobIn(BaseModel):
+        # A label that is only meaningful inside this request (it is what
+        # `depends_on` refers to). GCON mints the real job ids and returns the
+        # label -> id mapping; the label is stored as the job's client_reference.
         job_id: str
         command: str
         depends_on: List[str] = Field(default_factory=list)
 
     class WorkflowSubmitRequest(BaseModel):
-        workflow_id: str
+        # Optional label, stored as the workflow's client_reference. GCON mints
+        # the canonical workflow_id.
+        workflow_id: Optional[str] = None
         name: str = ""
         jobs: List[WorkflowJobIn]
 
@@ -977,6 +1116,11 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         workflow_id: str
         status: str
         submitted: bool
+        client_reference: Optional[str] = None
+        jobs: Dict[str, str] = Field(
+            default_factory=dict,
+            description="Your job label -> the canonical GCON job_id.",
+        )
 
     @app.post(
         "/workflows",
@@ -989,23 +1133,51 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         from gcon.workflow.workflow import Workflow, WorkflowJob
 
         owner = auth["owner"]
+        labels = [job_in.job_id for job_in in payload.jobs]
+        if len(set(labels)) != len(labels):
+            raise HTTPException(status_code=400, detail="Job labels within a workflow must be unique.")
+        client_reference = _clean_client_reference(payload.workflow_id)
+        # Canonical ids are minted here, exactly as for POST /jobs: a workflow
+        # can neither pick nor collide with another tenant's job or workflow id.
+        canonical = {label: _new_job_id() for label in labels}
         workflow = Workflow(
-            workflow_id=payload.workflow_id,
-            name=payload.name,
+            workflow_id=_new_workflow_id(),
+            name=payload.name or (client_reference or ""),
+            # Persisted with the workflow definition, so the platform-set
+            # sandbox requirement survives into every job the engine submits.
+            metadata={"client_reference": client_reference, "sandbox_required": True},
             created_by=owner.user_id if owner else None,
+            # Same attribution rule as a directly submitted job: the
+            # submitter's organization (None for a system key).
+            org_id=getattr(owner, "organization_id", None) if owner else None,
         )
         try:
             for job_in in payload.jobs:
-                workflow.add_job(WorkflowJob(job_id=job_in.job_id, command=job_in.command))
+                workflow.add_job(WorkflowJob(
+                    job_id=canonical[job_in.job_id], command=job_in.command,
+                    metadata={"client_reference": _clean_client_reference(job_in.job_id)},
+                ))
             for job_in in payload.jobs:
-                for parent_id in job_in.depends_on:
-                    workflow.add_dependency(parent_id, job_in.job_id)
+                for parent_label in job_in.depends_on:
+                    if parent_label not in canonical:
+                        raise ValueError(
+                            f"Job '{job_in.job_id}' depends on '{parent_label}', "
+                            "which is not a job in this workflow."
+                        )
+                    workflow.add_dependency(canonical[parent_label], canonical[job_in.job_id])
 
             state = presentation.submit_workflow(workflow)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except NotLeaderError as e:
+            # Same as submit_job: the request is fine, this coordinator is
+            # just not the leader right now -- retry against the leader.
+            raise HTTPException(status_code=503, detail=str(e))
 
-        return {"workflow_id": payload.workflow_id, "status": state.status, "submitted": True}
+        return {
+            "workflow_id": workflow.workflow_id, "status": state.status, "submitted": True,
+            "client_reference": client_reference, "jobs": canonical,
+        }
 
     @app.get(
         "/workflows",
@@ -1014,7 +1186,10 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         responses={401: {"model": ErrorOut}},
     )
     def list_workflows(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_workflows())
+        # Org-scoped keys only ever see their own company's workflows.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_workflows(org_id=org_id))
 
     # ------------------------------------------------------------
     # Receipts & Artifacts

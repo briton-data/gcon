@@ -4,6 +4,7 @@ import socket
 import uuid
 import itertools
 import json
+import logging
 import os
 from collections import deque
 from queue import Queue
@@ -13,6 +14,7 @@ from .registry import NodeRegistry
 from .scheduler import Scheduler
 from .communication import CommunicationManager
 from gcon.cluster.autoscaler import AutoScaler
+from gcon.monitoring.observability import ObservabilityService
 from gcon.transport.local_transport import LocalTransport
 from gcon.transport.errors import NodeUnavailableError
 
@@ -26,6 +28,7 @@ from gcon.events.event import Event
 from gcon.events.event_types import EventType
 from gcon.events.event_bus import EventBus
 from gcon.workflow.workflow_engine import WorkflowEngine
+from gcon.monitoring.scheduler_stats import SchedulerStats
 from gcon.monitoring.health_service import HealthService
 from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
@@ -47,6 +50,24 @@ class PolicyRejectionError(RuntimeError):
     created, queued, or persisted -- there is nothing to clean up."""
     pass
 
+
+
+_coordinator_logger = logging.getLogger("gcon.coordinator")
+
+
+def _log_line(message):
+    """
+    Leveled replacement for this module's former bare print() calls: same
+    text, but through `logging` so operators can filter by level and ship it
+    to a log aggregator. Lifecycle events that need job/trace ids use
+    self.telemetry.<level>(..., job_id=..., trace_id=...) instead.
+    """
+    text = str(message)
+    lowered = text.lower()
+    if text.startswith("[WARN]") or "failed" in lowered or "error" in lowered or "[quarantine]" in lowered:
+        _coordinator_logger.warning(text)
+    else:
+        _coordinator_logger.info(text)
 
 class GCONCoordinator:
     """
@@ -264,6 +285,8 @@ class GCONCoordinator:
         # eligible node produces ONE event, not one per scheduler pass.
         # Cleared when the job is actually dispatched.
         self._dispatch_failure_reported = set()
+        # Live scheduler-loop counters for the dashboard's Scheduler page.
+        self.scheduler_stats = SchedulerStats()
 
         # Durable control-plane handle (jobs/nodes/receipts survive a
         # restart in its DB, see gcon.persistence). Optional: local-only
@@ -281,6 +304,9 @@ class GCONCoordinator:
         # restart -- same optional-durability pattern as everything
         # else here.
         self.telemetry = telemetry_module.TelemetryCollector(control_plane=control_plane)
+        # Sampled metric history + incidents (see monitoring/observability.py).
+        # Never on the dispatch path; sampled from health_check_loop below.
+        self.observability = ObservabilityService(self)
         if self._sandbox_policy == "trusted":
             self.telemetry.warning(
                 "GCON_SANDBOX_POLICY=trusted: jobs may run on unsandboxed workers "
@@ -360,7 +386,7 @@ class GCONCoordinator:
             )
             self.autoscale_thread.start()
 
-        print("GCON Coordinator initialized.")
+        _log_line("GCON Coordinator initialized.")
 
     def restore_from_persistence(self):
         """
@@ -416,9 +442,13 @@ class GCONCoordinator:
                     "created_by": job.get("created_by"),
                     "workflow_id": job.get("workflow_id"),
                     "org_id": job.get("org_id"),
+                    "client_reference": job.get("client_reference"),
+                    # Not persisted as its own column: any job attributed to
+                    # an organization came through the customer path.
+                    "require_sandbox": job.get("org_id") is not None,
                 }
         except Exception as e:
-            print(f"[RESTORE] Failed to restore jobs from control plane: {e!r}")
+            _log_line(f"[RESTORE] Failed to restore jobs from control plane: {e!r}")
 
         # Reconcile jobs that were still in flight (dispatched but not
         # yet marked completed/failed) when this coordinator last
@@ -483,7 +513,7 @@ class GCONCoordinator:
             try:
                 attempts = self.control_plane.job_attempts.list_for_job(job_id)
             except Exception as e:
-                print(f"[RESTORE] Failed to load attempt history for '{job_id}': {e!r}")
+                _log_line(f"[RESTORE] Failed to load attempt history for '{job_id}': {e!r}")
                 attempts = []
 
             open_attempts = [a for a in attempts if a["status"] == "dispatched"]
@@ -515,7 +545,7 @@ class GCONCoordinator:
                         job_id, "failed", result=job["result"], completed=True,
                     )
                 except Exception as e:
-                    print(
+                    _log_line(
                         f"[RESTORE] Failed to persist reconciled status "
                         f"for job {job_id}: {e!r}"
                     )
@@ -543,7 +573,7 @@ class GCONCoordinator:
             try:
                 self.control_plane.jobs.set_status(job_id, "pending", completed=False)
             except Exception as e:
-                print(f"[RESTORE] Failed to persist resumed status for '{job_id}': {e!r}")
+                _log_line(f"[RESTORE] Failed to persist resumed status for '{job_id}': {e!r}")
             self.event_bus.publish(Event(
                 timestamp=datetime.now(UTC),
                 event_type="JOB_RESUMED_AFTER_RESTART",
@@ -554,9 +584,9 @@ class GCONCoordinator:
             resumed += 1
 
         if resumed:
-            print(f"[RESTORE] Re-queued {resumed} in-flight job(s) for a fresh attempt after coordinator restart.")
+            _log_line(f"[RESTORE] Re-queued {resumed} in-flight job(s) for a fresh attempt after coordinator restart.")
         if reconciled_failed:
-            print(
+            _log_line(
                 f"[RESTORE] Marked {reconciled_failed} in-flight job(s) as "
                 "failed after coordinator restart (could not be safely resumed)."
             )
@@ -591,16 +621,24 @@ class GCONCoordinator:
                 # yet.
                 self._pending_receipt_ids.append(job_id)
         except Exception as e:
-            print(f"[RESTORE] Failed to restore receipts from control plane: {e!r}")
+            _log_line(f"[RESTORE] Failed to restore receipts from control plane: {e!r}")
 
         try:
             for node in self.control_plane.nodes.list_all():
                 self.nodes[node["node_id"]] = node
         except Exception as e:
-            print(f"[RESTORE] Failed to restore nodes from control plane: {e!r}")
+            _log_line(f"[RESTORE] Failed to restore nodes from control plane: {e!r}")
+
+        # Workflows last: reconciling each DAG needs the restored job statuses.
+        try:
+            restored_workflows = self.workflow_engine.restore()
+            if restored_workflows:
+                _log_line(f"[RESTORE] Restored {restored_workflows} workflow(s) from the control plane.")
+        except Exception as e:
+            _log_line(f"[RESTORE] Failed to restore workflows from control plane: {e!r}")
 
         if self.jobs or self.receipts or self.nodes:
-            print(
+            _log_line(
                 f"[RESTORE] Restored {len(self.jobs)} job(s), "
                 f"{len(self.receipts)} receipt(s), {len(self.nodes)} node "
                 "record(s) from the control plane."
@@ -648,9 +686,9 @@ class GCONCoordinator:
                     org_id=getattr(node, "org_id", None),
                 )
             except Exception as e:
-                print(f"[WARN] Failed to persist node registration for '{node.node_id}': {e!r}")
+                _log_line(f"[WARN] Failed to persist node registration for '{node.node_id}': {e!r}")
 
-        print(f"Node '{node.node_id}' registered successfully.")
+        _log_line(f"Node '{node.node_id}' registered successfully.")
         self.event_bus.publish(
             Event(
                 timestamp=datetime.now(UTC),
@@ -666,10 +704,18 @@ class GCONCoordinator:
     def submit_job(
         self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
         org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
-        callback_url=None, verify=None,
+        callback_url=None, verify=None, client_reference=None, sandbox_required=False,
     ):
         """
         Submit a new job to the coordinator.
+
+        `client_reference` is the submitter's own label for the job (a
+        correlation tag, stored and echoed back, never used as a key).
+        `sandbox_required=True` is set for every job that arrives through
+        the public API: such a job -- and any job attributed to an
+        organization -- is only ever dispatched to a worker that runs it
+        inside a container, whatever GCON_SANDBOX_POLICY says. See
+        `_must_sandbox`.
 
         `created_by` is the user_id of the authenticated principal that
         submitted this job (from an API key owner or, in the future, a
@@ -831,6 +877,10 @@ class GCONCoordinator:
                 "dataset_artifacts": dataset_artifacts,
                 "callback_url": callback_url,
                 "verify": verify,
+                "client_reference": client_reference,
+                # Decided once, here, from who submitted it -- never from
+                # anything the job's own payload says.
+                "require_sandbox": bool(sandbox_required) or org_id is not None,
                 # Minted once, here, and threaded through the rest of
                 # this job's life (assign_job -> dispatch -> _run_job/
                 # _run_replicated_job -> the receipt itself as an
@@ -858,6 +908,7 @@ class GCONCoordinator:
                 self.control_plane.jobs.ensure_exists(
                     job_id, command, workflow_id=workflow_id,
                     created_by=created_by, org_id=org_id,
+                    client_reference=client_reference,
                 )
                 if callback_url:
                     self.control_plane.db.execute(
@@ -889,6 +940,93 @@ class GCONCoordinator:
         self.telemetry.info(f"[QUEUE] Job {job_id} queued")
         self.telemetry.info(f"[QUEUE] Pending jobs: {self.job_queue.qsize()}")
     
+    def _must_sandbox(self, job):
+        """
+        True if this job may only run on a worker that executes it inside a
+        container. GCON_SANDBOX_POLICY=trusted is an operator statement about
+        INTERNAL workloads: it can relax this for a job submitted by the
+        operator's own code, but never for a job that came through the public
+        API or belongs to an organization -- the customer asks what to run,
+        the platform decides how privileged the worker is.
+        """
+        return self._sandbox_policy == "required" or bool(job.get("require_sandbox", True))
+
+    def _enforce_sandbox_evidence(self, job_id, job, node, result):
+        """
+        A worker DECLARES it is sandboxed; this checks that what it then SIGNED
+        about a job that required a sandbox agrees. The boundary is "declared
+        and verified execution capability", not who owns the worker.
+
+        For a job that required a sandbox, run by a remote worker, the result
+        must carry that worker's Ed25519-signed attestation, the signature must
+        verify against the key registered for the node, it must be about THIS
+        job on THIS node, and it must say execution_backend == "docker".
+        Anything else -- missing, unverifiable, about another job, or "subprocess"
+        -- means the job was not (provably) run in a container: the result is
+        replaced with a failure, and the node is demoted and quarantined so it
+        receives no more public jobs until staff clear it.
+
+        This catches a misconfigured or downgraded worker, and makes a dishonest
+        one provably so (it signed the statement). It cannot prove a worker that
+        lies in its own signature actually ran Docker -- only attestation from
+        hardware/the daemon could -- and in-process agents (no transport) are
+        trusted by construction, as before.
+        """
+        if not self._must_sandbox(job) or getattr(node, "transport", None) is None:
+            return result
+        reason = None
+        payload_json = result.get("worker_attestation_payload_json")
+        signature = result.get("worker_attestation_signature")
+        payload = None
+        if not payload_json or not signature:
+            reason = "no signed execution attestation"
+        else:
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, ValueError):
+                reason = "unreadable execution attestation"
+        if reason is None:
+            public_key_pem = None
+            if self.control_plane is not None:
+                try:
+                    info = self.control_plane.nodes.get(node.node_id)
+                    public_key_pem = info.get("ed25519_public_key") if info else None
+                except Exception:
+                    public_key_pem = None
+            from gcon.execution.worker_identity import verify_attestation
+            if not public_key_pem or not verify_attestation(public_key_pem, payload, signature):
+                reason = "execution attestation could not be verified against the node's registered key"
+            elif payload.get("job_id") != job_id or payload.get("node_id") != node.node_id:
+                reason = "execution attestation is about a different job or node"
+            elif payload.get("execution_backend") != "docker":
+                reason = f"node reported execution_backend={payload.get('execution_backend')!r}, not 'docker'"
+        if reason is None:
+            return result
+
+        message = (
+            f"Sandbox requirement not met: {reason}. The job required a sandboxed worker, "
+            f"so this result was rejected and node '{node.node_id}' was quarantined."
+        )
+        self.telemetry.error(
+            f"[SANDBOX] {message} (job '{job_id}')",
+            event_type="sandbox_evidence_mismatch", trace_id=job.get("trace_id"),
+            job_id=job_id, node_id=node.node_id, payload={"reason": reason},
+        )
+        try:
+            node.sandboxed = False
+            self.registry.set_quarantined(node.node_id, True, reason=f"sandbox evidence: {reason}")
+            self.event_bus.publish(Event(
+                event_type=EventType.NODE_QUARANTINED, source="Coordinator",
+                payload={"node_id": node.node_id, "job_id": job_id, "reason": reason},
+            ))
+        except Exception as e:  # never let the demotion itself lose the failure
+            _log_line(f"[WARN] could not quarantine '{node.node_id}' after sandbox mismatch: {e!r}")
+        rejected = dict(result)
+        rejected.update(status="failed", error=message, stdout="", return_code=-1)
+        for field in ("worker_attestation_payload_json", "worker_attestation_signature"):
+            rejected.pop(field, None)
+        return rejected
+
     def assign_job(self, job_id):
         """
         Assign a job to an available node and execute it.
@@ -925,7 +1063,7 @@ class GCONCoordinator:
 
         node = self.scheduler.select_node(
             requires=job.get("requires"), org_id=job.get("org_id"),
-            require_sandbox=self._sandbox_policy == "required",
+            require_sandbox=self._must_sandbox(job),
         )
 
         if node is None:
@@ -952,8 +1090,8 @@ class GCONCoordinator:
                 )
             raise RuntimeError(
                 "No available nodes to execute the job."
-                + (" (GCON_SANDBOX_POLICY=required: only sandboxed workers qualify.)"
-                   if self._sandbox_policy == "required" else "")
+                + (" (Sandbox required for this job: only sandboxed workers qualify.)"
+                   if self._must_sandbox(job) else "")
             )
 
     # Mark node and job as busy/running. select_node() worked from a
@@ -1021,6 +1159,10 @@ class GCONCoordinator:
         not an attempt.
         """
         job["attempt_number"] = job.get("attempt_number", 0) + 1
+        self.scheduler_stats.dispatched()
+        # First dispatch only: submit -> first dispatch is the queue wait
+        # (later attempts are retries, not waiting in line).
+        job.setdefault("first_dispatched_at", datetime.now(UTC).isoformat())
         self._dispatch_failure_reported.discard(job_id)
 
     def _assign_replicated_job(self, job_id, job, verify_cfg):
@@ -1045,7 +1187,7 @@ class GCONCoordinator:
         for _ in range(replicas):
             node = self.scheduler.select_node(
                 requires=job.get("requires"), org_id=job.get("org_id"),
-                require_sandbox=self._sandbox_policy == "required",
+                require_sandbox=self._must_sandbox(job),
             )
             if node is None:
                 for claimed in nodes:
@@ -1150,7 +1292,7 @@ class GCONCoordinator:
         try:
             info = self.control_plane.nodes.get(node_id)
         except Exception as e:
-            print(f"[WARN] Could not look up auth_fingerprint for '{node_id}': {e!r}")
+            _log_line(f"[WARN] Could not look up auth_fingerprint for '{node_id}': {e!r}")
             return None
         if info is None:
             return None
@@ -1185,7 +1327,7 @@ class GCONCoordinator:
         try:
             info = self.control_plane.nodes.get(node_id)
         except Exception as e:
-            print(f"[WARN] Could not look up ed25519_public_key for '{node_id}': {e!r}")
+            _log_line(f"[WARN] Could not look up ed25519_public_key for '{node_id}': {e!r}")
             return None
         public_key_pem = info.get("ed25519_public_key") if info else None
         if not public_key_pem:
@@ -1193,7 +1335,7 @@ class GCONCoordinator:
         try:
             payload = json.loads(payload_json)
         except (TypeError, ValueError) as e:
-            print(f"[WARN] Malformed worker_attestation_payload_json for '{node_id}': {e!r}")
+            _log_line(f"[WARN] Malformed worker_attestation_payload_json for '{node_id}': {e!r}")
             return None
         return {"payload": payload, "signature": signature, "public_key_pem": public_key_pem}
 
@@ -1222,7 +1364,7 @@ class GCONCoordinator:
             # whichever comes first.
             self._pending_receipt_ids.append(job_id)
 
-        print(f"Receipt received for job '{job_id}'.")
+        _log_line(f"Receipt received for job '{job_id}'.")
 
     def receive_replica_receipt(self, job_id, receipt, is_primary):
         """
@@ -1272,7 +1414,7 @@ class GCONCoordinator:
         offline_nodes = self.registry.check_node_health()
 
         for node_id in offline_nodes:
-            print(f"Node '{node_id}' marked OFFLINE")
+            _log_line(f"Node '{node_id}' marked OFFLINE")
             self.event_bus.publish(Event(
                 timestamp=datetime.now(UTC),
                 event_type="NODE_OFFLINE",
@@ -1311,9 +1453,9 @@ class GCONCoordinator:
         try:
             removed = self._retention_policy.sweep(self.control_plane)
             if any(removed.values()):
-                print(f"[RETENTION] Purged: {removed}")
+                _log_line(f"[RETENTION] Purged: {removed}")
         except Exception as e:
-            print(f"[RETENTION] Sweep failed: {e!r}")
+            _log_line(f"[RETENTION] Sweep failed: {e!r}")
 
     def _sample_health_and_trust(self):
         """
@@ -1471,7 +1613,7 @@ class GCONCoordinator:
             # this check -- nothing left to quarantine.
             return
 
-        print(f"[QUARANTINE] node '{node_id}' auto-quarantined after {streak} consecutive verification failures")
+        _log_line(f"[QUARANTINE] node '{node_id}' auto-quarantined after {streak} consecutive verification failures")
         self.event_bus.publish(Event(
             event_type=EventType.NODE_QUARANTINED,
             source="Coordinator",
@@ -1519,7 +1661,7 @@ class GCONCoordinator:
             # offline -- nothing further to do.
             return
 
-        print(f"Node '{node_id}' marked OFFLINE (disconnected)")
+        _log_line(f"Node '{node_id}' marked OFFLINE (disconnected)")
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC),
             event_type="NODE_OFFLINE",
@@ -1533,7 +1675,7 @@ class GCONCoordinator:
         Recover unfinished jobs assigned to a failed node.
         """
 
-        print(f"Recovering jobs from '{node_id}'...")
+        _log_line(f"Recovering jobs from '{node_id}'...")
         with self.jobs_lock:
 
             for job_id, job in list(self.jobs.items()):
@@ -1550,7 +1692,7 @@ class GCONCoordinator:
                         # permanently failed instead, with a message
                         # that says why, rather than silently retrying
                         # forever or leaving it stuck.
-                        print(
+                        _log_line(
                             f"Job '{job_id}' lost node '{node_id}' after "
                             f"{job.get('attempt_number', 0)} attempt(s) -- "
                             f"max ({self._max_job_attempts}) reached, not retrying."
@@ -1579,7 +1721,7 @@ class GCONCoordinator:
                         ))
                         continue
 
-                    print(f"Recovering job '{job_id}'")
+                    _log_line(f"Recovering job '{job_id}'")
 
                     # Reset the job
                     job["status"] = "pending"
@@ -1594,7 +1736,7 @@ class GCONCoordinator:
                     # completed job in the cluster too.
                     try:
                         self.assign_job(job_id)
-                        print(f"Job '{job_id}' reassigned successfully.")
+                        _log_line(f"Job '{job_id}' reassigned successfully.")
                     except RuntimeError as e:
                         # No idle node exists at this exact instant
                         # (e.g. the only other node hasn't registered
@@ -1615,7 +1757,7 @@ class GCONCoordinator:
                         # scheduler_loop's handling now: requeue and
                         # let the normal dispatch loop retry it once a
                         # node is actually idle.
-                        print(f"Recovery failed for '{job_id}': {e} -- requeuing.")
+                        _log_line(f"Recovery failed for '{job_id}': {e} -- requeuing.")
                         self.queue_job(job_id)
     
     
@@ -1632,7 +1774,7 @@ class GCONCoordinator:
             heartbeat["timestamp"]
         )
 
-        print(f"Heartbeat received from {node_id} ({status})")
+        _log_line(f"Heartbeat received from {node_id} ({status})")
     
     def receive_resource_report(self, resources):
         """
@@ -1650,7 +1792,7 @@ class GCONCoordinator:
 
         cpu = resources.get("cpu")
         memory = resources.get("memory")
-        print(
+        _log_line(
             f"Resources updated for {node_id} "
             f"(CPU: {cpu if cpu is not None else 'unchanged'}%, "
             f"Memory: {memory if memory is not None else 'unchanged'}%, "
@@ -1667,7 +1809,7 @@ class GCONCoordinator:
 
         return dashboard
     
-    def _advance_workflow(self, job_id, job, success):
+    def _advance_workflow(self, job_id, job, success, cancelled=None):
         """
         If `job` belongs to a workflow, tell the workflow engine it
         finished so the DAG actually advances -- dispatching newly-
@@ -1686,6 +1828,12 @@ class GCONCoordinator:
         if not workflow_id:
             return
 
+        # A job that did not succeed because someone cancelled it is
+        # CANCELLED to the DAG, not FAILED. _run_job's failure paths all call
+        # this with success=False, so cancel_requested is the signal.
+        if cancelled is None:
+            cancelled = (not success) and bool(job.get("cancel_requested"))
+
         try:
             engine = self.workflow_engine
             workflow = engine.workflows.get(workflow_id)
@@ -1696,10 +1844,12 @@ class GCONCoordinator:
 
             if success:
                 engine.process_completed_job(workflow, dag, state, job_id)
+            elif cancelled:
+                engine.process_cancelled_job(dag, state, job_id)
             else:
                 engine.process_failed_job(dag, state, job_id)
         except Exception as e:
-            print(f"[WARN] workflow advancement failed for job "
+            _log_line(f"[WARN] workflow advancement failed for job "
                   f"'{job_id}' (workflow '{workflow_id}'): {e}")
 
     def _run_job(self, node, job_id, dispatch_attempt_number):
@@ -1897,6 +2047,8 @@ class GCONCoordinator:
         resources = node.report_resources()
         self.receive_resource_report(resources)
 
+        result = self._enforce_sandbox_evidence(job_id, job, node, result)
+
         with self.jobs_lock:
             is_stale = job.get("attempt_number") != dispatch_attempt_number
 
@@ -2008,7 +2160,7 @@ class GCONCoordinator:
                             signature=receipt["proof"]["signature"],
                         )
                     except Exception as persist_error:
-                        print(
+                        _log_line(
                             f"[WARN] Failed to persist receipt for "
                             f"'{job_id}': {persist_error!r}"
                         )
@@ -2195,6 +2347,8 @@ class GCONCoordinator:
             self.receive_heartbeat(heartbeat)
             resources = node.report_resources()
             self.receive_resource_report(resources)
+
+            result = self._enforce_sandbox_evidence(job_id, job, node, result)
 
             with results_lock:
                 successes.append((node, result, attempt_id))
@@ -2550,7 +2704,7 @@ class GCONCoordinator:
             job_for_webhook["verification"] = self._job_verification(job)
             dispatch_job_event(self.control_plane, job_for_webhook, event_type)
         except Exception as e:
-            print(f"[WARN] Failed to enqueue webhook for job '{job_id}': {e!r}")
+            _log_line(f"[WARN] Failed to enqueue webhook for job '{job_id}': {e!r}")
 
     @staticmethod
     def _job_verification(job):
@@ -2629,7 +2783,7 @@ class GCONCoordinator:
                 job_id, job["status"], result=result, completed=True,
             )
         except Exception as e:
-            print(f"[WARN] Failed to persist status for job '{job_id}': {e!r}")
+            _log_line(f"[WARN] Failed to persist status for job '{job_id}': {e!r}")
 
     def _evict_completed_if_over_capacity(self):
         """
@@ -2778,6 +2932,7 @@ class GCONCoordinator:
         while not self._shutdown_event.is_set():
 
             if self.scheduler_paused:
+                self.scheduler_stats.tick("paused")
                 self._shutdown_event.wait(0.2)
                 continue
 
@@ -2792,28 +2947,40 @@ class GCONCoordinator:
             # coordinator with no leader_elector (the default,
             # single-coordinator case) is unaffected -- always "leader".
             if self.leader_elector is not None and not self.leader_elector.is_leader:
+                self.scheduler_stats.tick("standby")
                 self._shutdown_event.wait(0.5)
                 continue
 
             if self.job_queue.empty():
+                self.scheduler_stats.tick("idle_queue_empty")
                 self._shutdown_event.wait(0.1)
                 continue
             
             if not self.scheduler.has_available_node():
+                self.scheduler_stats.tick("waiting_for_worker")
                 self._shutdown_event.wait(0.1)
                 continue
 
+            self.scheduler_stats.tick("dispatching")
+
             job_id = self.job_queue.get()
-            print(f"[QUEUE] Dispatching {job_id}")
-            print(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
+            _log_line(f"[QUEUE] Dispatching {job_id}")
+            _log_line(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
 
             try:
                 self.assign_job(job_id)
                 consecutive_misses = 0
-            except RuntimeError:
+            except RuntimeError as miss:
                 # Expected, recoverable: "no available node right now".
                 # Put the job back and try again on the next tick.
                 self.job_queue.put(job_id)
+                _j = self.jobs.get(job_id) or {}
+                self.scheduler_stats.failed_pass(
+                    "awaiting_matching_worker" if _j.get("requires")
+                    else "insufficient_replica_workers" if _j.get("verify")
+                    else "no_available_nodes",
+                    str(miss),
+                )
                 consecutive_misses += 1
                 if consecutive_misses >= self.job_queue.qsize():
                     consecutive_misses = 0
@@ -2856,7 +3023,12 @@ class GCONCoordinator:
             try:
                 self.check_cluster_health()
             except Exception as e:
-                print(f"[HEALTH] Health check loop error: {e}")
+                _log_line(f"[HEALTH] Health check loop error: {e}")
+            try:
+                self.observability.maybe_tick()
+            except Exception as e:
+                # Observability must never affect scheduling or health.
+                _log_line(f"[OBSERVABILITY] sample failed: {e!r}")
 
     def autoscale_loop(self):
         """
@@ -2884,7 +3056,7 @@ class GCONCoordinator:
         transport.
         """
         if not isinstance(self.communication.transport, LocalTransport):
-            print(
+            _log_line(
                 "[AUTOSCALER] GCON_AUTOSCALE_ENABLED is set, but this "
                 "coordinator's transport does not support automatic node "
                 "provisioning (see AutoScaler.scale_up's docstring) -- the "
@@ -2905,7 +3077,7 @@ class GCONCoordinator:
                 # hiccup isn't a cluster-health signal the way a
                 # scheduler_thread death is, so it shouldn't be able to
                 # kill this thread over a transient issue.
-                print(f"[AUTOSCALER] Autoscale loop error: {e}")
+                _log_line(f"[AUTOSCALER] Autoscale loop error: {e}")
 
     def queue_job(self, job_id):
         """Add a job to the pending queue."""
@@ -2932,7 +3104,7 @@ class GCONCoordinator:
 )
         self.registry.remove(node_id)
 
-        print(f"Node '{node_id}' deregistered successfully.")
+        _log_line(f"Node '{node_id}' deregistered successfully.")
 
     # ------------------------------------------------------------
     # Scheduler control
@@ -2948,7 +3120,7 @@ class GCONCoordinator:
             timestamp=datetime.now(UTC), event_type="SCHEDULER_PAUSED",
             source="Coordinator", payload={},
         ))
-        print("[SCHEDULER] Paused.")
+        _log_line("[SCHEDULER] Paused.")
 
     def resume_scheduler(self):
         """
@@ -2959,7 +3131,7 @@ class GCONCoordinator:
             timestamp=datetime.now(UTC), event_type="SCHEDULER_RESUMED",
             source="Coordinator", payload={},
         ))
-        print("[SCHEDULER] Resumed.")
+        _log_line("[SCHEDULER] Resumed.")
 
     def shutdown(self, timeout=5.0):
         """
@@ -2984,7 +3156,7 @@ class GCONCoordinator:
             self.webhook_dispatcher.stop()
         if getattr(self, "leader_elector", None) is not None:
             self.leader_elector.stop()
-        print("[COORDINATOR] Shutdown complete.")
+        _log_line("[COORDINATOR] Shutdown complete.")
 
     # ------------------------------------------------------------
     # Node lifecycle control
@@ -3022,7 +3194,7 @@ class GCONCoordinator:
             timestamp=datetime.now(UTC), event_type="NODE_QUARANTINE_CLEARED",
             source="Coordinator", payload={"node_id": node_id},
         ))
-        print(f"[NODE] '{node_id}' is draining — no new jobs will be assigned.")
+        _log_line(f"[NODE] '{node_id}' is draining — no new jobs will be assigned.")
 
     def restart_worker(self, node_id):
         """
@@ -3045,7 +3217,7 @@ class GCONCoordinator:
             timestamp=datetime.now(UTC), event_type="NODE_RESTARTED",
             source="Coordinator", payload={"node_id": node_id, "had_running_job": was_running},
         ))
-        print(f"[NODE] '{node_id}' restarted.")
+        _log_line(f"[NODE] '{node_id}' restarted.")
 
     def stop_worker(self, node_id):
         """
@@ -3057,7 +3229,7 @@ class GCONCoordinator:
             self._cancel_node_job(node_id)
 
         self.deregister_agent(node_id)
-        print(f"[NODE] '{node_id}' stopped and removed.")
+        _log_line(f"[NODE] '{node_id}' stopped and removed.")
 
     def _cancel_node_job(self, node_id):
         """
@@ -3110,7 +3282,8 @@ class GCONCoordinator:
                 job["completed_at"] = datetime.now(UTC).isoformat()
                 job["cancel_requested"] = True
             self._persist_job_status(job_id, job)
-            print(f"[JOB] Cancelled queued job '{job_id}' before it was dispatched.")
+            self._advance_workflow(job_id, job, success=False, cancelled=True)
+            _log_line(f"[JOB] Cancelled queued job '{job_id}' before it was dispatched.")
             return False
 
         if job["status"] != "running":
@@ -3120,7 +3293,7 @@ class GCONCoordinator:
         node = self.registry.get_node(job["node_id"])
         killed = node.cancel()
 
-        print(f"[JOB] Cancel requested for '{job_id}' (process killed: {killed}).")
+        _log_line(f"[JOB] Cancel requested for '{job_id}' (process killed: {killed}).")
         return killed
 
     def clear_queue(self):
@@ -3136,12 +3309,13 @@ class GCONCoordinator:
                 job["status"] = "cancelled"
                 job["completed_at"] = datetime.now(UTC).isoformat()
                 cleared.append(job_id)
+                self._advance_workflow(job_id, job, success=False, cancelled=True)
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="QUEUE_CLEARED",
             source="Coordinator", payload={"cleared_job_ids": cleared},
         ))
-        print(f"[QUEUE] Cleared {len(cleared)} pending job(s).")
+        _log_line(f"[QUEUE] Cleared {len(cleared)} pending job(s).")
         return cleared
 
     def clear_failed_jobs(self):
@@ -3176,14 +3350,14 @@ class GCONCoordinator:
             try:
                 deleted_from_db = self.control_plane.jobs.delete_by_status("failed")
             except Exception as e:
-                print(f"[WARN] Failed to durably delete failed jobs from control plane: {e!r}")
+                _log_line(f"[WARN] Failed to durably delete failed jobs from control plane: {e!r}")
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="FAILED_JOBS_CLEARED",
             source="Coordinator",
             payload={"cleared_job_ids": cleared, "deleted_from_db": deleted_from_db},
         ))
-        print(
+        _log_line(
             f"[QUEUE] Cleared {len(cleared)} failed job(s) from memory, "
             f"{deleted_from_db} from the durable store."
         )
@@ -3230,7 +3404,7 @@ class GCONCoordinator:
                 timestamp=datetime.now(UTC), event_type="JOBS_CLEARED",
                 source="Coordinator", payload={"org_id": org_id, "job_ids": cleared},
             ))
-            print(f"[JOBS] Org '{org_id}' cleared {len(cleared)} job(s).")
+            _log_line(f"[JOBS] Org '{org_id}' cleared {len(cleared)} job(s).")
         return {"cleared": cleared, "skipped": skipped}
 
     def _clear_one_job_for_org(self, org_id, job_id):
@@ -3241,7 +3415,7 @@ class GCONCoordinator:
             try:
                 has_receipt = bool(self.control_plane.receipts.list_for_job(job_id))
             except Exception as e:
-                print(f"[WARN] Could not check receipts for '{job_id}': {e!r}")
+                _log_line(f"[WARN] Could not check receipts for '{job_id}': {e!r}")
                 return "has_receipt"       # can't prove there is none -> don't delete
         with self.jobs_lock:
             job = self.jobs.get(job_id)
@@ -3270,6 +3444,7 @@ class GCONCoordinator:
         """
         retried = []
         skipped_max_attempts = []
+        reopen = []
 
         with self.jobs_lock:
             for job_id, job in self.jobs.items():
@@ -3288,17 +3463,37 @@ class GCONCoordinator:
                     job.pop("cancel_requested", None)
                     self.queue_job(job_id)
                     retried.append(job_id)
+                    reopen.append((job_id, job))
+
+        for _job_id, _job in reopen:
+            self._reopen_workflow_job(_job_id, _job)
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="FAILED_JOBS_RETRIED",
             source="Coordinator",
             payload={"job_ids": retried, "skipped_max_attempts": skipped_max_attempts},
         ))
-        print(
+        _log_line(
             f"[QUEUE] Retrying {len(retried)} failed job(s); "
             f"{len(skipped_max_attempts)} skipped (max attempts reached)."
         )
         return retried
+
+    def _reopen_workflow_job(self, job_id, job):
+        """A retried job that belongs to a workflow puts that workflow back in
+        flight (see WorkflowEngine.reopen_job); best effort like
+        _advance_workflow."""
+        workflow_id = job.get("workflow_id")
+        if not workflow_id:
+            return
+        try:
+            engine = self.workflow_engine
+            dag = engine.dags.get(workflow_id)
+            state = engine.states.get(workflow_id)
+            if dag is not None and state is not None:
+                engine.reopen_job(dag, state, job_id)
+        except Exception as e:
+            _log_line(f"[WARN] workflow reopen failed for job '{job_id}' (workflow '{workflow_id}'): {e}")
 
     def retry_job(self, job_id):
         """
@@ -3327,17 +3522,20 @@ class GCONCoordinator:
                     "retried automatically. Resubmit it as a new job if "
                     "you want to try again."
                 )
+            was_failed = job["status"] == "failed"
             job["status"] = "pending"
             job["node_id"] = None
             job["completed_at"] = None
             job.pop("cancel_requested", None)
             self.queue_job(job_id)
+        if was_failed:
+            self._reopen_workflow_job(job_id, job)
 
         self.event_bus.publish(Event(
             timestamp=datetime.now(UTC), event_type="JOB_RETRIED",
             source="Coordinator", payload={"job_id": job_id},
         ))
-        print(f"[QUEUE] Retrying job '{job_id}'.")
+        _log_line(f"[QUEUE] Retrying job '{job_id}'.")
         return job_id
 
     def clear_completed_jobs(self):
@@ -3350,7 +3548,7 @@ class GCONCoordinator:
             for job_id in cleared:
                 del self.jobs[job_id]
 
-        print(f"[JOBS] Cleared {len(cleared)} completed job(s).")
+        _log_line(f"[JOBS] Cleared {len(cleared)} completed job(s).")
         return cleared
     
      
@@ -3363,10 +3561,10 @@ class GCONCoordinator:
         """
         offline_nodes = self.registry.check_node_health()
         for node_id in offline_nodes:
-            print(f"Node '{node_id}' marked OFFLINE")
+            _log_line(f"Node '{node_id}' marked OFFLINE")
             self.recover_jobs(node_id)
 
-        print(f"[DISCOVERY] Rediscovery complete. {len(offline_nodes)} node(s) newly offline.")
+        _log_line(f"[DISCOVERY] Rediscovery complete. {len(offline_nodes)} node(s) newly offline.")
         return {
             "checked": len(self.registry.nodes),
             "newly_offline": offline_nodes,
@@ -3395,7 +3593,7 @@ class GCONCoordinator:
                 "message": message,
             })
 
-        print(f"[VERIFY] Checked {len(results)} receipt(s).")
+        _log_line(f"[VERIFY] Checked {len(results)} receipt(s).")
         return results
 
     def get_cluster_snapshot(self):
@@ -3472,7 +3670,7 @@ class GCONCoordinator:
             timestamp=datetime.now(UTC), event_type="EMERGENCY_STOP",
             source="Coordinator", payload={"cancelled_job_ids": cancelled},
         ))
-        print(f"[EMERGENCY] Stopped. Cancelled {len(cancelled)} running job(s).")
+        _log_line(f"[EMERGENCY] Stopped. Cancelled {len(cancelled)} running job(s).")
         return cancelled
         
     def get_pending_job_count(self):
@@ -3595,15 +3793,20 @@ class GCONCoordinator:
         return self.workflow_engine.submit_workflow(workflow)
 
 
-    def get_workflows(self):
+    def get_workflows(self, org_id=None):
         """
         Return a summary of every workflow the engine knows about.
         Empty until a workflow has actually been submitted.
+
+        `org_id` limits the list to one customer's workflows (an org-scoped
+        API key must never see another customer's); None returns all of them
+        for internal staff.
         """
         return [
             state.summary()
-            for state in self.workflow_engine.states.values()
-    ]
+            for state in list(self.workflow_engine.states.values())
+            if org_id is None or state.org_id == org_id
+        ]
 
 
     def get_nodes(self, org_id=None):
@@ -3688,6 +3891,7 @@ class GCONCoordinator:
                     "created_by": row.get("created_by"),
                     "workflow_id": row.get("workflow_id"),
                     "org_id": row.get("org_id"),
+                    "client_reference": row.get("client_reference"),
                     "runtime_seconds": result.get("runtime_seconds"),
                 })
             return items, total
@@ -3811,6 +4015,7 @@ class GCONCoordinator:
                 "created_by": job.get("created_by"),
                 "workflow_id": job.get("workflow_id"),
                 "org_id": job.get("org_id"),
+                "client_reference": job.get("client_reference"),
                 # Automatically measured wall-clock runtime for this
                 # job (GCONAgent.execute_job), None until it finishes.
                 # This is the real, always-available "compute usage"
@@ -3934,7 +4139,7 @@ class GCONCoordinator:
             try:
                 self.control_plane.receipts.mark_verified_by_job_id(job_id, is_valid)
             except Exception as e:
-                print(f"[WARN] Failed to persist verification result for '{job_id}': {e!r}")
+                _log_line(f"[WARN] Failed to persist verification result for '{job_id}': {e!r}")
 
         return True
 

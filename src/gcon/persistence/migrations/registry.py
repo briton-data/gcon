@@ -505,4 +505,101 @@ MIGRATIONS: List[Migration] = [
             "ALTER TABLE nodes ADD COLUMN ed25519_public_key TEXT",
         ],
     ),
+    Migration(
+        version=10,
+        name="observability_history_and_incidents",
+        up_sql=[
+            # One row per sampling tick: the control plane's own
+            # aggregate state (queue depth, running/failed counts,
+            # worker counts, DB write latency, ...) as a JSON blob.
+            # Without this every dashboard number is point-in-time and
+            # "what was the queue depth two hours ago?" is unanswerable.
+            # A blob (not a column per metric) so adding a metric later
+            # never needs a migration; the few fields queried by range
+            # are all read back through taken_at.
+            """
+            CREATE TABLE metric_snapshots (
+                snapshot_id  TEXT PRIMARY KEY,
+                taken_at     TEXT NOT NULL,
+                data_json    TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_metric_snapshots_taken_at ON metric_snapshots (taken_at)",
+            # One row per incident (a rule firing for a subject), with
+            # first/last seen and a resolved state -- so "current
+            # operational problems" survive a restart and resolved ones
+            # stay visible as history.
+            """
+            CREATE TABLE incidents (
+                incident_id  TEXT PRIMARY KEY,
+                rule         TEXT NOT NULL,
+                subject      TEXT NOT NULL,
+                severity     TEXT NOT NULL,
+                title        TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'open',
+                first_seen   TEXT NOT NULL,
+                last_seen    TEXT NOT NULL,
+                resolved_at  TEXT,
+                detail_json  TEXT
+            )
+            """,
+            "CREATE INDEX idx_incidents_status ON incidents (status)",
+            "CREATE INDEX idx_incidents_rule_subject ON incidents (rule, subject)",
+        ],
+    ),
+    Migration(
+        version=11,
+        name="incident_ownership",
+        up_sql=[
+            # Who on the staff has taken an incident, and when. NULL
+            # means unowned. open_incident() only refreshes last_seen/
+            # severity/title/detail on an existing open row, so an
+            # owner survives every sampling tick until it is released
+            # or the incident resolves.
+            "ALTER TABLE incidents ADD COLUMN owner TEXT",
+            "ALTER TABLE incidents ADD COLUMN owner_at TEXT",
+        ],
+    ),
+    Migration(
+        version=12,
+        name="workflows",
+        up_sql=[
+            # Durable workflow (DAG) definitions and runtime state, so a
+            # coordinator restart no longer orphans in-flight workflows.
+            # definition_json = jobs + dependencies; state_json = per-job
+            # state (PENDING/READY/RUNNING/COMPLETED/FAILED/CANCELLED/BLOCKED).
+            """
+            CREATE TABLE workflows (
+                workflow_id      TEXT PRIMARY KEY,
+                name             TEXT,
+                org_id           TEXT,
+                created_by       TEXT,
+                status           TEXT NOT NULL,
+                definition_json  TEXT NOT NULL,
+                state_json       TEXT NOT NULL,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_workflows_org ON workflows (org_id)",
+        ],
+    ),
+    Migration(
+        version=13,
+        name="job_client_reference_and_idempotency_fingerprint",
+        up_sql=[
+            # `job_id` is now minted by GCON for every job submitted through
+            # the public API; the customer's own label for a job lives here
+            # instead. It is a correlation tag only -- never a key: it is
+            # not unique, not looked up across organizations, and nothing in
+            # GCON dispatches, signs or authorises on it.
+            "ALTER TABLE jobs ADD COLUMN client_reference TEXT",
+            "CREATE INDEX idx_jobs_org_client_reference ON jobs (org_id, client_reference)",
+            # SHA-256 of the request an Idempotency-Key was first used with,
+            # so the same key re-used for a DIFFERENT request is refused
+            # instead of silently returning an unrelated job. NULL for rows
+            # written before this migration (those skip the comparison).
+            "ALTER TABLE job_submission_idempotency_keys ADD COLUMN request_hash TEXT",
+        ],
+    ),
 ]

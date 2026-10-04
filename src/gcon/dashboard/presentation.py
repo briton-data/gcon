@@ -94,11 +94,18 @@ class PresentationLayer:
             return None
         return self.coordinator.control_plane.idempotency_keys.get_job_id(org_id, idempotency_key)
 
-    def record_idempotency_key(self, org_id, idempotency_key, job_id):
+    def get_idempotency_record(self, org_id, idempotency_key):
+        """{job_id, request_hash, created_at} for (org_id, key), or None."""
+        if self.coordinator.control_plane is None:
+            return None
+        return self.coordinator.control_plane.idempotency_keys.get(org_id, idempotency_key)
+
+    def record_idempotency_key(self, org_id, idempotency_key, job_id, request_hash=None):
         if self.coordinator.control_plane is None:
             return
         self.coordinator.control_plane.idempotency_keys.record(
             org_id, idempotency_key, job_id, datetime.now(UTC).isoformat(),
+            request_hash=request_hash,
         )
 
     def get_job_attempts(self, job_id):
@@ -141,11 +148,11 @@ class PresentationLayer:
         )
     }
         
-    def get_workflows(self):
+    def get_workflows(self, org_id=None):
         """
-        Return workflow information.
+        Return workflow information (optionally only one org's).
         """
-        return self.coordinator.get_workflows()
+        return self.coordinator.get_workflows(org_id=org_id)
     
     def get_metrics(self):
         """
@@ -221,7 +228,7 @@ class PresentationLayer:
     def submit_job(
         self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
         org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
-        callback_url=None, verify=None,
+        callback_url=None, verify=None, client_reference=None, sandbox_required=False,
     ):
         """
         Submit a new job to the cluster.
@@ -253,6 +260,8 @@ class PresentationLayer:
             dataset_artifacts=dataset_artifacts,
             callback_url=callback_url,
             verify=verify,
+            client_reference=client_reference,
+            sandbox_required=sandbox_required,
         )
 
     def register_node(self, node):
@@ -295,10 +304,22 @@ class PresentationLayer:
         failed_jobs = 0
         pending_jobs = 0
         cancelled_jobs = 0
+        oldest_pending = None
+        # Same pass, split by origin: a job linked to a workflow belongs
+        # to the Orchestrate pillar, any other job to Execute. Counted
+        # here rather than re-scanning the job list per pillar.
+        origin_keys = ("pending", "running", "completed", "failed", "cancelled")
+        by_origin = {
+            "workflow": {k: 0 for k in origin_keys},
+            "direct": {k: 0 for k in origin_keys},
+        }
 
         for job in jobs:
 
             status = job.get("status", "").lower()
+            if status in origin_keys:
+                origin = "workflow" if job.get("workflow_id") else "direct"
+                by_origin[origin][status] += 1
 
             if status == "running":
                 running_jobs += 1
@@ -311,6 +332,16 @@ class PresentationLayer:
 
             elif status == "pending":
                 pending_jobs += 1
+                # Same pass as the counters: oldest queued job's
+                # submit time, for the Workload page's wait-age.
+                try:
+                    created = datetime.fromisoformat(job.get("created_at") or "")
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=UTC)
+                    if oldest_pending is None or created < oldest_pending:
+                        oldest_pending = created
+                except (TypeError, ValueError):
+                    pass
 
             elif status == "cancelled":
                 cancelled_jobs += 1
@@ -327,6 +358,15 @@ class PresentationLayer:
             # silently fold cancelled jobs into "queued").
             "pending_jobs": pending_jobs,
             "cancelled_jobs": cancelled_jobs,
+            "workflow_jobs": by_origin["workflow"],
+            "direct_jobs": by_origin["direct"],
+            # Seconds the longest-waiting queued job has been waiting
+            # (None when nothing is queued or no timestamp parses).
+            # Computed server-side so browser clock skew can't distort it.
+            "oldest_pending_age_seconds": (
+                max(0.0, (datetime.now(UTC) - oldest_pending).total_seconds())
+                if oldest_pending is not None else None
+            ),
         }
 
     def get_dashboard(self):
@@ -499,11 +539,17 @@ class PresentationLayer:
             if heartbeat_age_seconds is None or age > heartbeat_age_seconds:
                 heartbeat_age_seconds = age
 
+        # running / paused / standby / stalled / dead -- the same state the
+        # Scheduler page shows. "Thread is alive" alone (what this used to
+        # report) stays true while the scheduler is paused or hung.
+        scheduler_state = self.coordinator.observability.scheduler()["state"]
+
         return {
             "coordinator_id": self.coordinator.coordinator_id,
             "cluster_state": health.get("state"),
             "coordinator_online": coordinator_check.get("healthy", False),
-            "scheduler_running": coordinator_check.get("metrics", {}).get("running", False),
+            "scheduler_state": scheduler_state,
+            "scheduler_running": scheduler_state == "running",
             "storage_online": checks.get("storage", {}).get("healthy", False),
             "receipt_engine_online": checks.get("receipt_service", {}).get("healthy", False),
             "heartbeat_age_seconds": (
