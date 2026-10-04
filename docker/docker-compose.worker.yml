@@ -1,0 +1,44 @@
+# A sandboxed GCON worker: the worker container + a Docker daemon it drives.
+# Customer jobs run in containers on that daemon, never inside the worker.
+#
+# Required (see docs/WORKER_SANDBOX.md): GCON_NODE_ID, GCON_COORDINATOR_ADDRESS and
+# the three GCON_*_B64 identity secrets (or an enrollment token).
+services:
+  dind:
+    # A private Docker daemon for jobs. Privileged because a daemon needs to be;
+    # nothing customer-controlled ever runs in THIS container, only job containers
+    # the daemon starts. DOCKER_TLS_CERTDIR is empty so it listens on a plain
+    # socket shared only with the worker through a volume (no TCP port is published).
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "-H", "unix:///var/run/docker-shared/docker.sock"]
+    volumes:
+      - docker-sock:/var/run/docker-shared
+      - jobio:/var/lib/gcon/jobio          # same path as in the worker
+      - dind-data:/var/lib/docker
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on: [dind]
+    environment:
+      DOCKER_HOST: unix:///var/run/docker-shared/docker.sock
+      GCON_NODE_ID: ${GCON_NODE_ID}
+      GCON_COORDINATOR_ADDRESS: ${GCON_COORDINATOR_ADDRESS}
+      GCON_CA_CERT_B64: ${GCON_CA_CERT_B64}
+      GCON_AGENT_CERT_B64: ${GCON_AGENT_CERT_B64}
+      GCON_AGENT_KEY_B64: ${GCON_AGENT_KEY_B64}
+      # Job containers: no network, bounded memory/CPU (see docs/WORKER_SANDBOX.md).
+      GCON_JOB_DOCKER_NETWORK: none
+      GCON_JOB_DOCKER_MEMORY_LIMIT: 2g
+    volumes:
+      - docker-sock:/var/run/docker-shared
+      - jobio:/var/lib/gcon/jobio          # same path as in dind
+
+volumes:
+  docker-sock:
+  jobio:
+  dind-data:
