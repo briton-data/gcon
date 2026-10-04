@@ -45,6 +45,14 @@ class NodeCapabilityRepository:
         for key, value in capabilities.items():
             self.set_capability(node_id, key, str(value))
 
+    def values_for_key(self, key: str) -> Dict[str, str]:
+        """{node_id: value} for one capability key, in a single query."""
+        rows = self.db.query(
+            "SELECT node_id, capability_value FROM node_capabilities WHERE capability_key = ?",
+            (key,),
+        )
+        return {r["node_id"]: r["capability_value"] for r in rows}
+
     def get_capabilities(self, node_id: str) -> Dict[str, str]:
         rows = self.db.query(
             "SELECT capability_key, capability_value FROM node_capabilities WHERE node_id = ?",

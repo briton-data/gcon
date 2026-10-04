@@ -37,6 +37,25 @@ class DAG:
             
     ]
         
+    def descendants(self, job_id: str) -> Set[str]:
+        """
+        IDs of every job that depends on `job_id`, directly or through any
+        chain of dependencies (children, grandchildren, ...). Used to block the
+        whole downstream part of a workflow when a job fails or is cancelled,
+        not just its direct children.
+        """
+        if job_id not in self.jobs:
+            raise ValueError(f"Job '{job_id}' does not exist.")
+        seen: Set[str] = set()
+        stack = list(self.dependencies.get(job_id, []))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(self.dependencies.get(current, []))
+        return seen
+
     def parents(self, job_id: str) -> List[WorkflowJob]:
         """
         Return all parent jobs of the given job.

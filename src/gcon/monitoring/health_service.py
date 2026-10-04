@@ -103,19 +103,40 @@ class HealthService:
         )
 
     def check_receipt_service(self):
+        # The in-memory dict can never be "down" -- checking only that was why
+        # this branch was green forever. The part that can really fail is the
+        # durable receipt store (the control-plane database), so probe it with
+        # an actual read. No control plane attached = memory-only deployment,
+        # where the in-memory store is the whole service.
         start = time.perf_counter()
         reachable = isinstance(self.coordinator.receipts, dict)
         total_receipts = len(self.coordinator.receipts)
-        write_latency_ms = round((time.perf_counter() - start) * 1000, 3)
+        durable_total = None
+        durable_error = None
+        control_plane = getattr(self.coordinator, "control_plane", None)
+        if control_plane is not None:
+            try:
+                durable_total = control_plane.receipts.count_all()
+            except Exception as e:
+                durable_error = repr(e)
+        probe_ms = round((time.perf_counter() - start) * 1000, 3)
 
-        detail = "Receipt service healthy" if reachable else "Receipt store unreachable"
+        healthy = reachable and durable_error is None
+        if not reachable:
+            detail = "Receipt store unreachable"
+        elif durable_error is not None:
+            detail = "Durable receipt store is not responding"
+        else:
+            detail = "Receipt service healthy"
 
         return HealthCheck(
-            "receipt_service", "Receipt Service", reachable, detail,
+            "receipt_service", "Receipt Service", healthy, detail,
             {
                 "reachable": reachable,
-                "write_latency_ms": write_latency_ms,
+                "write_latency_ms": probe_ms,
                 "total_receipts": total_receipts,
+                "durable_total": durable_total,
+                "durable_error": durable_error,
             },
         )
 

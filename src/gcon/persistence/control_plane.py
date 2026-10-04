@@ -29,6 +29,10 @@ from gcon.persistence.repositories import (
     TelemetryRepository,
     NodeEnrollmentAuditRepository,
     IdempotencyKeyRepository,
+    IncidentRepository,
+    MetricSnapshotRepository,
+    ObservabilityQueries,
+    WorkflowRepository,
 )
 
 
@@ -65,6 +69,10 @@ class ControlPlane:
         self.telemetry_events = TelemetryRepository(self.db)
         self.node_enrollment_audit = NodeEnrollmentAuditRepository(self.db)
         self.idempotency_keys = IdempotencyKeyRepository(self.db)
+        self.metric_snapshots = MetricSnapshotRepository(self.db)
+        self.incidents = IncidentRepository(self.db)
+        self.workflows = WorkflowRepository(self.db)
+        self.obs_queries = ObservabilityQueries(self.db)
 
     def close(self) -> None:
         self.db.close()

@@ -174,7 +174,12 @@ class TelemetryCollector:
     def _log(self, level: str, message: str, event_type: Optional[str] = None,
               trace_id: Optional[str] = None, job_id: Optional[str] = None,
               node_id: Optional[str] = None, payload: Optional[Dict[str, Any]] = None) -> None:
-        getattr(logger, level)(message)
+        # Correlation ids ride on the record so a JSON log formatter (see
+        # gcon.monitoring.logfmt) can emit them; the plain format ignores them.
+        extra = {k: v for k, v in (("trace_id", trace_id), ("job_id", job_id),
+                                   ("node_id", node_id), ("event_type", event_type))
+                 if v is not None}
+        getattr(logger, level)(message, extra=extra)
         if event_type is not None:
             self.emit(
                 event_type=event_type,

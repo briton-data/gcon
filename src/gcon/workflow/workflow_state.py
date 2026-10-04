@@ -6,9 +6,16 @@ class WorkflowState:
     Tracks the runtime execution state of a workflow.
     """
     
-    def __init__(self, workflow_id: str, created_by=None):
+    def __init__(self, workflow_id: str, created_by=None, org_id=None, name: str = ""):
         
         self.workflow_id = workflow_id
+        self.name = name
+        # Owning organization (copied from the Workflow); lets the API list
+        # only a customer's own workflows.
+        self.org_id = org_id
+        # job_id -> why the engine could not submit it (policy rejection, org
+        # concurrency limit, ...). Such a job is marked FAILED, never lost.
+        self.errors: Dict[str, str] = {}
         self.status = "PENDING"
         self.job_states: Dict[str, str] = {}
         # Ownership metadata copied from the source Workflow at
@@ -22,6 +29,7 @@ class WorkflowState:
 
         self.completed_jobs: Set[str] = set()
         self.failed_jobs: Set[str] = set()
+        self.cancelled_jobs: Set[str] = set()
         self.blocked_jobs: Set[str] = set()
 
         self.created_at = datetime.now(UTC)
@@ -39,6 +47,7 @@ class WorkflowState:
         self.running_jobs.discard(job_id)
         self.completed_jobs.discard(job_id)
         self.failed_jobs.discard(job_id)
+        self.cancelled_jobs.discard(job_id)
         self.blocked_jobs.discard(job_id)
 
     # Add to the appropriate state set
@@ -56,6 +65,9 @@ class WorkflowState:
 
         elif new_state == "FAILED":
             self.failed_jobs.add(job_id)
+
+        elif new_state == "CANCELLED":
+            self.cancelled_jobs.add(job_id)
 
         elif new_state == "BLOCKED":
             self.blocked_jobs.add(job_id)
@@ -96,6 +108,12 @@ class WorkflowState:
         """
         self._move_job(job_id, "FAILED")
         
+    def mark_cancelled(self, job_id: str):
+        """
+        Mark a job as cancelled.
+        """
+        self._move_job(job_id, "CANCELLED")
+
     def mark_blocked(self, job_id: str):
         """
         Mark a job as blocked.
@@ -111,6 +129,7 @@ class WorkflowState:
             and not self.ready_jobs
             and not self.running_jobs
             and not self.failed_jobs
+            and not self.cancelled_jobs
             and not self.blocked_jobs
     )
         
@@ -128,13 +147,17 @@ class WorkflowState:
         return {
             "workflow_id": self.workflow_id,
             "status": self.status,
+            "name": self.name,
             "created_by": self.created_by,
+            "org_id": self.org_id,
             "pending_jobs": len(self.pending_jobs),
             "ready_jobs": len(self.ready_jobs),
             "running_jobs": len(self.running_jobs),
             "completed_jobs": len(self.completed_jobs),
             "failed_jobs": len(self.failed_jobs),
+            "cancelled_jobs": len(self.cancelled_jobs),
             "blocked_jobs": len(self.blocked_jobs),
+            "errors": dict(self.errors),
             "created_at": self.created_at.isoformat(),
             "started_at": (
                 self.started_at.isoformat()
@@ -145,3 +168,37 @@ class WorkflowState:
                 if self.completed_at else None
         ),
     }
+
+
+    # ---- durable storage -------------------------------------------------
+    def to_dict(self) -> Dict:
+        """Everything needed to rebuild this state after a restart."""
+        return {
+            "workflow_id": self.workflow_id,
+            "name": self.name,
+            "org_id": self.org_id,
+            "created_by": self.created_by,
+            "status": self.status,
+            "job_states": dict(self.job_states),
+            "errors": dict(self.errors),
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "WorkflowState":
+        state = cls(
+            data["workflow_id"], created_by=data.get("created_by"),
+            org_id=data.get("org_id"), name=data.get("name", ""),
+        )
+        state.status = data.get("status", "PENDING")
+        state.errors = dict(data.get("errors") or {})
+        # Re-place every job through _move_job so the per-state sets and
+        # job_states can never disagree.
+        for job_id, job_state in (data.get("job_states") or {}).items():
+            state._move_job(job_id, job_state)
+        for attr in ("created_at", "started_at", "completed_at"):
+            if data.get(attr):
+                setattr(state, attr, datetime.fromisoformat(data[attr]))
+        return state

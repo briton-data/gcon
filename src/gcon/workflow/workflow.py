@@ -90,6 +90,7 @@ class Workflow:
         name: str = "",
         metadata: Optional[Dict] = None,
         created_by: Optional[str] = None,
+        org_id: Optional[str] = None,
 ):       
         
         self.workflow_id = workflow_id
@@ -105,6 +106,11 @@ class Workflow:
         # POST /api/v1/workflows). None for internal/system workflows
         # that have no authenticated submitter.
         self.created_by = created_by
+
+        # The customer organization this workflow belongs to. Every job the
+        # engine submits inherits it, so a workflow's jobs are attributed,
+        # limited and isolated per org exactly like jobs submitted directly.
+        self.org_id = org_id
 
         self.created_at = datetime.now(UTC)
         self.completed_at = None
@@ -192,6 +198,37 @@ class Workflow:
         if not self.dependencies[parent_job]:
             del self.dependencies[parent_job]
     
+    def to_dict(self) -> dict:
+        """Serialize the definition (jobs + dependencies) for durable storage."""
+        return {
+            "workflow_id": self.workflow_id,
+            "name": self.name,
+            "metadata": self.metadata,
+            "created_by": self.created_by,
+            "org_id": self.org_id,
+            "created_at": self.created_at.isoformat(),
+            "jobs": [j.to_dict() for j in self.jobs.values()],
+            "dependencies": {p: list(c) for p, c in self.dependencies.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Workflow":
+        wf = cls(
+            workflow_id=data["workflow_id"],
+            name=data.get("name", ""),
+            metadata=data.get("metadata"),
+            created_by=data.get("created_by"),
+            org_id=data.get("org_id"),
+        )
+        if data.get("created_at"):
+            wf.created_at = datetime.fromisoformat(data["created_at"])
+        for jd in data.get("jobs", []):
+            wf.add_job(WorkflowJob.from_dict(jd))
+        for parent, children in (data.get("dependencies") or {}).items():
+            for child in children:
+                wf.add_dependency(parent, child)
+        return wf
+
     def get_job(self, job_id: str) -> WorkflowJob:
         """
         Return a job by its ID.

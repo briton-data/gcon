@@ -506,6 +506,7 @@ class WebServer:
                 organization_id=payload.get("organization_id"),
                 status=payload.get("status", "Active"),
                 password=payload.get("password"),
+                username=payload.get("username"),
     )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
@@ -893,6 +894,46 @@ class WebServer:
         def mgmt_ha_status(user=Depends(self.require_permission("View monitoring"))):
             return self.management.get_ha_status()
 
+        # ---- Management: observability (aggregate only, no per-job rows) ----
+
+        @self.app.get("/management/observability/summary")
+        def mgmt_observability_summary(minutes: float = None, region: str = None,
+                                       user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_observability_summary(minutes=minutes, region=region)
+
+        @self.app.get("/management/observability/history")
+        def mgmt_observability_history(minutes: float = 60,
+                                       user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_observability_history(minutes)
+
+        @self.app.get("/management/incidents")
+        def mgmt_incidents(user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_incidents()
+
+        @self.app.post("/management/incidents/{incident_id}/claim")
+        def mgmt_incident_claim(incident_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                self.management.set_incident_owner(incident_id, user, claim=True)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            return {"ok": True}
+
+        @self.app.post("/management/incidents/{incident_id}/release")
+        def mgmt_incident_release(incident_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                self.management.set_incident_owner(incident_id, user, claim=False)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            return {"ok": True}
+
+        @self.app.get("/management/scheduler")
+        def mgmt_scheduler(user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_scheduler_status()
+
+        @self.app.get("/management/event-groups")
+        def mgmt_event_groups(minutes: float = 60, user=Depends(self.require_permission("View monitoring"))):
+            return self.management.get_event_groups(minutes)
+
         # ---- Management: Audit log & notifications ----
 
         @self.app.get("/management/audit-logs")
@@ -1089,6 +1130,14 @@ class WebServer:
         @self.app.get("/auth/me")
         def auth_me(user=Depends(self.current_user)):
             return user.to_dict()
+
+        @self.app.post("/auth/profile")
+        def auth_profile(payload: dict, user=Depends(self.current_user)):
+            """The signed-in user's own display username (empty clears it)."""
+            try:
+                return self.management.set_own_username(user.user_id, payload.get("username"))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
 
         @self.app.post("/auth/change-password")

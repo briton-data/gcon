@@ -249,4 +249,14 @@ MIGRATIONS: List[Migration] = [
             "DROP INDEX IF EXISTS idx_api_keys_secret",
         ],
     ),
+
+    Migration(
+        version=6,
+        name="user_username",
+        up_sql=[
+            # A short handle the user picks, shown in the dashboard instead
+            # of their official name. NULL until they choose one.
+            "ALTER TABLE users ADD COLUMN username TEXT",
+        ],
+    ),
 ]
