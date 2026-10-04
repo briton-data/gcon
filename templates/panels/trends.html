@@ -1,0 +1,44 @@
+<!--
+    Rates and trends instead of a receipt total. Series come from the
+    sampled history (/management/observability/history), the delivery
+    latency from /management/observability/summary. A tile with no data
+    shows "--", never 0.
+-->
+<div class="gcon-panel h-100" id="trends-panel" data-scope-panel="trends">
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <div>
+            <h5 class="mb-0"><i class="bi bi-graph-up-arrow me-2"></i>Receipts &amp; delivery trends</h5>
+            <div class="gcon-scope-note" id="trends-note"></div>
+        </div>
+        <a href="#" class="gcon-panel-link" data-tab="trust-center">Trust Center &rarr;</a>
+    </div>
+    <div class="gcon-panel-body" style="min-height:auto;">
+        <div class="gcon-trend-grid">
+            <div class="gcon-trend-tile" id="tt-rate">
+                <div class="l">Receipt generation rate</div>
+                <div class="n" id="tt-rate-n">--</div>
+                <div class="s" id="tt-rate-s"></div>
+                <div class="spark" id="tt-rate-spark"></div>
+            </div>
+            <div class="gcon-trend-tile" id="tt-verify">
+                <div class="l">Verification success rate</div>
+                <div class="n" id="tt-verify-n">--</div>
+                <div class="s" id="tt-verify-s"></div>
+                <div class="spark" id="tt-verify-spark"></div>
+            </div>
+            <div class="gcon-trend-tile" id="tt-backlog">
+                <div class="l">Unverified receipt backlog</div>
+                <div class="n" id="tt-backlog-n">--</div>
+                <div class="s" id="tt-backlog-s"></div>
+                <div class="spark" id="tt-backlog-spark"></div>
+            </div>
+            <div class="gcon-trend-tile" id="tt-latency">
+                <div class="l">Webhook delivery latency</div>
+                <div class="n" id="tt-latency-n">--</div>
+                <div class="s" id="tt-latency-s"></div>
+                <div class="text-secondary small">Time from a customer callback being queued to the attempt that delivered it, retries included.</div>
+            </div>
+        </div>
+        <div class="text-secondary small mt-2" id="trends-empty"></div>
+    </div>
+</div>

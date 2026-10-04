@@ -1,0 +1,40 @@
+<!-- Reliability: retries/attempts, webhook delivery, worker trust. Aggregates only. -->
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="gcon-panel h-100">
+        <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-arrow-repeat me-2"></i>Retries &amp; attempts</h5></div>
+        <div class="gcon-panel-body gcon-service-list" style="min-height:auto;">
+            <div class="gcon-service-row"><span class="gcon-service-name">Total attempts</span><span class="gcon-service-value" id="rel-attempts">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Jobs retried (2+ attempts)</span><span class="gcon-service-value" id="rel-retried">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Attempts by outcome</span><span class="gcon-service-value" id="rel-attempt-status">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name" title="Telemetry events since the coordinator started">Dispatch failures</span><span class="gcon-service-value" id="rel-dispatch-failed">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Verification failures</span><span class="gcon-service-value" id="rel-verify-fail">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Replica disagreements</span><span class="gcon-service-value" id="rel-disagree">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Policy violations</span><span class="gcon-service-value" id="rel-policy">--</span></div>
+        </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="gcon-panel h-100">
+        <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-send me-2"></i>Webhook delivery</h5></div>
+        <div class="gcon-panel-body gcon-service-list" style="min-height:auto;">
+            <div class="gcon-service-row"><span class="gcon-service-name">Delivered</span><span class="gcon-service-value" id="rel-wh-success">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Pending / retrying</span><span class="gcon-service-value" id="rel-wh-open">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Oldest undelivered</span><span class="gcon-service-value" id="rel-wh-oldest">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Gave up (total)</span><span class="gcon-service-value" id="rel-wh-failed">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Gave up in window</span><span class="gcon-service-value" id="rel-wh-failed-recent">--</span></div>
+        </div>
+    </div>
+  </div>
+  <div class="col-12">
+    <div class="gcon-panel">
+        <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-shield-check me-2"></i>Worker trust</h5></div>
+        <div class="gcon-panel-body" style="min-height:auto;">
+            <table class="table table-sm gcon-table mb-0">
+                <thead><tr><th>Worker</th><th>Status</th><th>Quarantine</th><th>Failure streak</th><th>Receipts</th><th>Verified</th></tr></thead>
+                <tbody id="rel-nodes-body"></tbody>
+            </table>
+        </div>
+    </div>
+  </div>
+</div>

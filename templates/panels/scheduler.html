@@ -1,0 +1,96 @@
+<!--
+    GCON Scheduler -- what the dispatch loop is doing, from the loop's own
+    counters (/management/scheduler). Aggregate only: no per-job rows.
+    Counters live in coordinator memory and restart with it ("counting since").
+    Retry/backoff is shown as it really is: attempts are capped, there is no
+    delay between attempts.
+-->
+<div class="gcon-panel" id="scheduler-panel">
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <h5 class="mb-0"><i class="bi bi-cpu me-2"></i>Scheduler</h5>
+            <div class="gcon-scope-note" id="sch-since"></div>
+        </div>
+        <div class="d-flex align-items-center gap-3">
+            <span class="badge bg-secondary" id="sch-state">--</span>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="sch-toggle" disabled>Pause</button>
+        </div>
+    </div>
+    <div class="gcon-panel-body" style="min-height:auto;">
+        <div class="gcon-sch-banner d-none" id="sch-banner"></div>
+        <div class="row g-3">
+
+            <div class="col-lg-3 col-md-6">
+                <div class="gcon-pillar" id="sch-queue">
+                    <div class="gcon-pillar-title"><i class="bi bi-hourglass-split me-1"></i>Queue pressure</div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="sch-pending">--</span><span class="l">jobs waiting</span></div>
+                        <div class="stat"><span class="n" id="sch-oldest">--</span><span class="l">oldest waiting</span></div>
+                        <div class="stat"><span class="n" id="sch-blocked">--</span><span class="l">failed to place, still waiting</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <div class="gcon-pillar" id="sch-dispatch">
+                    <div class="gcon-pillar-title"><i class="bi bi-send me-1"></i>Dispatch activity</div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="sch-total">--</span><span class="l">dispatched since start</span></div>
+                        <div class="stat"><span class="n" id="sch-rate">--</span><span class="l">per minute (1m / 5m / 15m)</span></div>
+                        <div class="stat"><span class="n" id="sch-last">--</span><span class="l">since last dispatch</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <div class="gcon-pillar" id="sch-failures">
+                    <div class="gcon-pillar-title"><i class="bi bi-exclamation-octagon me-1"></i>Scheduling failures</div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="sch-fp">--</span><span class="l">failed placement passes</span></div>
+                        <div class="stat"><span class="n" id="sch-fk">--</span><span class="l">last reason</span></div>
+                        <div class="stat"><span class="n" id="sch-fa">--</span><span class="l">since last failure</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <div class="gcon-pillar" id="sch-retry">
+                    <div class="gcon-pillar-title"><i class="bi bi-arrow-repeat me-1"></i>Retry &amp; backoff</div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n" id="sch-maxatt">--</span><span class="l">max attempts per job</span></div>
+                        <div class="stat"><span class="n" id="sch-retried">--</span><span class="l">jobs retried</span></div>
+                        <div class="stat"><span class="n" id="sch-cap">--</span><span class="l">failed at the cap</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        <div class="text-secondary small mt-3" id="sch-last-msg"></div>
+        <div class="text-secondary small mt-1" id="sch-backoff"></div>
+    </div>
+</div>
+
+<div class="row g-3 mt-1">
+    <div class="col-lg-7">
+        <div class="gcon-panel h-100">
+            <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-question-circle me-2"></i>Why work is waiting</h5></div>
+            <div class="gcon-panel-body" style="min-height:auto;">
+                <table class="table table-sm gcon-table mb-0">
+                    <thead><tr><th>Reason</th><th>Jobs</th><th>Oldest</th></tr></thead>
+                    <tbody id="sch-reasons-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-5">
+        <div class="gcon-panel h-100">
+            <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-sliders me-2"></i>Recent pause / resume</h5></div>
+            <div class="gcon-panel-body" style="min-height:auto;">
+                <table class="table table-sm gcon-table mb-0">
+                    <thead><tr><th>Action</th><th>When</th></tr></thead>
+                    <tbody id="sch-control-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>

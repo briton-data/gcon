@@ -14,7 +14,7 @@ let explorerData = [];
 let isPaused = false;
 // How often the dashboard re-polls REST endpoints (cluster state,
 // nodes, jobs, health badge, notifications) when not paused. The
-// /ws socket already pushes live activity-feed events every 2s
+// /ws socket already pushes live dashboard state every 2s
 // independently of this.
 const REFRESH_INTERVAL_MS = 5000;
 
@@ -179,6 +179,12 @@ const TAB_TITLES = {
     "trust-center": "Trust Center",
     "explorer": "Explorer",
     "workflows": "Workflows",
+    "workload": "Workload",
+    "scheduler": "Scheduler",
+    "ha": "HA / Coordinators",
+    "incidents": "Incidents",
+    "customers": "Customer load",
+    "reliability": "Reliability",
     "monitoring": "Live Metrics",
     "analytics": "Analytics & History",
     "events": "Events",
@@ -206,6 +212,12 @@ const TAB_SUBTITLES = {
     "trust-center": "Receipt integrity, signatures, and verification history",
     "explorer": "Nodes and artifacts registered with the cluster",
     "workflows": "Workflow / DAG orchestration",
+    "workload": "Aggregate queue and job counts — no per-job detail",
+    "scheduler": "What the dispatch loop is doing: queue pressure, dispatch activity, scheduling failures, retries",
+    "ha": "Coordinator leader election and lease state",
+    "incidents": "Open and recently resolved operational problems",
+    "customers": "Aggregate load and failure rate per organization",
+    "reliability": "Retries, webhook delivery and worker trust",
     "monitoring": "CPU, GPU, memory, and queue health in real time",
     "analytics": "Historical execution, resource, and verification trends",
     "events": "Searchable cluster event stream",
@@ -241,6 +253,10 @@ const TAB_PERMISSIONS = {
     "organizations": "Manage users",
     "teams": "Manage users",
     "permissions": "Manage users",
+    "ha": "View monitoring",
+    "incidents": "View monitoring",
+    "customers": "View monitoring",
+    "reliability": "View monitoring",
     "audit-logs": "Manage users",
     "api-keys": "Manage API keys",
 };
@@ -280,9 +296,42 @@ function switchTab(tab, clickedEl) {
         el.classList.toggle("active", matches);
     });
 
+    document.querySelectorAll("#tab-nav a.active").forEach(el => {
+        const body = el.closest(".list-group");
+        if (body && body.classList.contains("gcon-nav-collapsed")) setNavGroupOpen(body, true);
+    });
+
     setText("tab-title", TAB_TITLES[tab] || tab);
     setText("tab-subtitle", TAB_SUBTITLES[tab] || "");
     loadActiveTab();
+}
+
+// Collapsible sidebar groups. State is remembered per group.
+function setNavGroupOpen(body, open) {
+    const toggle = body.previousElementSibling;
+    body.classList.toggle("gcon-nav-collapsed", !open);
+    if (toggle && toggle.dataset.navGroup) {
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        try { localStorage.setItem("gcon-nav-" + toggle.dataset.navGroup, open ? "1" : "0"); } catch (e) {}
+    }
+}
+
+function setupNavGroups() {
+    document.querySelectorAll("#tab-nav .gcon-nav-group-toggle").forEach(toggle => {
+        const body = toggle.nextElementSibling;
+        if (!body || !body.classList.contains("list-group")) return;
+        let open = true;
+        try { open = localStorage.getItem("gcon-nav-" + toggle.dataset.navGroup) !== "0"; } catch (e) {}
+        // never start with the active page hidden inside a closed group
+        if (body.querySelector("a.active")) open = true;
+        body.classList.toggle("gcon-nav-collapsed", !open);
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        const flip = () => setNavGroupOpen(body, body.classList.contains("gcon-nav-collapsed"));
+        toggle.addEventListener("click", flip);
+        toggle.addEventListener("keydown", e => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); }
+        });
+    });
 }
 
 function setupTabNav() {
@@ -309,13 +358,19 @@ function setupTabNav() {
 }
 
 function loadActiveTab() {
-    if (currentTab === "control-center") loadControlCenter();
+    if (currentTab === "control-center") { loadControlCenter(); loadOverviewExtras(); }
     else if (currentTab === "cluster") loadControlCenter();
     else if (currentTab === "trust-center") loadTrustCenter();
     else if (currentTab === "explorer") loadExplorer();
     else if (currentTab === "events") loadEventsTab();
     else if (currentTab === "workflows") loadWorkflowsTab();
-    else if (currentTab === "storage") loadControlCenter();
+    else if (currentTab === "ha") loadHaTab();
+    else if (currentTab === "incidents") loadIncidentsTab();
+    else if (currentTab === "customers") loadCustomersTab();
+    else if (currentTab === "reliability") loadReliabilityTab();
+    else if (currentTab === "workload") loadWorkloadExtras();
+    else if (currentTab === "scheduler") loadSchedulerTab();
+    else if (currentTab === "storage") { loadControlCenter(); loadDbHealth(); }
     else if (currentTab === "admin") loadAdmin();
     else if (currentTab === "users") loadUsersTab();
     else if (currentTab === "organizations") loadOrganizationsTab();
@@ -497,16 +552,6 @@ async function loadJobs() {
 }
 
 
-async function loadEvents() {
-    try {
-        const events = await fetchJson("/events");
-        renderFeed("activity-feed", events);
-    } catch (err) {
-        console.error("Failed to load events:", err);
-        setConnectionStatus(false);
-    }
-}
-
 let eventsTabData = [];
 
 async function loadEventsTab() {
@@ -543,24 +588,27 @@ async function loadWorkflowsTab() {
             const statusBadge = {
                 COMPLETED: "bg-success",
                 FAILED: "bg-danger",
+                CANCELLED: "bg-warning text-dark",
                 RUNNING: "bg-primary",
             }[wf.status] || "bg-secondary";
+            const errs = Object.entries(wf.errors || {}).map(([j, m]) => `${j}: ${m}`).join("\n");
 
             return `<tr>
-                <td><code>${escapeHtml(wf.workflow_id)}</code></td>
-                <td><span class="badge ${statusBadge}">${escapeHtml(wf.status)}</span></td>
+                <td><code>${escapeHtml(wf.workflow_id)}</code>${wf.name ? `<div class="text-secondary small">${escapeHtml(wf.name)}</div>` : ""}</td>
+                <td><span class="badge ${statusBadge}">${escapeHtml(wf.status)}</span>${errs ? ` <i class="bi bi-exclamation-circle text-danger" title="${escapeHtml(errs)}"></i>` : ""}</td>
                 <td>${wf.pending_jobs}</td>
                 <td>${wf.ready_jobs}</td>
                 <td>${wf.running_jobs}</td>
                 <td>${wf.completed_jobs}</td>
                 <td>${wf.failed_jobs}</td>
+                <td>${wf.cancelled_jobs || 0}</td>
                 <td>${wf.blocked_jobs}</td>
                 <td class="text-secondary small">${escapeHtml(wf.created_at || "--")}</td>
             </tr>`;
         }).join("");
     } catch (err) {
         console.error("Failed to load workflows tab:", err);
-        tbody.innerHTML = `<tr><td colspan="9" class="text-danger text-center py-4">Failed to load workflows.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="text-danger text-center py-4">Failed to load workflows.</td></tr>`;
     }
 }
 
@@ -585,7 +633,6 @@ async function loadControlCenter() {
         loadNodes(),
         loadJobs(),
         loadClusterHealth(),
-        loadEvents(),
         loadTopologyMini(),
         loadHaStatus(),
     ]);
@@ -646,35 +693,14 @@ async function loadTopologyMini() {
 function renderGlobalStatus(status) {
     if (!status) return;
 
-    const pill = (id, healthy, label) => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.classList.remove("ok", "warn", "bad");
-        el.classList.add(healthy ? "ok" : "bad");
-        el.innerHTML = `<span class="dot"></span>${label}`;
-    };
-
-    pill("status-pill-coordinator", status.coordinator_online, "Coordinator");
-    pill("status-pill-scheduler", status.scheduler_running, "Scheduler");
-    pill("status-pill-storage", status.storage_online, "Storage");
-    pill("status-pill-receipts", status.receipt_engine_online, "Receipts");
-
-    const heartbeatEl = document.getElementById("status-pill-heartbeat");
-    if (heartbeatEl) {
-        const age = status.heartbeat_age_seconds;
-        heartbeatEl.classList.remove("ok", "warn", "bad");
-        heartbeatEl.classList.add(age === null ? "warn" : age < 30 ? "ok" : age < 120 ? "warn" : "bad");
-        heartbeatEl.innerHTML = `<span class="dot"></span>Heartbeat ${formatAge(age)}`;
-    }
-
     const coordEl = document.getElementById("overview-coordinator-id");
     if (coordEl && status.coordinator_id) {
         coordEl.textContent = status.coordinator_id;
         coordEl.title = status.coordinator_id;
     }
 
-    // System Services panel (Control Center) — same live data as the
-    // navbar strip above, shown with full status words instead of a dot-only pill.
+    // System Services panel (Control Center). Every row is driven by a live
+    // health probe; nothing here is a fixed label.
     const svc = (key, healthy, onLabel, offLabel) => {
         const dot = document.getElementById(`svc-dot-${key}`);
         const val = document.getElementById(`svc-val-${key}`);
@@ -689,7 +715,17 @@ function renderGlobalStatus(status) {
         }
     };
     svc("coordinator", status.coordinator_online, "Online", "Offline");
-    svc("scheduler", status.scheduler_running, "Running", "Paused");
+    // Scheduler has more than two states, so it is painted from the real
+    // scheduler state (the same one the Scheduler page shows).
+    const SCHED = {
+        running: ["ok", "Running"], paused: ["warn", "Paused"], standby: ["warn", "Standby"],
+        stalled: ["bad", "Stalled"], dead: ["bad", "Stopped"],
+    };
+    const [schedTone, schedText] = SCHED[status.scheduler_state] || ["warn", "Unknown"];
+    const schedDot = document.getElementById("svc-dot-scheduler");
+    const schedVal = document.getElementById("svc-val-scheduler");
+    [schedDot, schedVal].forEach(el => { if (el) { el.classList.remove("ok", "warn", "bad"); el.classList.add(schedTone); } });
+    if (schedVal) schedVal.textContent = schedText;
     svc("receipts", status.receipt_engine_online, "Online", "Offline");
     svc("storage", status.storage_online, "Healthy", "Unhealthy");
 
@@ -701,30 +737,6 @@ function renderGlobalStatus(status) {
         hbDot.classList.add(hbAge === null || hbAge === undefined ? "warn" : hbAge < 30 ? "ok" : hbAge < 120 ? "warn" : "bad");
     }
     if (hbVal) hbVal.textContent = formatAge(hbAge);
-}
-
-function renderExecutionsByCompany(companies) {
-    const list = document.getElementById("executions-by-company-list");
-    if (!list) return;
-    companies = companies || [];
-
-    if (companies.length === 0) {
-        list.innerHTML = `<div class="text-muted small px-1 py-2">No clients yet.</div>`;
-        return;
-    }
-
-    list.innerHTML = companies.slice(0, 6).map(c => `
-        <div class="gcon-company-compact-row gcon-panel-link" data-tab="cluster">
-            <span class="gcon-company-compact-name text-truncate">${escapeHtml(c.name)}</span>
-            <span class="gcon-company-compact-stats">
-                <span class="stat running"><span class="n">${c.jobs.running}</span><span class="l">Running</span></span>
-                <span class="stat completed"><span class="n">${c.jobs.completed}</span><span class="l">Done</span></span>
-                <span class="stat failed"><span class="n">${c.jobs.failed}</span><span class="l">Failed</span></span>
-            </span>
-        </div>
-    `).join("");
-
-    bindPanelLinks();
 }
 
 function renderCriticalAlerts(alerts) {
@@ -786,23 +798,6 @@ function renderNodeSummary(summary) {
     }
 }
 
-function renderReceiptsSummary(summary) {
-    if (!summary) return;
-    const total = summary.total || 0;
-    const verifiedPct = total ? (summary.verified / total * 100).toFixed(1) : 0;
-
-    setText("receipt-summary-total", total);
-    setText("receipt-summary-verified", summary.verified);
-    setText("receipt-summary-unverified", summary.unverified);
-    setText("receipt-summary-rate", `${verifiedPct}%`);
-
-    const donut = document.getElementById("receipt-donut");
-    if (donut) {
-        donut.style.background =
-            `conic-gradient(var(--success) 0 ${verifiedPct}%, var(--danger) ${verifiedPct}% 100%)`;
-    }
-}
-
 function renderStorageSummary(summary) {
     if (!summary) return;
 
@@ -858,11 +853,9 @@ function renderHomeDashboard(data) {
     renderTrustHealth(data.health, data.trust, data.global_status);
     renderCriticalAlerts(data.critical_alerts);
     renderNodeSummary(data.node_summary);
-    renderReceiptsSummary(data.receipts_summary);
     renderStorageSummary(data.storage_summary);
     renderExecutionTimeline(data.execution_timeline);
     if (data.companies) {
-        renderExecutionsByCompany(data.companies);
         renderCompaniesTable(data.companies);
         companiesData = data.companies;
         if (openClientDrawerOrgId) openClientDetail(openClientDrawerOrgId, true);
@@ -872,6 +865,7 @@ function renderHomeDashboard(data) {
         setText("metric-total-nodes", data.metrics.total_nodes);
     }
     renderPillars(data);
+    renderWorkload(data);
 }
 
 // ---------------------------------------------------------------
@@ -887,6 +881,256 @@ function renderHomeDashboard(data) {
 // volume.
 // ---------------------------------------------------------------
 
+// ---------------------------------------------------------------
+// Observability pages. All of these are aggregates fetched from
+// /management/observability/* and /management/incidents -- no per-job rows.
+// Cells are filled with textContent (never innerHTML), so org ids, worker
+// ids and incident text can't inject markup.
+// ---------------------------------------------------------------
+function fmtSec(v) { return v === null || v === undefined ? "--" : formatAge(v); }
+function fmtPctVal(v) { return v === null || v === undefined ? "--" : `${v.toFixed(1)}%`; }
+function fmtMs(v) { return v === null || v === undefined ? "--" : `${v < 10 ? v.toFixed(2) : Math.round(v)} ms`; }
+function fmtWhen(iso) { return iso ? new Date(iso).toLocaleString() : "--"; }
+function setMsg(id, text) { const el = document.getElementById(id); if (el) el.textContent = text || ""; }
+
+// rows: array of arrays; a cell is a string or {text, cls}
+function fillTable(tbodyId, rows, emptyText, cols) {
+    const body = document.getElementById(tbodyId);
+    if (!body) return;
+    body.replaceChildren();
+    if (!rows.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = cols;
+        td.className = "text-secondary";
+        td.textContent = emptyText;
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+    }
+    rows.forEach(cells => {
+        const tr = document.createElement("tr");
+        cells.forEach(cell => {
+            const td = document.createElement("td");
+            const c = typeof cell === "object" && cell !== null ? cell : { text: cell };
+            if (c.cls) {
+                const span = document.createElement("span");
+                span.className = c.cls;
+                span.textContent = c.text;
+                td.appendChild(span);
+            } else {
+                td.textContent = c.text;
+            }
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+}
+
+function severityCell(sev) {
+    return { text: sev, cls: sev === "critical" ? "badge bg-danger" : "badge bg-warning text-dark" };
+}
+
+async function loadIncidentsTab() {
+    try {
+        const d = await fetchJson("/management/incidents");
+        const open = d.open || [], resolved = d.resolved || [];
+        setMsg("inc-open-note", open.length ? `${open.length} open` : "");
+        fillTable("inc-open-body", open.map(i => [
+            severityCell(i.severity), i.title, i.subject, fmtWhen(i.first_seen), fmtWhen(i.last_seen),
+        ]), "No open incidents", 5);
+        fillTable("inc-resolved-body", resolved.map(i => [
+            severityCell(i.severity), i.title, i.subject, fmtWhen(i.first_seen), fmtWhen(i.resolved_at),
+        ]), "Nothing resolved yet", 5);
+    } catch (err) {
+        setMsg("inc-open-note", "Unavailable (needs 'View monitoring' or the request failed)");
+    }
+}
+
+async function loadCustomersTab() {
+    try {
+        const s = await fetchJson("/management/observability/summary");
+        fillTable("cust-body", (s.customers || []).map(o => [
+            o.org_id, String(o.pending), fmtSec(o.oldest_pending_age_seconds), String(o.running),
+            String(o.completed), String(o.failed), String(o.cancelled), fmtPctVal(o.failure_pct),
+        ]), "No jobs yet", 8);
+    } catch (err) {
+        fillTable("cust-body", [], "Unavailable (needs 'View monitoring' or the request failed)", 8);
+    }
+}
+
+async function loadReliabilityTab() {
+    try {
+        const s = await fetchJson("/management/observability/summary");
+        const r = s.retries, w = s.webhooks, e = s.events || {};
+        setText("rel-attempts", r ? r.total_attempts : "--");
+        setText("rel-retried", r ? r.jobs_retried : "--");
+        setText("rel-attempt-status", r && Object.keys(r.attempts_by_status).length
+            ? Object.entries(r.attempts_by_status).map(([k, v]) => `${v} ${k}`).join(", ") : "--");
+        setText("rel-dispatch-failed", e.jobs_dispatch_failed_total ?? "--");
+        setText("rel-verify-fail", e.verification_fail_total ?? "--");
+        setText("rel-disagree", e.replica_disagreement_total ?? "--");
+        setText("rel-policy", e.policy_violation_total ?? "--");
+        const by = (w && w.by_status) || {};
+        setText("rel-wh-success", w ? (by.success ?? 0) : "--");
+        setText("rel-wh-open", w ? (by.pending ?? 0) + (by.retrying ?? 0) : "--");
+        setText("rel-wh-oldest", w && w.oldest_undelivered_at
+            ? formatAge((Date.now() - new Date(w.oldest_undelivered_at).getTime()) / 1000) : (w ? "none" : "--"));
+        setText("rel-wh-failed", w ? (by.failed ?? 0) : "--");
+        setText("rel-wh-failed-recent", w ? w.failed_since : "--");
+        fillTable("rel-nodes-body", (s.nodes || []).map(n => [
+            n.node_id, n.status || "--",
+            n.quarantined ? { text: n.quarantine_reason || "quarantined", cls: "badge bg-danger" } : "no",
+            String(n.verification_failure_streak), String(n.receipts),
+            n.receipts ? `${n.verified} (${fmtPctVal(n.verified_pct)})` : "--",
+        ]), "No workers registered", 6);
+    } catch (err) {
+        fillTable("rel-nodes-body", [], "Unavailable (needs 'View monitoring' or the request failed)", 6);
+    }
+}
+
+async function loadDbHealth() {
+    try {
+        const s = await fetchJson("/management/observability/summary");
+        const d = s.database || {};
+        if (!d.available) { setMsg("db-note", "No control-plane database attached"); return; }
+        setMsg("db-note", "");
+        setText("db-dialect", d.dialect);
+        setText("db-read", fmtMs(d.read_ms));
+        setText("db-write", fmtMs(d.write_ms));
+        setText("db-size", d.size_bytes === null || d.size_bytes === undefined ? "--" : formatBytes(d.size_bytes));
+        setText("db-schema", d.schema_version ?? "--");
+        setText("db-snaps", d.snapshots_stored ?? "--");
+    } catch (err) {
+        setMsg("db-note", "Unavailable (needs 'View monitoring' or the request failed)");
+    }
+}
+
+// Tiny inline-SVG trend (no chart library). Each series is scaled to its
+// own max so a queue of 3 is still visible next to 500 running.
+function renderTrend(points) {
+    const host = document.getElementById("wl-trend");
+    if (!host) return;
+    host.replaceChildren();
+    setMsg("wl-trend-empty", "");
+    if (!points || points.length < 2) {
+        setMsg("wl-trend-empty", "Not enough history yet (a sample is taken every few seconds to minutes).");
+        setMsg("wl-trend-legend", "");
+        return;
+    }
+    const series = [
+        { key: "pending", color: "var(--warning)" },
+        { key: "running", color: "var(--info)" },
+        { key: "failed", color: "var(--danger)" },
+    ];
+    const W = 800, H = 140, NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", H);
+    svg.setAttribute("preserveAspectRatio", "none");
+    const legend = [];
+    series.forEach(s => {
+        const vals = points.map(p => Number(p[s.key] ?? 0));
+        const max = Math.max(1, ...vals);
+        const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * W},${H - 6 - (v / max) * (H - 12)}`).join(" ");
+        const line = document.createElementNS(NS, "polyline");
+        line.setAttribute("points", pts);
+        line.setAttribute("fill", "none");
+        line.setAttribute("stroke", s.color);
+        line.setAttribute("stroke-width", "2");
+        line.setAttribute("vector-effect", "non-scaling-stroke");
+        svg.appendChild(line);
+        legend.push(`${s.key} ${vals[vals.length - 1]} (peak ${max})`);
+    });
+    host.appendChild(svg);
+    setMsg("wl-trend-legend", legend.join(" · "));
+}
+
+async function loadWorkloadExtras() {
+    try {
+        const [s, h] = await Promise.all([
+            fetchJson("/management/observability/summary"),
+            fetchJson("/management/observability/history?minutes=60"),
+        ]);
+        const reasons = Object.values((s.waiting && s.waiting.by_reason) || {});
+        fillTable("wl-reasons-body", reasons.map(r => [r.label, String(r.count), fmtSec(r.oldest_age_seconds)]),
+            "Nothing is waiting", 3);
+        const l = s.sli || {};
+        setMsg("wl-sli-window", `last ${formatAge(l.window_seconds)}`);
+        setText("sli-rate", l.jobs_per_hour === null || l.jobs_per_hour === undefined ? "--" : l.jobs_per_hour.toFixed(1));
+        setText("sli-fail", fmtPctVal(l.failure_pct));
+        setText("sli-completion", `${fmtSec(l.completion_p50_seconds)} / ${fmtSec(l.completion_p95_seconds)}`);
+        setText("sli-wait", `${fmtSec(l.queue_wait_p50_seconds)} / ${fmtSec(l.queue_wait_p95_seconds)}`);
+        renderTrend(h);
+    } catch (err) {
+        fillTable("wl-reasons-body", [], "Unavailable (needs 'View monitoring' or the request failed)", 3);
+    }
+}
+
+async function loadHaTab() {
+    const note = document.getElementById("ha-mode-note");
+    const dash = (id, v) => setText(id, v);
+    const dot = (id, cls) => {
+        const el = document.getElementById(id);
+        if (el) { el.classList.remove("ok", "warn", "bad"); if (cls) el.classList.add(cls); }
+    };
+    try {
+        const s = await fetchJson("/management/ha-status");
+        if (!s.enabled) {
+            if (note) note.textContent = "Single coordinator (HA not enabled)";
+            ["ha-role","ha-self-id","ha-leader-id","ha-lease-state","ha-lease-remaining","ha-leader-since","ha-term"]
+                .forEach(id => dash(id, "--"));
+            dot("ha-dot-role", null); dot("ha-dot-lease", null);
+            return;
+        }
+        if (note) note.textContent = "HA enabled";
+        const lease = s.lease || null;
+        dash("ha-role", s.is_leader ? "Leader (active)" : "Standby");
+        dot("ha-dot-role", s.is_leader ? "ok" : "warn");
+        dash("ha-self-id", s.holder_id || "--");
+        dash("ha-leader-id", lease ? lease.holder_id : "none");
+        const rem = s.lease_seconds_remaining;
+        const live = lease && rem !== null && rem !== undefined && rem > 0;
+        dash("ha-lease-state", !lease ? "No lease held" : (live ? "Held" : "Expired"));
+        dot("ha-dot-lease", live ? "ok" : "bad");
+        dash("ha-lease-remaining", live ? formatAge(rem) : "--");
+        dash("ha-leader-since", lease && lease.acquired_at ? new Date(lease.acquired_at).toLocaleString() : "--");
+        dash("ha-term", lease ? lease.term : "--");
+    } catch (err) {
+        // Don't leave the last good values on screen next to an error note.
+        ["ha-role","ha-self-id","ha-leader-id","ha-lease-state","ha-lease-remaining","ha-leader-since","ha-term"]
+            .forEach(id => dash(id, "--"));
+        dot("ha-dot-role", null); dot("ha-dot-lease", null);
+        if (note) note.textContent = "Unavailable (needs 'View monitoring' or the request failed)";
+    }
+}
+
+function renderWorkload(data) {
+    if (!data) return;
+    const m = data.metrics || {};
+    setText("wl-queued", m.pending_jobs ?? "--");
+    setText("wl-queued-l", (schedulerIsOn(data) ? "queued" : "pending") + " (queue depth)");
+    setText("wl-running", m.running_jobs ?? "--");
+    setText("wl-completed", m.completed_jobs ?? "--");
+    setText("wl-failed", m.failed_jobs ?? "--");
+    setText("wl-cancelled", m.cancelled_jobs ?? "--");
+    // "--" would be ambiguous here: nothing queued is a real answer.
+    const age = m.oldest_pending_age_seconds;
+    setText("wl-oldest", m.pending_jobs === undefined ? "--"
+        : (age === null || age === undefined) ? "none queued" : formatAge(age));
+}
+
+// The scheduler counts as "on" when its loop is running and it has not
+// been paused (health check "scheduler" -- same source System Services
+// uses). Unknown state is treated as off, so nothing is called "queued"
+// without evidence that the scheduler is actually working.
+function schedulerIsOn(data) {
+    const m = (((data || {}).health || {}).checks || {}).scheduler;
+    const metrics = (m && m.metrics) || {};
+    return metrics.running === true && metrics.paused !== true;
+}
+
 function renderPillars(data) {
     if (!data) return;
 
@@ -894,18 +1138,27 @@ function renderPillars(data) {
     const nodeSummary = data.node_summary || {};
     const receipts = data.receipts_summary || {};
 
-    // Orchestrate — scheduling-stage outcomes: what's queued and what
-    // got cancelled before it ran. NOT "running" — that's work
-    // actually being performed, which is Execute's question, not
-    // Orchestrate's ("what should run, where, when").
-    setText("pillar-orch-queued", metrics.pending_jobs ?? "--");
-    setText("pillar-orch-cancelled", metrics.cancelled_jobs ?? "--");
+    // Orchestrate and Execute are separate pillars by where a job came
+    // from: a job linked to a workflow/DAG lands in Orchestrate, any
+    // other submitted job lands in Execute. Each shows its full live
+    // status breakdown, straight from the server's single-pass counts.
+    //
+    // "pending" vs "queued": a waiting job is "queued" only while the
+    // scheduler is on (running and not paused); with the scheduler off
+    // it is just "pending".
+    const waitingWord = schedulerIsOn(data) ? "queued" : "pending";
+    const fillStatuses = (prefix, counts) => {
+        ["pending", "running", "completed", "failed", "cancelled"].forEach(k => {
+            setText(`${prefix}-${k}`, counts ? counts[k] : "--");
+        });
+        setText(`${prefix}-pending-l`, waitingWord);
+    };
+    fillStatuses("pillar-orch", metrics.workflow_jobs);
+    fillStatuses("pillar-exec", metrics.direct_jobs);
 
-    // Execute — who is actually doing work, what's running, and what broke.
+    // Execute — plus who is actually doing the work.
     const active = (nodeSummary.idle ?? 0) + (nodeSummary.busy ?? 0);
     setText("pillar-exec-workers", nodeSummary.total === undefined ? "--" : active);
-    setText("pillar-exec-running", metrics.running_jobs ?? "--");
-    setText("pillar-exec-failures", metrics.failed_jobs ?? "--");
 
     // Verify — does an EXISTING receipt's signature actually check out?
     // Two real fields only: receipts_summary has no third "failed"
@@ -955,7 +1208,558 @@ function renderPillars(data) {
         setText("pillar-assure-compliant", "--");
         setText("pillar-assure-exceptions", "--");
     }
+
+    // Collapsed summary + exception flag per stage. The flag is the point:
+    // a stage that is fine says OK, one that needs attention says why.
+    // "na" (grey) means there is nothing to judge yet, never "fine".
+    const sums = (c) => c || {};
+    const orch = sums(metrics.workflow_jobs), exe = sums(metrics.direct_jobs);
+    const flagFor = (failed) => failed > 0 ? [`${failed} failed`, "bad"] : ["OK", "ok"];
+    if (metrics.workflow_jobs) {
+        setPillarSummary("orch", `${orch.running} running · ${orch.pending} ${waitingWord}`, ...flagFor(orch.failed));
+    } else setPillarSummary("orch", "--", "--", "na");
+
+    if (metrics.direct_jobs && nodeSummary.total !== undefined) {
+        const [ft, fc] = active === 0 ? ["no workers", "bad"] : flagFor(exe.failed);
+        setPillarSummary("exec", `${active} worker(s) · ${exe.running} running`, ft, fc);
+    } else setPillarSummary("exec", "--", "--", "na");
+
+    if (receipts.total !== undefined) {
+        const [vt, vc] = receipts.total === 0 ? ["no receipts", "na"]
+            : receipts.unverified > 0 ? [`${receipts.unverified} unverified`, "warn"] : ["OK", "ok"];
+        setPillarSummary("verify", `${receipts.verified} verified`, vt, vc);
+    } else setPillarSummary("verify", "--", "--", "na");
+
+    if (policy && policy.evaluated > 0) {
+        const [at, ac] = policy.exceptions > 0 ? [`${policy.exceptions} exception(s)`, "bad"] : ["OK", "ok"];
+        setPillarSummary("assure", `${policy.compliant} compliant`, at, ac);
+    } else setPillarSummary("assure", "not evaluated yet", "--", "na");
+
+    if (receipts.total !== undefined) {
+        const missing = Math.max(0, completed - generated);
+        setPillarSummary("evidence", `${generated} receipt(s)`,
+            missing > 0 ? `${missing} missing` : "OK", missing > 0 ? "warn" : "ok");
+    } else setPillarSummary("evidence", "--", "--", "na");
 }
+
+// ---------------------------------------------------------------
+// Overview: global scope, incidents, trends, heatmap, event groups
+//
+// The scope bar (time range / customer / region / service, plus the
+// coordinator's environment) is shared by every panel below it, but a
+// panel only claims a filter it really applies -- each panel's note
+// line says what it honours and what it does not. Data comes from the
+// observability endpoints; nothing is computed from hard-coded lists.
+// ---------------------------------------------------------------
+
+const SCOPE_STORE_KEY = "gcon.overview.scope";
+const SCOPE_DEFAULTS = { range: "60", org: "", region: "", service: "" };
+const SCOPE_LABELS = { range: "Time range", org: "Customer", region: "Region", service: "Service" };
+const overviewScope = Object.assign({}, SCOPE_DEFAULTS);
+let overviewIncidents = { open: [], resolved: [] };
+let overviewSummary = null;
+
+function rangeLabel(minutes) {
+    const m = Number(minutes);
+    return m >= 60 ? `last ${m / 60} h` : `last ${m} min`;
+}
+
+function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+}
+
+function scopeIsDefault() {
+    return Object.keys(SCOPE_DEFAULTS).every(k => overviewScope[k] === SCOPE_DEFAULTS[k]);
+}
+
+// What a panel applied vs. ignored, as one short line under its title.
+function setScopeNote(id, honours) {
+    const parts = [honours.includes("range") ? rangeLabel(overviewScope.range) : "live"];
+    const applied = ["org", "region", "service"].filter(k => honours.includes(k) && overviewScope[k]);
+    const ignored = ["org", "region", "service"]
+        .filter(k => !honours.includes(k) && overviewScope[k])
+        .map(k => SCOPE_LABELS[k].toLowerCase());
+    applied.forEach(k => parts.push(`${SCOPE_LABELS[k].toLowerCase()}: ${k === "org" ? scopeOrgName() : overviewScope[k]}`));
+    if (ignored.length) parts.push(`${ignored.join(" / ")} filter not applied here`);
+    setMsg(id, parts.join(" · "));
+}
+
+function scopeOrgName() {
+    const c = (companiesData || []).find(x => x.org_id === overviewScope.org);
+    return c ? c.name : overviewScope.org;
+}
+
+function loadSavedScope() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(SCOPE_STORE_KEY) || "{}");
+        Object.keys(SCOPE_DEFAULTS).forEach(k => {
+            if (typeof saved[k] === "string") overviewScope[k] = saved[k];
+        });
+    } catch (e) { /* storage unavailable or corrupt: keep defaults */ }
+}
+
+function saveScope() {
+    try { localStorage.setItem(SCOPE_STORE_KEY, JSON.stringify(overviewScope)); } catch (e) { /* ignore */ }
+}
+
+// Rebuild a <select>'s options only when the list changed, and never
+// lose the active choice if its value has temporarily vanished (a
+// region whose last worker went offline is still the active scope).
+function fillScopeSelect(id, allLabel, options, current) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const wanted = options.slice();
+    if (current && !wanted.some(o => o.value === current)) wanted.push({ value: current, label: `${current} (none now)` });
+    const sig = JSON.stringify(wanted);
+    if (sel.dataset.sig !== sig) {
+        sel.dataset.sig = sig;
+        sel.replaceChildren(new Option(allLabel, ""));
+        wanted.forEach(o => sel.appendChild(new Option(o.label, o.value)));
+    }
+    sel.value = current || "";
+}
+
+function refreshScopeBar() {
+    document.getElementById("scope-range").value = overviewScope.range;
+    const s = (overviewSummary && overviewSummary.scope) || {};
+
+    const names = {};
+    (companiesData || []).forEach(c => { names[c.org_id] = c.name; });
+    const orgIds = new Set(Object.keys(names));
+    ((overviewSummary && overviewSummary.customers) || []).forEach(c => orgIds.add(c.org_id));
+    fillScopeSelect("scope-org", "All customers",
+        [...orgIds].map(id => ({ value: id, label: names[id] || id })), overviewScope.org);
+
+    fillScopeSelect("scope-region", "All regions",
+        (s.regions || []).map(r => ({ value: r, label: r })), overviewScope.region);
+    const regionSel = document.getElementById("scope-region");
+    if (regionSel) {
+        regionSel.title = s.unlabelled_workers
+            ? `${s.unlabelled_workers} worker(s) have no region. Start workers with --capability region=<name>.` : "";
+    }
+
+    const subjects = new Set();
+    [...overviewIncidents.open, ...overviewIncidents.resolved].forEach(i => subjects.add(i.subject));
+    fillScopeSelect("scope-service", "All services",
+        [...subjects].sort().map(v => ({ value: v, label: v })), overviewScope.service);
+
+    setText("scope-env", overviewSummary ? (s.environment || "not set") : "--");
+    const envEl = document.getElementById("scope-env");
+    if (envEl) envEl.title = s.environment ? "" : "Set GCON_ENVIRONMENT on the coordinator to label this deployment.";
+
+    const summary = document.getElementById("scope-summary");
+    if (summary) {
+        summary.replaceChildren();
+        const active = Object.keys(SCOPE_DEFAULTS).filter(k => overviewScope[k] !== SCOPE_DEFAULTS[k]);
+        if (!active.length) {
+            summary.appendChild(el("span", "text-secondary small", "Scope: everything, last 1 h"));
+        } else {
+            summary.appendChild(el("span", "gcon-scope-active", "Scope"));
+            active.forEach(k => {
+                const shown = k === "range" ? rangeLabel(overviewScope.range)
+                    : k === "org" ? (names[overviewScope.org] || overviewScope.org) : overviewScope[k];
+                summary.appendChild(el("span", "gcon-scope-chip", `${SCOPE_LABELS[k]}: ${shown}`));
+            });
+            const reset = el("button", "btn btn-sm btn-link p-0 ms-2", "Reset");
+            reset.type = "button";
+            reset.addEventListener("click", () => {
+                Object.assign(overviewScope, SCOPE_DEFAULTS);
+                saveScope();
+                loadOverviewExtras();
+            });
+            summary.appendChild(reset);
+        }
+    }
+}
+
+function setupOverviewScope() {
+    loadSavedScope();
+    [["scope-range", "range"], ["scope-org", "org"], ["scope-region", "region"], ["scope-service", "service"]]
+        .forEach(([id, key]) => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            sel.addEventListener("change", () => {
+                overviewScope[key] = sel.value;
+                saveScope();
+                loadOverviewExtras();
+            });
+        });
+    const metricSel = document.getElementById("heatmap-metric");
+    if (metricSel) metricSel.addEventListener("change", () => renderHeatmap(overviewSummary));
+    refreshScopeBar();
+}
+
+async function loadOverviewExtras() {
+    if (!document.getElementById("scope-bar")) return;
+    const m = overviewScope.range;
+    const qs = new URLSearchParams({ minutes: m });
+    if (overviewScope.region) qs.set("region", overviewScope.region);
+    const [sum, hist, inc, groups] = await Promise.allSettled([
+        fetchJson(`/management/observability/summary?${qs}`),
+        fetchJson(`/management/observability/history?minutes=${m}`),
+        fetchJson("/management/incidents"),
+        fetchJson(`/management/event-groups?minutes=${m}`),
+    ]);
+    if (sum.status === "fulfilled") overviewSummary = sum.value;
+    if (inc.status === "fulfilled") overviewIncidents = { open: inc.value.open || [], resolved: inc.value.resolved || [] };
+    refreshScopeBar();
+    renderIncidentsOverview(inc.status === "fulfilled");
+    renderTrends(sum.status === "fulfilled" ? sum.value : null, hist.status === "fulfilled" ? hist.value : null);
+    renderHeatmap(sum.status === "fulfilled" ? sum.value : null);
+    renderEventGroups(groups.status === "fulfilled" ? groups.value : null);
+    setScopeNote("lifecycle-note", []);
+}
+
+// ---- Incidents --------------------------------------------------
+function ageSince(iso) {
+    return iso ? formatAge((Date.now() - new Date(iso).getTime()) / 1000) : "--";
+}
+
+async function setIncidentOwner(incidentId, claim, btn) {
+    btn.disabled = true;
+    try {
+        await fetchJson(`/management/incidents/${encodeURIComponent(incidentId)}/${claim ? "claim" : "release"}`, { method: "POST" });
+        await loadOverviewExtras();
+    } catch (err) {
+        showToast(err.message || "Could not update the incident owner.", true);
+        btn.disabled = false;
+    }
+}
+
+function renderIncidentsOverview(ok) {
+    const list = document.getElementById("inc-ov-list");
+    if (!list) return;
+    list.replaceChildren();
+    setScopeNote("inc-ov-note", ["range", "service"]);
+    if (!ok) {
+        list.appendChild(el("div", "text-secondary small", "Unavailable (needs 'View monitoring' or the request failed)"));
+        return;
+    }
+    const sevRank = { critical: 0, warning: 1 };
+    const open = overviewIncidents.open
+        .filter(i => !overviewScope.service || i.subject === overviewScope.service)
+        .sort((a, b) => (sevRank[a.severity] ?? 2) - (sevRank[b.severity] ?? 2)
+            || new Date(a.first_seen) - new Date(b.first_seen));
+    const since = Date.now() - Number(overviewScope.range) * 60000;
+    const resolvedInRange = overviewIncidents.resolved
+        .filter(i => (!overviewScope.service || i.subject === overviewScope.service)
+            && i.resolved_at && new Date(i.resolved_at).getTime() >= since).length;
+
+    const badge = document.getElementById("inc-ov-count");
+    if (badge) {
+        badge.textContent = open.length;
+        const crit = open.some(i => i.severity === "critical");
+        badge.className = `badge ${open.length === 0 ? "bg-success" : crit ? "bg-danger" : "bg-warning text-dark"}`;
+    }
+    setMsg("inc-ov-resolved", `${resolvedInRange} resolved in ${rangeLabel(overviewScope.range)}`);
+
+    if (!open.length) {
+        list.appendChild(el("div", "gcon-inc-empty", overviewScope.service
+            ? `No open incidents for service "${overviewScope.service}".` : "No open incidents."));
+        return;
+    }
+    open.forEach(i => {
+        const row = el("div", `gcon-inc-row ${i.severity === "critical" ? "critical" : "warning"}`);
+        row.appendChild(el("span", `badge ${i.severity === "critical" ? "bg-danger" : "bg-warning text-dark"}`, i.severity));
+
+        const main = el("div", "gcon-inc-main");
+        main.appendChild(el("div", "gcon-inc-title", i.title));
+        const impact = (i.detail && i.detail.impact) || "";
+        main.appendChild(el("div", "gcon-inc-impact", impact ? `Impact: ${impact}` : "Impact: not quantified for this rule"));
+        row.appendChild(main);
+
+        row.appendChild(el("span", "gcon-scope-chip", i.subject));
+
+        const meta = el("div", "gcon-inc-meta");
+        meta.appendChild(el("div", "", `Detected ${ageSince(i.first_seen)} ago`));
+        meta.appendChild(el("div", i.owner ? "gcon-inc-owner" : "gcon-inc-owner none",
+            i.owner ? `Owner: ${i.owner}` : "Unowned"));
+        row.appendChild(meta);
+
+        const btn = el("button", "btn btn-sm btn-outline-secondary", i.owner ? "Release" : "Take");
+        btn.type = "button";
+        btn.addEventListener("click", () => setIncidentOwner(i.incident_id, !i.owner, btn));
+        row.appendChild(btn);
+        list.appendChild(row);
+    });
+}
+
+// ---- Trends -----------------------------------------------------
+function fmtLatency(v) {
+    if (v === null || v === undefined) return "--";
+    return v < 1 ? `${Math.round(v * 1000)} ms` : formatAge(v);
+}
+
+function drawSpark(hostId, values, color) {
+    const host = document.getElementById(hostId);
+    if (!host) return;
+    host.replaceChildren();
+    if (!values || values.length < 2) return;
+    const W = 160, H = 34, NS = "http://www.w3.org/2000/svg";
+    const min = Math.min(...values), max = Math.max(...values), span = (max - min) || 1;
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", H);
+    const line = document.createElementNS(NS, "polyline");
+    line.setAttribute("points", values.map((v, i) => `${(i / (values.length - 1)) * W},${H - 3 - ((v - min) / span) * (H - 6)}`).join(" "));
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", "2");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(line);
+    host.appendChild(svg);
+}
+
+function renderTrends(sum, hist) {
+    setScopeNote("trends-note", ["range"]);
+    const tiles = ["rate", "verify", "backlog"];
+    const clear = () => tiles.forEach(t => { setText(`tt-${t}-n`, "--"); setMsg(`tt-${t}-s`, ""); drawSpark(`tt-${t}-spark`, null); });
+
+    // Webhook delivery latency (from the summary).
+    const w = sum && sum.webhooks;
+    if (w && w.latency_p50_seconds !== null && w.latency_p50_seconds !== undefined) {
+        setText("tt-latency-n", `${fmtLatency(w.latency_p50_seconds)} / ${fmtLatency(w.latency_p95_seconds)}`);
+        setMsg("tt-latency-s", `p50 / p95 · ${w.delivered_since} delivered in ${rangeLabel(overviewScope.range)}`);
+    } else {
+        setText("tt-latency-n", "--");
+        setMsg("tt-latency-s", w ? `no deliveries in ${rangeLabel(overviewScope.range)}` : "unavailable");
+    }
+
+    // Receipt series (from the sampled history). Receipt counters live in
+    // coordinator memory, so a restart makes the total drop; only the part
+    // of the window after the last drop is used, and the tile says so.
+    let pts = (hist || []).filter(p => p.receipts_verified !== null && p.receipts_verified !== undefined
+        && p.receipts_unverified !== null && p.receipts_unverified !== undefined);
+    if (!hist) { clear(); setMsg("trends-empty", "Unavailable (needs 'View monitoring' or the request failed)."); return; }
+    let reset = false;
+    for (let i = pts.length - 1; i > 0; i--) {
+        if (pts[i].receipts_verified + pts[i].receipts_unverified < pts[i - 1].receipts_verified + pts[i - 1].receipts_unverified) {
+            pts = pts.slice(i); reset = true; break;
+        }
+    }
+    if (pts.length < 2) {
+        clear();
+        setMsg("trends-empty", "Not enough history yet in this window (a sample is taken every 30 s by default).");
+        return;
+    }
+    setMsg("trends-empty", reset ? "The coordinator restarted inside this window; receipt trends start from the restart." : "");
+
+    const first = pts[0], last = pts[pts.length - 1];
+    const total = p => p.receipts_verified + p.receipts_unverified;
+    const mins = (new Date(last.taken_at) - new Date(first.taken_at)) / 60000;
+    const made = total(last) - total(first);
+
+    setText("tt-rate-n", mins > 0 ? `${(made / mins).toFixed(1)} / min` : "--");
+    setMsg("tt-rate-s", `${made} new receipt(s) over ${formatAge(mins * 60)}`);
+    const buckets = 30, step = Math.max(1, Math.floor((pts.length - 1) / buckets)), rates = [];
+    for (let i = step; i < pts.length; i += step) {
+        const dm = (new Date(pts[i].taken_at) - new Date(pts[i - step].taken_at)) / 60000;
+        if (dm > 0) rates.push((total(pts[i]) - total(pts[i - step])) / dm);
+    }
+    drawSpark("tt-rate-spark", rates, "var(--info)");
+
+    const pct = p => (total(p) ? p.receipts_verified * 100 / total(p) : null);
+    const vNow = pct(last), vThen = pct(first);
+    setText("tt-verify-n", vNow === null ? "--" : `${vNow.toFixed(1)}%`);
+    setMsg("tt-verify-s", vNow === null || vThen === null ? ""
+        : `${vNow - vThen >= 0 ? "+" : ""}${(vNow - vThen).toFixed(1)} pts over the window`);
+    drawSpark("tt-verify-spark", pts.map(pct).filter(v => v !== null), "var(--success)");
+
+    const grew = last.receipts_unverified - first.receipts_unverified;
+    setText("tt-backlog-n", last.receipts_unverified);
+    setMsg("tt-backlog-s", `${grew >= 0 ? "+" : ""}${grew} over the window`);
+    const backlogTile = document.getElementById("tt-backlog");
+    if (backlogTile) backlogTile.classList.toggle("warn", grew > 0 && last.receipts_unverified > 0);
+    drawSpark("tt-backlog-spark", pts.map(p => p.receipts_unverified), grew > 0 ? "var(--warning)" : "var(--success)");
+}
+
+// ---- Heatmap ----------------------------------------------------
+function heatColor(frac) {
+    // 0 -> green (hue 150), 1 -> red (hue 0)
+    const f = Math.max(0, Math.min(1, frac));
+    return `hsl(${Math.round(150 * (1 - f))}, 62%, 38%)`;
+}
+
+const HEAT_FAILURE_FULL_PCT = 25;
+
+function renderHeatmap(sum) {
+    const grid = document.getElementById("heatmap-grid");
+    if (!grid) return;
+    grid.replaceChildren();
+    setScopeNote("heatmap-note", ["region", "org"]);
+    const legend = document.getElementById("heatmap-legend");
+    if (!sum) { setMsg("heatmap-legend", "Unavailable (needs 'View monitoring' or the request failed)."); return; }
+
+    const rows = sum.customers || [];
+    const metric = document.getElementById("heatmap-metric").value;
+    const queueFull = (sum.scope && sum.scope.queue_age_alert_seconds) || 300;
+    const names = {};
+    (companiesData || []).forEach(c => { names[c.org_id] = c.name; });
+
+    if (!rows.length) {
+        grid.appendChild(el("div", "text-secondary small", overviewScope.region
+            ? `No jobs have run on workers in region "${overviewScope.region}".` : "No jobs yet."));
+        setMsg("heatmap-legend", "");
+        return;
+    }
+    rows.forEach(o => {
+        let frac = null;
+        if (metric === "failure") frac = o.failure_pct === null || o.failure_pct === undefined ? null : o.failure_pct / HEAT_FAILURE_FULL_PCT;
+        else frac = (o.oldest_pending_age_seconds === null || o.oldest_pending_age_seconds === undefined) ? 0 : o.oldest_pending_age_seconds / queueFull;
+        const name = names[o.org_id] || o.org_id;
+        const cell = el("button", "gcon-heat-cell", rows.length <= 36 ? name : "");
+        cell.type = "button";
+        cell.style.background = frac === null ? "var(--surface-2, #20242b)" : heatColor(frac);
+        if (overviewScope.org && overviewScope.org !== o.org_id) cell.classList.add("dim");
+        if (overviewScope.org === o.org_id) cell.classList.add("selected");
+        cell.title = `${name}\n${o.pending} waiting · ${o.running} running · ${o.completed} done · ${o.failed} failed\n`
+            + `failure ${fmtPctVal(o.failure_pct)} · oldest wait ${fmtSec(o.oldest_pending_age_seconds)}`;
+        if (names[o.org_id]) cell.addEventListener("click", () => openClientDetail(o.org_id));
+        grid.appendChild(cell);
+    });
+    const note = rows.length >= 50 ? " Showing the 50 busiest customers." : "";
+    setMsg("heatmap-legend", (metric === "failure"
+        ? `Green = no failures, red = ${HEAT_FAILURE_FULL_PCT}%+ of finished jobs failed, grey = none finished yet.`
+        : `Green = nothing waiting, red = oldest queued job at or past the ${formatAge(queueFull)} alert threshold.`) + note);
+}
+
+// ---- Event groups -----------------------------------------------
+function renderEventGroups(g) {
+    const list = document.getElementById("evg-list");
+    if (!list) return;
+    list.replaceChildren();
+    setScopeNote("evg-note", ["range"]);
+    if (!g) { list.appendChild(el("div", "text-secondary small", "Unavailable (needs 'View monitoring' or the request failed)")); setMsg("evg-foot", ""); return; }
+    if (!g.groups.length) { list.appendChild(el("div", "text-secondary small", `No events in the ${rangeLabel(g.window_minutes)}.`)); setMsg("evg-foot", ""); return; }
+    g.groups.forEach(x => {
+        const tone = /CRITICAL|FAILED|OFFLINE|EMERGENCY|DISPUTE/.test(x.event_type) ? "bad"
+            : /DEGRADED|PAUSED|DRAIN|STOPPED/.test(x.event_type) ? "warn" : "";
+        const row = el("div", `gcon-evg-row ${tone}`);
+        const main = el("div", "gcon-evg-main");
+        main.appendChild(el("div", "gcon-evg-type", x.event_type.replaceAll("_", " ")));
+        main.appendChild(el("div", "gcon-evg-src", `${x.source} · last ${ageSince(x.last_at)} ago`));
+        row.appendChild(main);
+        row.appendChild(el("span", "gcon-evg-count", `×${x.count}`));
+        list.appendChild(row);
+    });
+    setMsg("evg-foot", `${g.total_events} event(s) in ${g.group_count} group(s)`
+        + (g.scanned_all ? "" : " · window truncated to the most recent events"));
+}
+
+// ---- Pillar cards: summary line + exception flag, expand for detail
+function setPillarSummary(key, sub, flagText, flagTone) {
+    setText(`pillar-${key}-sub`, sub);
+    const flag = document.getElementById(`pillar-${key}-flag`);
+    if (flag) { flag.textContent = flagText; flag.className = `gcon-pillar-flag ${flagTone}`; }
+}
+
+function setupPillarToggles() {
+    document.querySelectorAll(".gcon-pillar-head").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const detail = document.getElementById(btn.getAttribute("aria-controls"));
+            if (!detail) return;
+            const open = detail.classList.toggle("d-none") === false;
+            btn.setAttribute("aria-expanded", String(open));
+            btn.closest(".gcon-pillar").classList.toggle("open", open);
+        });
+    });
+}
+
+// ---------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------
+
+const SCHEDULER_STATE = {
+    running: ["bg-success", "Running"],
+    paused: ["bg-warning text-dark", "Paused"],
+    standby: ["bg-info text-dark", "Standby"],
+    stalled: ["bg-danger", "Stalled"],
+    dead: ["bg-danger", "Stopped"],
+};
+const SCHEDULER_BANNER = {
+    paused: "The scheduler is paused: queued jobs will not be dispatched until it is resumed.",
+    standby: "This coordinator is a standby, not the HA leader. Only the leader dispatches jobs.",
+    stalled: "The scheduler loop has not ticked recently. It may be hung; check the coordinator logs.",
+    dead: "The scheduler thread is not running. No jobs will be dispatched until the coordinator is restarted.",
+};
+
+function fmtAgo(seconds) {
+    return seconds === null || seconds === undefined ? "--" : `${formatAge(seconds)} ago`;
+}
+
+async function toggleScheduler(paused) {
+    const btn = document.getElementById("sch-toggle");
+    if (btn) btn.disabled = true;
+    try {
+        await fetchJson(`/cluster/scheduler/${paused ? "resume" : "pause"}`, { method: "POST" });
+    } catch (err) {
+        showToast(err.message || "Could not change the scheduler state.", true);
+    }
+    await loadSchedulerTab();
+}
+
+async function loadSchedulerTab() {
+    let s;
+    try {
+        s = await fetchJson("/management/scheduler");
+    } catch (err) {
+        setMsg("sch-since", "Unavailable (needs 'View monitoring' or the request failed)");
+        return;
+    }
+    const [cls, label] = SCHEDULER_STATE[s.state] || ["bg-secondary", s.state];
+    const badge = document.getElementById("sch-state");
+    badge.className = `badge ${cls}`;
+    badge.textContent = label;
+    setMsg("sch-since", `counters since ${new Date(s.counting_since).toLocaleString()} (reset when the coordinator restarts)`
+        + ` · loop: ${s.dispatch.loop_state.replaceAll("_", " ")}`);
+
+    const banner = document.getElementById("sch-banner");
+    banner.classList.toggle("d-none", !SCHEDULER_BANNER[s.state]);
+    banner.textContent = SCHEDULER_BANNER[s.state] || "";
+
+    const toggle = document.getElementById("sch-toggle");
+    toggle.disabled = s.state === "dead" || s.state === "standby";
+    toggle.textContent = s.paused ? "Resume" : "Pause";
+    toggle.onclick = () => toggleScheduler(s.paused);
+
+    setText("sch-pending", s.queue.pending_jobs);
+    setText("sch-oldest", fmtSec(s.queue.oldest_pending_seconds));
+    setText("sch-blocked", s.queue.blocked_now);
+
+    const r = s.dispatch.rate_per_minute;
+    setText("sch-total", s.dispatch.total);
+    setText("sch-rate", `${r["1m"].toFixed(1)} / ${r["5m"].toFixed(1)} / ${r["15m"].toFixed(1)}`);
+    setText("sch-last", s.dispatch.last_at ? fmtAgo((Date.now() - new Date(s.dispatch.last_at).getTime()) / 1000) : "none yet");
+
+    const f = s.failures;
+    setText("sch-fp", f.failed_passes_total);
+    setText("sch-fk", f.last_kind ? (REASON_TEXT[f.last_kind] || f.last_kind) : "none");
+    setText("sch-fa", f.last_at ? fmtAgo((Date.now() - new Date(f.last_at).getTime()) / 1000) : "--");
+    setMsg("sch-last-msg", f.last_message ? `Last failure: ${f.last_message}` : "No scheduling failures since counting began.");
+
+    setText("sch-maxatt", s.retry.max_attempts ?? "--");
+    setText("sch-retried", s.retry.jobs_retried);
+    setText("sch-cap", s.retry.failed_at_attempt_cap);
+    setMsg("sch-backoff", "Backoff: none. A job that cannot be placed goes to the back of the queue and is tried again on the next pass; "
+        + "a failed job is retried only when someone retries it, up to the attempt cap. Retry counts cover jobs the coordinator holds in memory.");
+
+    const reasons = Object.values((s.queue.waiting && s.queue.waiting.by_reason) || {});
+    fillTable("sch-reasons-body", reasons.map(x => [x.label, String(x.count), fmtSec(x.oldest_age_seconds)]), "Nothing is waiting", 3);
+    fillTable("sch-control-body", s.recent_control.map(e => [
+        e.event_type === "SCHEDULER_PAUSED" ? "Paused" : "Resumed", new Date(e.at).toLocaleString()]),
+        "No pause/resume since the coordinator started", 2);
+}
+
+const REASON_TEXT = {
+    no_available_nodes: "no worker free",
+    awaiting_matching_worker: "needs a matching worker",
+    insufficient_replica_workers: "not enough workers for replicas",
+};
 
 // ---------------------------------------------------------------
 // Trust Center
@@ -1795,6 +2599,7 @@ function setupUsersTab() {
         submitBtn.addEventListener("click", async () => {
             const name = document.getElementById("add-user-name").value.trim();
             const email = document.getElementById("add-user-email").value.trim();
+            const username = document.getElementById("add-user-username").value.trim() || null;
             const role = document.getElementById("add-user-role").value;
             const organization_id = document.getElementById("add-user-org").value || null;
             const password = document.getElementById("add-user-password").value || null;
@@ -1804,11 +2609,12 @@ function setupUsersTab() {
                 await fetchJson("/management/users", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name, email, role, organization_id, password }),
+                    body: JSON.stringify({ name, email, role, organization_id, password, username }),
                 });
                 bootstrap.Modal.getInstance(document.getElementById("addUserModal")).hide();
                 document.getElementById("add-user-name").value = "";
                 document.getElementById("add-user-email").value = "";
+                document.getElementById("add-user-username").value = "";
                 document.getElementById("add-user-password").value = "";
                 await loadUsersTab();
             } catch (err) {
@@ -2431,9 +3237,10 @@ function connectLiveSocket() {
         if (isPaused) return;
         const data = JSON.parse(event.data);
         if (currentTab === "control-center") {
-            renderFeed("activity-feed", data.events);
             renderHomeDashboard(data);
             setText("last-updated", new Date().toLocaleTimeString());
+        } else if (currentTab === "workload") {
+            renderWorkload(data);
         }
         setConnectionStatus(true);
     };
@@ -3219,67 +4026,6 @@ function setupNotifications() {
 }
 
 // ---------------------------------------------------------------
-// Global search
-// ---------------------------------------------------------------
-
-function setupGlobalSearch() {
-    const input = document.getElementById("global-search");
-    const results = document.getElementById("global-search-results");
-    if (!input || !results) return;
-
-    let debounceTimer;
-    input.addEventListener("input", () => {
-        clearTimeout(debounceTimer);
-        const query = input.value.trim();
-        if (!query) {
-            results.classList.add("d-none");
-            return;
-        }
-        debounceTimer = setTimeout(async () => {
-            try {
-                const data = await fetchJson(`/management/search?q=${encodeURIComponent(query)}`);
-                renderSearchResults(data);
-            } catch (err) {
-                console.error("Search failed:", err);
-            }
-        }, 250);
-    });
-
-    document.addEventListener("click", (e) => {
-        if (!results.contains(e.target) && e.target !== input) {
-            results.classList.add("d-none");
-        }
-    });
-}
-
-function renderSearchResults(data) {
-    const results = document.getElementById("global-search-results");
-    if (!results) return;
-
-    const sections = [
-        ["Users", data.users, u => `${u.name} · ${u.email}`],
-        ["Organizations", data.organizations, o => o.name],
-        ["API Keys", data.api_keys, k => k.name],
-        ["Jobs", data.jobs, j => `${j.job_id} · ${j.status}`],
-        ["Nodes", data.nodes, n => `${n.node_id} · ${n.status}`],
-    ];
-
-    let html = "";
-    let hasAny = false;
-    for (const [label, items, formatter] of sections) {
-        if (!items || items.length === 0) continue;
-        hasAny = true;
-        html += `<div class="gcon-search-group-label">${label}</div>`;
-        for (const item of items.slice(0, 5)) {
-            html += `<div class="gcon-search-result-item">${escapeHtml(formatter(item))}</div>`;
-        }
-    }
-
-    results.innerHTML = hasAny ? html : `<div class="gcon-search-result-item text-secondary">No matches.</div>`;
-    results.classList.remove("d-none");
-}
-
-// ---------------------------------------------------------------
 // Client drill-in (Overview + Usage + live current-jobs list, from
 // the real org usage rollup cached in companiesData for the summary
 // half, plus an on-demand fetch of this client's recent jobs -
@@ -3546,18 +4292,69 @@ async function loadHealthBadge() {
 // Current user / logout / change password
 // ---------------------------------------------------------------
 
+// "j***@example.com": the profile menu never prints the full address.
+function maskEmail(email) {
+    const [local, domain] = String(email || "").split("@");
+    if (!domain) return "";
+    return `${local.slice(0, 1)}***@${domain}`;
+}
+
+let currentUsername = null;
+
 async function loadCurrentUser() {
     try {
         const user = await fetchJson("/auth/me");
-        setText("navbar-user-avatar", user.avatar_initials);
-        setText("navbar-user-name", user.name);
-        setText("navbar-user-role", `${user.role} · ${user.email}`);
+        currentUsername = user.username || null;
+        // Only the chosen username is shown -- the official name never is.
+        const avatar = document.getElementById("navbar-user-avatar");
+        if (avatar) {
+            if (currentUsername) avatar.textContent = currentUsername.slice(0, 2).toUpperCase();
+            else avatar.innerHTML = '<i class="bi bi-person"></i>';
+        }
+        setText("navbar-user-name", currentUsername || "Account");
+        setText("navbar-user-menu-name", currentUsername || "No username yet");
+        setText("navbar-user-role", user.role);
+        setText("navbar-user-email", maskEmail(user.email));
+        setText("set-username-label", currentUsername ? "Change username" : "Set username");
         currentUserPermissions = new Set(user.permissions || []);
         applyPermissionGating();
     } catch (err) {
         // fetchJson already redirects to /login on 401
         console.error("Failed to load current user:", err);
     }
+}
+
+function setupUsernameModal() {
+    const link = document.getElementById("set-username-link");
+    const modalEl = document.getElementById("usernameModal");
+    if (!link || !modalEl) return;
+    const input = document.getElementById("username-input");
+    const errorEl = document.getElementById("username-error");
+
+    link.addEventListener("click", (e) => {
+        e.preventDefault();
+        input.value = currentUsername || "";
+        errorEl.classList.add("d-none");
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    });
+
+    const save = async () => {
+        errorEl.classList.add("d-none");
+        try {
+            await fetchJson("/auth/profile", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: input.value.trim() }),
+            });
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            await loadCurrentUser();
+        } catch (err) {
+            errorEl.textContent = err.message || "Could not save the username.";
+            errorEl.classList.remove("d-none");
+        }
+    };
+    document.getElementById("username-submit").addEventListener("click", save);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
 }
 
 function setupAuthMenu() {
@@ -3667,6 +4464,7 @@ function setupSidebarCollapse() {
 // ---------------------------------------------------------------
 
 setupTabNav();
+setupNavGroups();
 setupExplorerNav();
 setupControls();
 setupUsersTab();
@@ -3677,17 +4475,20 @@ setupBillingTab();
 setupWebhooksTab();
 setupOrganizationsTab();
 setupTeamsTab();
-setupGlobalSearch();
 setupDrawer();
 setupAuthMenu();
+setupUsernameModal();
 setupNotifications();
 setupEventsTab();
 setupCompaniesTable();
 bindPanelLinks();
+setupOverviewScope();
+setupPillarToggles();
 setupThemeToggle();
 setupSidebarCollapse();
 
 bootstrapHomeDashboard();
+loadOverviewExtras();
 loadCurrentUser();
 refreshDashboard();
 loadHealthBadge();
@@ -3696,5 +4497,8 @@ updateClock();
 
 setInterval(() => { if (!isPaused) refreshDashboard(); }, REFRESH_INTERVAL_MS);
 setInterval(loadHealthBadge, REFRESH_INTERVAL_MS);
+// Overview panels that depend on the scope bar refresh on their own, slower
+// cadence (the live counts above them already update every 2s over the socket).
+setInterval(() => { if (!isPaused && currentTab === "control-center") loadOverviewExtras(); }, 10000);
 setInterval(refreshNotifBadge, REFRESH_INTERVAL_MS);
 setInterval(updateClock, 1000);

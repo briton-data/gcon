@@ -11,11 +11,14 @@
     from the same bootstrap/websocket payload the rest of the Overview
     uses, so there is one data path, not a second one.
 -->
-<div class="gcon-panel" id="pillars-panel">
+<div class="gcon-panel" id="pillars-panel" data-scope-panel="lifecycle">
 
     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-        <h5 class="mb-0"><i class="bi bi-columns-gap me-2"></i>GCON Control Plane</h5>
-        <span class="text-secondary small">Orchestrate &rarr; Execute &rarr; Verify &rarr; Assure &rarr; Evidence</span>
+        <div>
+            <h5 class="mb-0"><i class="bi bi-columns-gap me-2"></i>GCON Control Plane</h5>
+            <div class="gcon-scope-note" id="lifecycle-note"></div>
+        </div>
+        <span class="text-secondary small">Orchestrate &rarr; Execute &rarr; Verify &rarr; Assure &rarr; Evidence &rarr; Proof &middot; click a stage for detail</span>
     </div>
 
     <div class="gcon-panel-body" style="min-height:auto;">
@@ -23,11 +26,19 @@
 
             <div class="col-lg col-md-4 col-6">
                 <div class="gcon-pillar" id="pillar-orchestrate">
-                    <div class="gcon-pillar-title">
-                        <i class="bi bi-diagram-2 me-1"></i>Orchestrate
-                    </div>
-                    <div class="gcon-pillar-stats">
-                        <div class="stat"><span class="n" id="pillar-orch-queued">--</span><span class="l">queued</span></div>
+                    <button type="button" class="gcon-pillar-head" aria-expanded="false" aria-controls="pillar-orch-detail">
+                        <span class="gcon-pillar-title">
+                            <i class="bi bi-diagram-2 me-1"></i>Orchestrate
+                        </span>
+                        <span class="gcon-pillar-sub" id="pillar-orch-sub">--</span>
+                        <span class="gcon-pillar-flag na" id="pillar-orch-flag">--</span>
+                        <i class="bi bi-chevron-down gcon-pillar-chevron"></i>
+                    </button>
+                    <div class="gcon-pillar-stats d-none" id="pillar-orch-detail">
+                        <div class="stat"><span class="n" id="pillar-orch-pending">--</span><span class="l" id="pillar-orch-pending-l">pending</span></div>
+                        <div class="stat"><span class="n" id="pillar-orch-running">--</span><span class="l">running</span></div>
+                        <div class="stat"><span class="n" id="pillar-orch-completed">--</span><span class="l">completed</span></div>
+                        <div class="stat"><span class="n" id="pillar-orch-failed">--</span><span class="l">failed</span></div>
                         <div class="stat"><span class="n" id="pillar-orch-cancelled">--</span><span class="l">cancelled</span></div>
                     </div>
                 </div>
@@ -35,23 +46,36 @@
 
             <div class="col-lg col-md-4 col-6">
                 <div class="gcon-pillar" id="pillar-execute">
-                    <div class="gcon-pillar-title">
-                        <i class="bi bi-cpu me-1"></i>Execute
-                    </div>
-                    <div class="gcon-pillar-stats">
+                    <button type="button" class="gcon-pillar-head" aria-expanded="false" aria-controls="pillar-exec-detail">
+                        <span class="gcon-pillar-title">
+                            <i class="bi bi-cpu me-1"></i>Execute
+                        </span>
+                        <span class="gcon-pillar-sub" id="pillar-exec-sub">--</span>
+                        <span class="gcon-pillar-flag na" id="pillar-exec-flag">--</span>
+                        <i class="bi bi-chevron-down gcon-pillar-chevron"></i>
+                    </button>
+                    <div class="gcon-pillar-stats d-none" id="pillar-exec-detail">
                         <div class="stat"><span class="n" id="pillar-exec-workers">--</span><span class="l">workers active</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-pending">--</span><span class="l" id="pillar-exec-pending-l">pending</span></div>
                         <div class="stat"><span class="n" id="pillar-exec-running">--</span><span class="l">running</span></div>
-                        <div class="stat"><span class="n" id="pillar-exec-failures">--</span><span class="l">execution failures</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-completed">--</span><span class="l">completed</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-failed">--</span><span class="l">failed</span></div>
+                        <div class="stat"><span class="n" id="pillar-exec-cancelled">--</span><span class="l">cancelled</span></div>
                     </div>
                 </div>
             </div>
 
             <div class="col-lg col-md-4 col-6">
                 <div class="gcon-pillar" id="pillar-verify">
-                    <div class="gcon-pillar-title">
-                        <i class="bi bi-patch-check me-1"></i>Verify
-                    </div>
-                    <div class="gcon-pillar-stats">
+                    <button type="button" class="gcon-pillar-head" aria-expanded="false" aria-controls="pillar-verify-detail">
+                        <span class="gcon-pillar-title">
+                            <i class="bi bi-patch-check me-1"></i>Verify
+                        </span>
+                        <span class="gcon-pillar-sub" id="pillar-verify-sub">--</span>
+                        <span class="gcon-pillar-flag na" id="pillar-verify-flag">--</span>
+                        <i class="bi bi-chevron-down gcon-pillar-chevron"></i>
+                    </button>
+                    <div class="gcon-pillar-stats d-none" id="pillar-verify-detail">
                         <div class="stat"><span class="n" id="pillar-verify-verified">--</span><span class="l">verified</span></div>
                         <div class="stat"><span class="n" id="pillar-verify-pending">--</span><span class="l">unverified</span></div>
                     </div>
@@ -60,10 +84,15 @@
 
             <div class="col-lg col-md-4 col-6">
                 <div class="gcon-pillar" id="pillar-assure">
-                    <div class="gcon-pillar-title">
-                        <i class="bi bi-shield-check me-1"></i>Assure
-                    </div>
-                    <div class="gcon-pillar-stats">
+                    <button type="button" class="gcon-pillar-head" aria-expanded="false" aria-controls="pillar-assure-detail">
+                        <span class="gcon-pillar-title">
+                            <i class="bi bi-shield-check me-1"></i>Assure
+                        </span>
+                        <span class="gcon-pillar-sub" id="pillar-assure-sub">--</span>
+                        <span class="gcon-pillar-flag na" id="pillar-assure-flag">--</span>
+                        <i class="bi bi-chevron-down gcon-pillar-chevron"></i>
+                    </button>
+                    <div class="gcon-pillar-stats d-none" id="pillar-assure-detail">
                         <div class="stat"><span class="n" id="pillar-assure-compliant">--</span><span class="l">compliant</span></div>
                         <div class="stat"><span class="n" id="pillar-assure-exceptions">--</span><span class="l">policy exceptions</span></div>
                     </div>
@@ -94,12 +123,35 @@
                     does not make.
                 -->
                 <div class="gcon-pillar" id="pillar-evidence">
-                    <div class="gcon-pillar-title">
-                        <i class="bi bi-file-earmark-lock me-1"></i>Evidence
-                    </div>
-                    <div class="gcon-pillar-stats">
+                    <button type="button" class="gcon-pillar-head" aria-expanded="false" aria-controls="pillar-evidence-detail">
+                        <span class="gcon-pillar-title">
+                            <i class="bi bi-file-earmark-lock me-1"></i>Evidence
+                        </span>
+                        <span class="gcon-pillar-sub" id="pillar-evidence-sub">--</span>
+                        <span class="gcon-pillar-flag na" id="pillar-evidence-flag">--</span>
+                        <i class="bi bi-chevron-down gcon-pillar-chevron"></i>
+                    </button>
+                    <div class="gcon-pillar-stats d-none" id="pillar-evidence-detail">
                         <div class="stat"><span class="n" id="pillar-evidence-generated">--</span><span class="l">receipts generated</span></div>
                         <div class="stat"><span class="n" id="pillar-evidence-awaiting">--</span><span class="l">completed jobs missing a receipt</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg col-md-4 col-6">
+                <!--
+                    Cryptographic Proof (ZK / TEE) -- shown, not hidden,
+                    and marked unavailable: nothing in this codebase
+                    produces one (see the Evidence note above). The
+                    customer app lists it as unavailable too.
+                -->
+                <div class="gcon-pillar gcon-pillar-unavailable" id="pillar-proof">
+                    <div class="gcon-pillar-title">
+                        <i class="bi bi-slash-circle me-1"></i>Cryptographic Proof
+                    </div>
+                    <div class="gcon-pillar-stats">
+                        <div class="stat"><span class="n">Unavailable</span></div>
+                        <div class="stat"><span class="l">Not implemented (no ZK or TEE)</span></div>
                     </div>
                 </div>
             </div>

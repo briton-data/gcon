@@ -1,0 +1,26 @@
+<!--
+    GCON HA / Coordinator — leader-election state only. Filled by
+    dashboard.js loadHaTab() from /management/ha-status (same endpoint
+    the System Services "Coordinator Mode" row already uses).
+    No failover-event log or per-coordinator health: not tracked yet.
+-->
+<div class="gcon-panel" id="ha-panel">
+
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-shield-check me-2"></i>HA / Coordinator</h5>
+        <span class="text-secondary small" id="ha-mode-note"></span>
+    </div>
+
+    <div class="gcon-panel-body" style="min-height:auto;">
+        <div class="gcon-service-list">
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot" id="ha-dot-role"></span>This coordinator</span><span class="gcon-service-value" id="ha-role">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot invisible"></span>Coordinator ID</span><span class="gcon-service-value" id="ha-self-id">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot invisible"></span>Active leader</span><span class="gcon-service-value" id="ha-leader-id">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot" id="ha-dot-lease"></span>Lease</span><span class="gcon-service-value" id="ha-lease-state">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot invisible"></span>Lease expires in</span><span class="gcon-service-value" id="ha-lease-remaining">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot invisible"></span>Leader since</span><span class="gcon-service-value" id="ha-leader-since">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot invisible"></span>Leadership term</span><span class="gcon-service-value" id="ha-term" title="Increments each time a different coordinator takes over the lease">--</span></div>
+        </div>
+    </div>
+
+</div>

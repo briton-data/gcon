@@ -1,0 +1,38 @@
+<!--
+    Global scope for the Overview. Every panel below says which of these
+    filters it actually honours (data-scope-panel + the note under its
+    title), because not every aggregate can be sliced every way yet:
+    jobs carry a customer and (once run) a worker region, incidents carry
+    a service, history is time-bounded. Options are filled by
+    dashboard.js from live data -- nothing here is a fixed list.
+-->
+<div class="gcon-scope-bar" id="scope-bar">
+    <div class="gcon-scope-fields">
+        <label class="gcon-scope-field">
+            <span class="l">Time range</span>
+            <select class="form-select form-select-sm" id="scope-range">
+                <option value="15">Last 15 min</option>
+                <option value="60" selected>Last 1 hour</option>
+                <option value="360">Last 6 hours</option>
+                <option value="1440">Last 24 hours</option>
+            </select>
+        </label>
+        <label class="gcon-scope-field">
+            <span class="l">Customer</span>
+            <select class="form-select form-select-sm" id="scope-org"><option value="">All customers</option></select>
+        </label>
+        <label class="gcon-scope-field">
+            <span class="l">Region</span>
+            <select class="form-select form-select-sm" id="scope-region"><option value="">All regions</option></select>
+        </label>
+        <label class="gcon-scope-field">
+            <span class="l">Service</span>
+            <select class="form-select form-select-sm" id="scope-service"><option value="">All services</option></select>
+        </label>
+        <div class="gcon-scope-field">
+            <span class="l">Environment</span>
+            <span class="gcon-scope-env" id="scope-env">--</span>
+        </div>
+    </div>
+    <div class="gcon-scope-summary" id="scope-summary"></div>
+</div>

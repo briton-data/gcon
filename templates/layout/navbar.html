@@ -27,32 +27,12 @@
                 nav source avoids that drift.
             -->
 
-            <div class="ms-auto d-flex align-items-center gap-3 position-relative flex-wrap py-1">
+            <!-- Left corner: the clock. -->
+            <span id="clock" class="gcon-clock text-secondary small d-none d-lg-inline me-auto">
+                --:--:--
+            </span>
 
-                <div class="gcon-status-strip d-none d-xl-flex" id="global-status-strip">
-                    <span class="gcon-status-pill" id="status-pill-coordinator" title="Coordinator">
-                        <span class="dot"></span>Coordinator
-                    </span>
-                    <span class="gcon-status-pill" id="status-pill-scheduler" title="Scheduler">
-                        <span class="dot"></span>Scheduler
-                    </span>
-                    <span class="gcon-status-pill" id="status-pill-receipts" title="Receipt Service">
-                        <span class="dot"></span>Receipts
-                    </span>
-                    <span class="gcon-status-pill" id="status-pill-storage" title="Storage">
-                        <span class="dot"></span>Storage
-                    </span>
-                    <span class="gcon-status-pill" id="status-pill-heartbeat" title="Time since the last node heartbeat">
-                        <span class="dot"></span>Heartbeat --
-                    </span>
-                </div>
-
-                <div class="position-relative d-none d-lg-block">
-                    <input type="text" id="global-search" class="form-control form-control-sm"
-                           placeholder="🔍 Search executions, receipts, nodes…" style="width:220px;"
-                           autocomplete="off" name="gcon-global-search" spellcheck="false">
-                    <div id="global-search-results" class="gcon-search-results d-none"></div>
-                </div>
+            <div class="d-flex align-items-center gap-3 position-relative flex-wrap py-1">
 
                 <span id="cluster-health-badge" class="gcon-degraded-badge">
                     Connecting…
@@ -69,10 +49,6 @@
 
                 <span id="conn-status" class="badge bg-secondary d-none">
                     ● WS Connecting...
-                </span>
-
-                <span id="clock" class="text-secondary small d-none d-lg-inline">
-                    --:--:--
                 </span>
 
                 <div class="dropdown">
@@ -97,15 +73,23 @@
                     </div>
                 </div>
 
+                <!-- Profile, in the right corner. Shows only the user's chosen
+                     username -- never their official name -- and keeps the
+                     email masked, so nothing personal sits on screen by default. -->
                 <div class="dropdown">
-                    <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button"
-                            data-bs-toggle="dropdown">
-                        <span class="gcon-avatar" id="navbar-user-avatar">--</span>
-                        <span id="navbar-user-name" class="ms-1">Loading...</span>
+                    <button class="btn btn-sm btn-outline-light dropdown-toggle gcon-profile-btn" type="button"
+                            data-bs-toggle="dropdown" aria-label="Profile menu">
+                        <span class="gcon-avatar" id="navbar-user-avatar"><i class="bi bi-person"></i></span>
+                        <span id="navbar-user-name" class="ms-1">Account</span>
                     </button>
-                    <ul class="dropdown-menu dropdown-menu-end gcon-modal">
-                        <li><span class="dropdown-item-text text-secondary small" id="navbar-user-role">--</span></li>
+                    <ul class="dropdown-menu dropdown-menu-end gcon-modal gcon-profile-menu">
+                        <li class="px-3 pt-2 pb-1">
+                            <div class="fw-semibold" id="navbar-user-menu-name">--</div>
+                            <div class="text-secondary small" id="navbar-user-role">--</div>
+                            <div class="text-secondary small" id="navbar-user-email">--</div>
+                        </li>
                         <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="#" id="set-username-link"><i class="bi bi-at me-2"></i><span id="set-username-label">Set username</span></a></li>
                         <li><a class="dropdown-item" href="#" id="change-password-link"><i class="bi bi-shield-lock me-2"></i>Change Password</a></li>
                         <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item" href="#" id="logout-link"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
@@ -142,6 +126,29 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="change-password-submit">Change Password</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Username Modal -->
+<div class="modal fade" id="usernameModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content gcon-modal">
+            <div class="modal-header">
+                <h5 class="modal-title">Choose a username</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-secondary small">This is the only name shown in the dashboard header, instead of your official name.</p>
+                <div id="username-error" class="alert alert-danger d-none"></div>
+                <label class="form-label" for="username-input">Username</label>
+                <input type="text" class="form-control" id="username-input" maxlength="24" autocomplete="off" placeholder="e.g. croc">
+                <div class="form-text">2-24 characters: letters, digits, . _ - (no spaces). Leave empty to remove it.</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="username-submit">Save</button>
             </div>
         </div>
     </div>

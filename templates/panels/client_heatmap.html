@@ -1,0 +1,26 @@
+<!--
+    One cell per customer, coloured by how unhealthy its work is. Replaces
+    the per-client list: a list stops being scannable past a handful of
+    customers, a grid does not. Cells open the existing client drawer.
+    Filled by dashboard.js from /management/observability/summary
+    ("customers"), so the region filter is applied server-side.
+-->
+<div class="gcon-panel h-100" id="heatmap-panel" data-scope-panel="heatmap">
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <div>
+            <h5 class="mb-0"><i class="bi bi-grid-3x3-gap me-2"></i>Customer heatmap</h5>
+            <div class="gcon-scope-note" id="heatmap-note"></div>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <select class="form-select form-select-sm" id="heatmap-metric" aria-label="Colour by">
+                <option value="failure">Colour: failure rate</option>
+                <option value="wait">Colour: oldest queue wait</option>
+            </select>
+            <a href="#" class="gcon-panel-link" data-tab="cluster">View all &rarr;</a>
+        </div>
+    </div>
+    <div class="gcon-panel-body" style="min-height:auto;">
+        <div class="gcon-heatmap" id="heatmap-grid"></div>
+        <div class="text-secondary small mt-2" id="heatmap-legend"></div>
+    </div>
+</div>

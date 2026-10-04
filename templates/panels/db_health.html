@@ -1,0 +1,15 @@
+<!-- Control-plane database health -->
+<div class="gcon-panel mb-3" id="db-health-panel">
+    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-database me-2"></i>Control-plane database</h5>
+        <span class="text-secondary small" id="db-note"></span>
+    </div>
+    <div class="gcon-panel-body gcon-service-list" style="min-height:auto;">
+            <div class="gcon-service-row"><span class="gcon-service-name">Engine</span><span class="gcon-service-value" id="db-dialect">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Read latency</span><span class="gcon-service-value" id="db-read">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Write latency (last sample)</span><span class="gcon-service-value" id="db-write">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Size</span><span class="gcon-service-value" id="db-size">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">Schema version</span><span class="gcon-service-value" id="db-schema">--</span></div>
+            <div class="gcon-service-row"><span class="gcon-service-name">History samples stored</span><span class="gcon-service-value" id="db-snaps">--</span></div>
+    </div>
+</div>

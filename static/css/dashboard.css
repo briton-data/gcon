@@ -646,42 +646,6 @@
 }
 
 /* ---------------------------------------------------------------
-   Global search results dropdown
-   --------------------------------------------------------------- */
-
-.gcon-search-results {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    right: 0;
-    background: var(--surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    max-height: 360px;
-    overflow-y: auto;
-    z-index: 1060;
-    box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
-}
-
-.gcon-search-group-label {
-    padding: 8px 12px 4px;
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-    color: var(--muted);
-}
-
-.gcon-search-result-item {
-    padding: 6px 12px;
-    font-size: .85rem;
-    color: var(--text);
-}
-
-.gcon-search-result-item:hover {
-    background: rgba(255, 255, 255, .05);
-}
-
-/* ---------------------------------------------------------------
    Notifications & row links
    --------------------------------------------------------------- */
 
@@ -798,17 +762,6 @@
         margin-bottom: 4px;
         flex-basis: 100%;
     }
-}
-
-/* ==========================================================
-   Home Dashboard — Global Status Bar (per-service pills)
-   ========================================================== */
-
-.gcon-status-strip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
 }
 
 /* ==========================================================
@@ -1853,6 +1806,21 @@ a { text-decoration: none; }
 }
 .gcon-sidebar-collapse-btn:hover { background: var(--surface-2); color: var(--text); }
 
+/* Collapsible nav groups (dropdowns) */
+.gcon-sidebar .gcon-nav-group-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+}
+.gcon-sidebar .gcon-nav-group-toggle:hover { color: var(--text); }
+.gcon-sidebar .gcon-nav-chevron { font-size: .7rem; transition: transform .15s ease; }
+.gcon-sidebar .gcon-nav-group-toggle[aria-expanded="false"] .gcon-nav-chevron { transform: rotate(-90deg); }
+.gcon-sidebar .gcon-nav-collapsed { display: none; }
+/* Icon rail has no group headers, so never hide items there */
+.gcon-sidebar.gcon-sidebar-collapsed .gcon-nav-collapsed { display: block; }
+
 /* Collapsed sidebar: icon rail only */
 .gcon-sidebar.gcon-sidebar-collapsed { width: 58px; }
 .gcon-sidebar.gcon-sidebar-collapsed .gcon-sidebar-group-label,
@@ -1862,30 +1830,6 @@ a { text-decoration: none; }
     display: none;
 }
 .gcon-sidebar.gcon-sidebar-collapsed .list-group-item { justify-content: center; }
-
-/* ---------- Global status pills (System Services strip) ---------- */
-
-.gcon-status-strip { gap: 14px; }
-
-.gcon-status-pill {
-    background: none;
-    border: none;
-    padding: 0;
-    gap: 7px;
-    font-size: .78rem;
-    font-weight: 500;
-    color: var(--text-dim);
-}
-
-.gcon-status-pill .dot {
-    width: 7px;
-    height: 7px;
-    box-shadow: none !important;
-}
-
-.gcon-status-pill.ok .dot { background: var(--success); }
-.gcon-status-pill.warn .dot { background: var(--warning); }
-.gcon-status-pill.bad .dot { background: var(--danger); }
 
 .gcon-degraded-badge {
     display: inline-flex;
@@ -2122,105 +2066,6 @@ a { text-decoration: none; }
 .gcon-service-value.bad { color: var(--danger); }
 .gcon-service-value.muted { color: var(--muted); font-weight: 500; }
 
-/* ---------- Executions by Company (compact) ---------- */
-
-.gcon-company-compact-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 2px;
-    border-bottom: 1px solid var(--border-subtle);
-    cursor: pointer;
-    gap: 10px;
-}
-.gcon-company-compact-row:last-child { border-bottom: none; }
-.gcon-company-compact-row:hover { background: var(--surface-2); }
-
-.gcon-company-compact-name {
-    font-size: .84rem;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.gcon-company-compact-stats {
-    display: flex;
-    gap: 14px;
-    font-size: .74rem;
-}
-.gcon-company-compact-stats .stat { text-align: right; }
-.gcon-company-compact-stats .stat .n { display: block; font-weight: 700; font-size: .86rem; }
-.gcon-company-compact-stats .stat .l { color: var(--muted); font-size: .64rem; text-transform: uppercase; letter-spacing: .03em; }
-.gcon-company-compact-stats .stat.running .n { color: var(--info); }
-.gcon-company-compact-stats .stat.completed .n { color: var(--success); }
-.gcon-company-compact-stats .stat.failed .n { color: var(--danger); }
-
-/* ---------- Receipts donut ---------- */
-
-.gcon-donut-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 14px;
-}
-
-.gcon-donut {
-    position: relative;
-    width: 128px;
-    height: 128px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.gcon-donut::before {
-    content: "";
-    position: absolute;
-    inset: 16px;
-    background: var(--surface);
-    border-radius: 50%;
-}
-
-.gcon-donut-center {
-    position: relative;
-    text-align: center;
-    z-index: 1;
-}
-.gcon-donut-center .n { display: block; font-size: 1.4rem; font-weight: 700; color: var(--text); }
-.gcon-donut-center .l { font-size: .66rem; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
-
-.gcon-donut-legend { width: 100%; }
-.gcon-donut-legend .item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: .78rem;
-    padding: 3px 0;
-    color: var(--text-dim);
-}
-.gcon-donut-legend .item .swatch { width: 8px; height: 8px; border-radius: 2px; margin-right: 7px; display: inline-block; }
-
-/* ---------- Recent Activity (compact) ---------- */
-
-.gcon-activity-feed.compact .gcon-activity-item {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border-subtle);
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
-}
-.gcon-activity-feed.compact .gcon-activity-item:last-child { border-bottom: none; }
-.gcon-activity-feed.compact .gcon-activity-time {
-    font-size: .7rem;
-    color: var(--muted);
-    flex: 0 0 auto;
-    font-variant-numeric: tabular-nums;
-}
-.gcon-activity-feed.compact .gcon-activity-message {
-    font-size: .8rem;
-    color: var(--text);
-}
-
 /* ---------- Tables ---------- */
 
 .gcon-table thead th {
@@ -2354,3 +2199,167 @@ a { text-decoration: none; }
 #pillar-verify      .gcon-pillar-title { color: var(--success); }
 #pillar-assure      .gcon-pillar-title { color: var(--warning); }
 #pillar-evidence    .gcon-pillar-title { color: var(--violet); }
+#pillar-proof       .gcon-pillar-title { color: var(--muted); }
+.gcon-pillar-unavailable .stat .n { font-size: 1rem; color: var(--muted); }
+
+/* ---------------------------------------------------------------
+   Overview redesign: scope bar, incidents, collapsible pillars,
+   trend tiles, customer heatmap, event groups.
+   Colours come from the existing theme variables only.
+   --------------------------------------------------------------- */
+
+.gcon-scope-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+.gcon-scope-fields { display: flex; flex-wrap: wrap; gap: 12px; }
+.gcon-scope-field { display: flex; flex-direction: column; gap: 3px; min-width: 150px; margin: 0; }
+.gcon-scope-field .l { font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.gcon-scope-env { font-size: .82rem; font-weight: 600; padding: 4px 0; color: var(--text); }
+.gcon-scope-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gcon-scope-active { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--primary); font-weight: 700; }
+.gcon-scope-chip {
+    font-size: .72rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--primary-dim);
+    color: var(--text);
+    white-space: nowrap;
+}
+.gcon-scope-note { font-size: .7rem; color: var(--muted); margin-top: 2px; }
+
+/* Incidents */
+.gcon-inc-list { display: flex; flex-direction: column; gap: 8px; }
+.gcon-inc-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle);
+    border-left-width: 4px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+.gcon-inc-row.critical { border-left-color: var(--danger); background: var(--danger-dim); }
+.gcon-inc-row.warning { border-left-color: var(--warning); }
+.gcon-inc-title { font-weight: 600; font-size: .9rem; }
+.gcon-inc-impact { font-size: .78rem; color: var(--text-dim); margin-top: 2px; }
+.gcon-inc-meta { font-size: .74rem; color: var(--muted); text-align: right; line-height: 1.5; }
+.gcon-inc-owner { color: var(--text-dim); }
+.gcon-inc-owner.none { color: var(--warning); }
+.gcon-inc-empty { font-size: .85rem; color: var(--success); padding: 6px 2px; }
+@media (max-width: 768px) {
+    .gcon-inc-row { grid-template-columns: auto minmax(0, 1fr); }
+    .gcon-inc-meta { text-align: left; grid-column: 1 / -1; }
+}
+
+/* Pillars: collapsed by default, one summary line + an exception flag */
+.gcon-pillar-head {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 8px;
+    align-items: center;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.gcon-pillar-head .gcon-pillar-title { padding: 0; border: 0; grid-column: 1; }
+.gcon-pillar-sub { grid-column: 1 / -1; font-size: .78rem; color: var(--text-dim); }
+.gcon-pillar-chevron { grid-column: 2; grid-row: 1; color: var(--muted); transition: transform .15s; }
+.gcon-pillar.open .gcon-pillar-chevron { transform: rotate(180deg); }
+.gcon-pillar-flag {
+    grid-column: 1 / -1;
+    justify-self: start;
+    font-size: .72rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+.gcon-pillar-flag.ok { background: var(--success-dim); color: var(--success); }
+.gcon-pillar-flag.warn { background: var(--warning-dim); color: var(--warning); }
+.gcon-pillar-flag.bad { background: var(--danger-dim); color: var(--danger); }
+.gcon-pillar-flag.na { background: transparent; color: var(--muted); padding-left: 0; }
+.gcon-pillar-head:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; }
+
+/* Trend tiles */
+.gcon-trend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.gcon-trend-tile {
+    padding: 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+.gcon-trend-tile.warn { border-color: var(--warning); }
+.gcon-trend-tile .l { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.gcon-trend-tile .n { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.gcon-trend-tile .s { font-size: .74rem; color: var(--text-dim); min-height: 1.1em; }
+.gcon-trend-tile .spark { margin-top: 6px; min-height: 34px; }
+
+/* Customer heatmap */
+.gcon-heatmap { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
+.gcon-heat-cell {
+    aspect-ratio: 1 / 1;
+    min-height: 56px;
+    padding: 4px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: #fff;
+    font-size: .68rem;
+    font-weight: 600;
+    line-height: 1.15;
+    overflow: hidden;
+    word-break: break-word;
+    cursor: pointer;
+}
+.gcon-heat-cell:hover { filter: brightness(1.15); }
+.gcon-heat-cell.dim { opacity: .3; }
+.gcon-heat-cell.selected { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* Event groups */
+.gcon-evg-list { display: flex; flex-direction: column; }
+.gcon-evg-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 2px;
+    border-bottom: 1px solid var(--border-subtle);
+    border-left: 3px solid transparent;
+    padding-left: 8px;
+}
+.gcon-evg-row:last-child { border-bottom: none; }
+.gcon-evg-row.warn { border-left-color: var(--warning); }
+.gcon-evg-row.bad { border-left-color: var(--danger); }
+.gcon-evg-type { font-size: .8rem; font-weight: 600; text-transform: capitalize; }
+.gcon-evg-src { font-size: .7rem; color: var(--muted); }
+.gcon-evg-count { font-size: .95rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Scheduler page */
+.gcon-sch-banner {
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    border: 1px solid var(--warning);
+    border-left-width: 4px;
+    border-radius: var(--radius-sm);
+    background: var(--warning-dim);
+    font-size: .85rem;
+}
+
+/* Navbar: clock in the left corner, compact profile in the right corner */
+.gcon-clock { font-variant-numeric: tabular-nums; margin-left: 4px; }
+.gcon-profile-btn { display: inline-flex; align-items: center; padding: 2px 8px 2px 4px; }
+.gcon-profile-btn #navbar-user-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gcon-profile-menu { min-width: 220px; }

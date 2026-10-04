@@ -53,6 +53,14 @@
                     <span id="hero-coordinator-status"><span id="hero-coordinator-dot" class="dot"></span></span>
                 </div>
 
+                {% include "panels/scope_bar.html" %}
+
+                <div class="row mb-3">
+                    <div class="col-lg-12">
+                        {% include "panels/incidents_overview.html" %}
+                    </div>
+                </div>
+
                 <div class="row mb-4">
                     <div class="col-lg-12">
                         {% include "panels/critical_alerts.html" %}
@@ -82,23 +90,20 @@
                 </div>
 
                 <div class="row g-3 mb-4 align-items-stretch">
-
-
-                    <div class="col-lg-5">
+                    <div class="col-lg-8">
+                        {% include "panels/trends.html" %}
+                    </div>
+                    <div class="col-lg-4">
                         {% include "panels/system_services.html" %}
                     </div>
-
                 </div>
 
                 <div class="row g-3 align-items-stretch">
-                    <div class="col-lg-4">
-                        {% include "panels/executions_by_company.html" %}
+                    <div class="col-lg-8">
+                        {% include "panels/client_heatmap.html" %}
                     </div>
                     <div class="col-lg-4">
-                        {% include "panels/receipt_summary.html" %}
-                    </div>
-                    <div class="col-lg-4">
-                        {% include "panels/activity.html" %}
+                        {% include "panels/event_groups.html" %}
                     </div>
                 </div>
 
@@ -310,6 +315,8 @@
             <!-- ================================================= -->
             <div class="gcon-tab d-none" id="tab-storage">
 
+                {% include "panels/db_health.html" %}
+
                 <div class="row g-3">
                     <div class="col-lg-6">
                         {% include "panels/storage_summary.html" %}
@@ -343,6 +350,30 @@
             <!-- ================================================= -->
             <!-- TAB: Events                                        -->
             <!-- ================================================= -->
+            <div class="gcon-tab d-none" id="tab-incidents">
+                {% include "panels/incidents.html" %}
+            </div>
+
+            <div class="gcon-tab d-none" id="tab-customers">
+                {% include "panels/customers.html" %}
+            </div>
+
+            <div class="gcon-tab d-none" id="tab-reliability">
+                {% include "panels/reliability.html" %}
+            </div>
+
+            <div class="gcon-tab d-none" id="tab-ha">
+                {% include "panels/ha.html" %}
+            </div>
+
+            <div class="gcon-tab d-none" id="tab-workload">
+                {% include "panels/workload.html" %}
+            </div>
+
+            <div class="gcon-tab d-none" id="tab-scheduler">
+                {% include "panels/scheduler.html" %}
+            </div>
+
             <div class="gcon-tab d-none" id="tab-events">
 
                 <div class="gcon-panel">
@@ -384,12 +415,13 @@
                                     <th>Running</th>
                                     <th>Completed</th>
                                     <th>Failed</th>
+                                    <th>Cancelled</th>
                                     <th>Blocked</th>
                                     <th>Created</th>
                                 </tr>
                             </thead>
                             <tbody id="workflows-table-body">
-                                <tr><td colspan="9" class="text-secondary text-center py-4">Loading...</td></tr>
+                                <tr><td colspan="10" class="text-secondary text-center py-4">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -940,6 +972,10 @@
                 <div class="mb-3">
                     <label class="form-label">Full name</label>
                     <input type="text" class="form-control" id="add-user-name" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Username (optional)</label>
+                    <input type="text" class="form-control" id="add-user-username" maxlength="24" placeholder="Shown in the header instead of the full name">
                 </div>
                 <div class="mb-3">
                     <label class="form-label">Email</label>
