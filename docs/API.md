@@ -198,18 +198,31 @@ There is **no** `DELETE /jobs/{job_id}` — cancellation is a `POST` to a
 **Request (minimal):**
 ```json
 {
-  "job_id": "my-job-001",
+  "client_reference": "my-job-001",
   "command": "python train.py --epochs 10",
   "artifacts": ["model.pkl"]
 }
 ```
+**You do not choose the job's id.** GCON generates the canonical `job_id`
+(`job_<32 hex>`) and returns it; use the *returned* id for every later call.
+`client_reference` is your own label for the job (up to 128 printable
+characters): it is stored, returned on the job, and searchable
+(`GET /jobs?client_reference=...`), but it is not unique and nothing is looked
+up or authorised by it. The old `job_id` request field is deprecated: if
+sent (and `client_reference` is not), it is stored as the `client_reference`.
+
+**How and where a job runs is not yours to choose either.** Every job from
+this API runs only on a worker that executes it inside a container
+(`docs/WORKER_SANDBOX.md`). A request that names `sandbox`, `trusted`,
+`privileged`, `image`, `execution_backend`, `node_id`, `org_id` or similar
+fields is rejected with `422`.
 `artifacts` is optional — a plain list of file paths to register, not a
 separate upload step.
 
 **Request (full — every field `JobSubmitRequest` actually accepts):**
 ```json
 {
-  "job_id": "my-job-001",
+  "client_reference": "my-job-001",
   "command": "python train.py --epochs 10",
   "artifacts": ["model.pkl"],
   "kind": "resourced",
@@ -244,12 +257,19 @@ Python API.
 
 **Response:**
 ```json
-{ "job_id": "my-job-001", "submitted": true }
+{ "job_id": "job_3f9c0b7e2a4d4e0c9d6a1f2b8c7e5a10", "submitted": true, "client_reference": "my-job-001" }
 ```
 
-**Errors:** `400` if the job can't be submitted (e.g. duplicate
-`job_id` — the coordinator raises `ValueError`, which becomes `400`, not
-`409`). `401` for a missing/invalid/under-scoped key.
+**`Idempotency-Key` header (optional, up to 255 printable characters):**
+retrying a submission with the same key returns the job the first request
+created (`Idempotent-Replayed: true`) instead of creating another. Keys are
+scoped to your organization and survive restarts. Re-using a key for a
+*different* request (different command, kind, artifacts, ...) is a `422`;
+changing only `client_reference` is not a different request.
+
+**Errors:** `400` if the job can't be submitted (e.g. a policy rejection).
+`401` for a missing/invalid/under-scoped key. `422` for a malformed body, a
+platform-only field, or an `Idempotency-Key` re-used for a different request.
 
 #### `GET /jobs` / `GET /jobs/{job_id}`
 
@@ -296,7 +316,7 @@ today — only the list endpoint.
 **Request:**
 ```json
 {
-  "workflow_id": "training-pipeline-v1",
+  "workflow_id": "training-pipeline-v1",   // optional: your label, returned as client_reference
   "name": "Training pipeline",
   "jobs": [
     { "job_id": "download", "command": "python download_data.py", "depends_on": [] },
@@ -305,11 +325,20 @@ today — only the list endpoint.
 }
 ```
 Note the field is `jobs` (each with `job_id` / `command` / `depends_on`),
-not `tasks` / `task_id`.
+not `tasks` / `task_id`. Here `job_id` is a **label that only means something
+inside this request** (it is what `depends_on` refers to, and must be unique
+within it): GCON mints the canonical workflow and job ids and returns the
+label → id map. Workflow jobs run under the same sandbox rule as `POST /jobs`.
 
 **Response:**
 ```json
-{ "workflow_id": "training-pipeline-v1", "status": "pending", "submitted": true }
+{
+  "workflow_id": "wf_5d1c...",
+  "status": "pending",
+  "submitted": true,
+  "client_reference": "training-pipeline-v1",
+  "jobs": { "download": "job_a1...", "train": "job_b2..." }
+}
 ```
 **Errors:** `400` for an invalid DAG (cycle, unknown dependency, etc.).
 
@@ -452,10 +481,13 @@ from gcon_sdk import GconClient, GconAPIError
 
 client = GconClient(api_key="gcon_...")
 try:
-    client.submit_job("dup-id", "echo hi")
-    client.submit_job("dup-id", "echo hi")  # duplicate job_id
+    # The first argument is only your label (sent as `client_reference`);
+    # the canonical job id is minted by GCON and returned.
+    job = client.submit_job("nightly-1", "echo hi")
+    print(job["job_id"])                       # job_<32 hex>
+    client.submit_job("x", "echo hi", artifacts=["/etc/passwd"])
 except GconAPIError as e:
-    print(e.status_code, e.detail)  # 400 "Job 'dup-id' already exists."
+    print(e.status_code, e.detail)
 ```
 
 ---

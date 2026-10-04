@@ -297,7 +297,7 @@ python -m gcon.execution.run_job "python train.py" --job-id train-001
 # Or, against a running coordinator (see docs/API.md)
 curl -X POST -H "Authorization: Bearer $GCON_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"job_id": "train-001", "command": "python train.py"}' \
+  -d '{"client_reference": "train-001", "command": "python train.py"}' \
   http://localhost:8000/api/v1/jobs
 ```
 
