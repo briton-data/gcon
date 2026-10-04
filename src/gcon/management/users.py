@@ -12,6 +12,7 @@ set is loaded back into memory on registry construction — so a
 crash or redeploy no longer erases every account.
 """
 
+import re
 from datetime import datetime, UTC
 from uuid import uuid4
 
@@ -20,6 +21,11 @@ from .rbac import get_permissions_for_role
 from ..storage.database import Database, dumps, loads
 
 VALID_STATUSES = ["Active", "Pending", "Suspended", "Disabled"]
+
+# A username is a short public handle: 2-24 characters, letters/digits plus
+# . _ -, starting with a letter or digit. No spaces, so it cannot be an
+# official "First Last" name by accident.
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,23}$")
 
 
 def _initials(name):
@@ -31,9 +37,11 @@ def _initials(name):
 
 class User:
     def __init__(self, name, email, role, organization_id=None,
-                 status="Active", user_id=None, created_at=None):
+                 status="Active", user_id=None, created_at=None, username=None):
         self.user_id = user_id or f"usr_{uuid4().hex[:8]}"
         self.name = name
+        # What the dashboard shows for this person (see USERNAME_RE).
+        self.username = username
         self.email = email
         self.role = role
         self.organization_id = organization_id
@@ -70,6 +78,7 @@ class User:
         return {
             "user_id": self.user_id,
             "name": self.name,
+            "username": self.username,
             "email": self.email,
             "role": self.role,
             "organization_id": self.organization_id,
@@ -92,6 +101,7 @@ class User:
             self.user_id, self.name, self.email, self.role, self.organization_id,
             self.status, self.avatar_initials, self.created_at.isoformat(),
             self.last_active.isoformat(), self.password_hash, dumps(self.stats),
+            self.username,
         )
 
     @classmethod
@@ -100,6 +110,7 @@ class User:
             row["name"], row["email"], row["role"], row["organization_id"],
             row["status"], user_id=row["user_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            username=row["username"],
         )
         user.avatar_initials = row["avatar_initials"]
         user.last_active = datetime.fromisoformat(row["last_active"])
@@ -121,21 +132,44 @@ class UserRegistry:
             conn.execute(
                 """INSERT INTO users (user_id, name, email, role, organization_id,
                        status, avatar_initials, created_at, last_active,
-                       password_hash, stats_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       password_hash, stats_json, username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
                        name=excluded.name, email=excluded.email, role=excluded.role,
                        organization_id=excluded.organization_id, status=excluded.status,
                        avatar_initials=excluded.avatar_initials, created_at=excluded.created_at,
                        last_active=excluded.last_active, password_hash=excluded.password_hash,
-                       stats_json=excluded.stats_json""",
+                       stats_json=excluded.stats_json, username=excluded.username""",
                 user._row(),
             )
 
-    def add_user(self, name, email, role, organization_id=None, status="Active"):
+    def _validate_username(self, username, user_id=None):
+        """Normalise and check a username; returns None for "no username"."""
+        username = (username or "").strip()
+        if not username:
+            return None
+        if not USERNAME_RE.match(username):
+            raise ValueError(
+                "Username must be 2-24 characters: letters, digits, '.', '_' or '-' "
+                "(no spaces), starting with a letter or digit."
+            )
+        taken = username.lower()
+        for other in self.users.values():
+            if other.user_id != user_id and (other.username or "").lower() == taken:
+                raise ValueError(f"The username '{username}' is already taken.")
+        return username
+
+    def set_username(self, user_id, username):
+        user = self.get_user(user_id)
+        user.username = self._validate_username(username, user_id)
+        self._persist(user)
+        return user
+
+    def add_user(self, name, email, role, organization_id=None, status="Active", username=None):
         if status not in VALID_STATUSES:
             raise ValueError(f"Invalid status '{status}'.")
-        user = User(name, email, role, organization_id, status)
+        username = self._validate_username(username)
+        user = User(name, email, role, organization_id, status, username=username)
         self.users[user.user_id] = user
         self._persist(user)
         return user
@@ -159,6 +193,8 @@ class UserRegistry:
                 continue
             if key == "status" and value not in VALID_STATUSES:
                 raise ValueError(f"Invalid status '{value}'.")
+            if key == "username":
+                value = self._validate_username(value, user_id)
             setattr(user, key, value)
         self._persist(user)
         return user

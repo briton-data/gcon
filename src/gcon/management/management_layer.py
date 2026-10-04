@@ -321,15 +321,20 @@ class ManagementLayer:
         data["stats"] = self.get_user_stats(user.user_id)
         return data
 
-    def create_user(self, name, email, role, organization_id=None, status="Active", password=None):
+    def create_user(self, name, email, role, organization_id=None, status="Active", password=None, username=None):
         if self.user_registry.get_user_by_email(email):
             raise ValueError(f"A user with email '{email}' already exists.")
 
-        user = self.user_registry.add_user(name, email, role, organization_id, status)
+        user = self.user_registry.add_user(name, email, role, organization_id, status, username=username)
         if password:
             user.set_password(password)
         self.audit_logger.log("Admin", "created user", user.name)
         self.notification_center.notify("user_registered", f"{user.name} was added")
+        return user.to_dict()
+
+    def set_own_username(self, user_id, username):
+        """A user choosing (or clearing) their own display handle."""
+        user = self.user_registry.set_username(user_id, username)
         return user.to_dict()
 
     def update_user(self, user_id, **fields):
@@ -1050,16 +1055,61 @@ class ManagementLayer:
     # run_coordinator.py, not something toggled from the dashboard of
     # a process that's already running one way or the other.
     # ------------------------------------------------------------------
+    def get_observability_summary(self, minutes=None, region=None):
+        window = float(minutes) * 60 if minutes else None
+        return self.coordinator.observability.summary(window_seconds=window, region=region)
+
+    def get_observability_history(self, minutes=60):
+        return self.coordinator.observability.history(minutes)
+
+    def get_incidents(self, resolved_limit=50):
+        cp = getattr(self.coordinator, "control_plane", None)
+        if cp is None:
+            return {"open": [], "resolved": []}
+        return {
+            "open": cp.incidents.open_incidents(),
+            "resolved": cp.incidents.recent_resolved(resolved_limit),
+        }
+
+    def set_incident_owner(self, incident_id, user, claim=True):
+        """Take (claim=True) or release an open incident as `user` (a User)."""
+        cp = getattr(self.coordinator, "control_plane", None)
+        if cp is None:
+            raise ValueError("No control-plane database attached")
+        from datetime import datetime, UTC
+        owner = (user.email or user.name) if claim else None
+        if not cp.incidents.set_owner(incident_id, owner, datetime.now(UTC).isoformat()):
+            raise ValueError("Incident not found or already resolved")
+        self.audit_logger.log(user.name, "took ownership of incident" if claim else "released incident", incident_id)
+
+    def get_scheduler_status(self):
+        return self.coordinator.observability.scheduler()
+
+    def get_event_groups(self, minutes=60, limit=8):
+        return self.coordinator.observability.event_groups(minutes, limit)
+
     def get_ha_status(self):
         elector = getattr(self.coordinator, "leader_elector", None) if self.coordinator else None
         if elector is None:
             return {"enabled": False}
         lease = elector.control_plane.leases.read(elector.lease_name)
+        # Computed here, on the server's clock, so the HA page's
+        # "expires in" can't be distorted by browser clock skew.
+        seconds_remaining = None
+        if lease and lease.get("expires_at"):
+            try:
+                expires = datetime.fromisoformat(lease["expires_at"])
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=UTC)
+                seconds_remaining = (expires - datetime.now(UTC)).total_seconds()
+            except (TypeError, ValueError):
+                pass
         return {
             "enabled": True,
             "holder_id": elector.holder_id,
             "is_leader": elector.is_leader,
             "lease": lease,
+            "lease_seconds_remaining": seconds_remaining,
         }
 
     def update_organization(self, org_id, **fields):
