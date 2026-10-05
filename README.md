@@ -58,9 +58,13 @@ Full detail: [SECURITY.md](SECURITY.md).
 
 ## Get started
 
+<<<<<<< HEAD
 GCON is cloud-managed: GCON runs the coordinator, and you can optionally connect machines of your own as workers. The steps below run the whole thing locally, which is how developers try it out.
 
 Works the same on Linux, macOS and Windows. You need Python 3.12+ (on Linux and macOS, use `python3` wherever this page says `python`).
+=======
+GCON's Python components support Python 3.12+ on Linux, macOS, and Windows. Production worker deployments should be validated on the target OS and execution backend.
+>>>>>>> 8f19b8c74316257a33102a6fdaead1deba6ddbcc
 
 ```bash
 git clone https://github.com/briton-data/GCON.git
