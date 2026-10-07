@@ -125,15 +125,19 @@ class GconClient:
     # ------------------------------------------------------------
 
     def list_jobs(self, status: Optional[str] = None,
-                  limit: Optional[int] = None) -> List[Dict[str, Any]]:
+                  limit: Optional[int] = None,
+                  client_reference: Optional[str] = None) -> List[Dict[str, Any]]:
         """List jobs, newest first.
 
         `status`/`limit` are optional -- omit both for the original
         "every job" behavior. `status` filters to a single job status
         (e.g. "failed", "pending", "running", "completed"); `limit`
-        caps how many are returned.
+        caps how many are returned. `client_reference` returns only
+        jobs you submitted with that label.
         """
         params: Dict[str, Any] = {}
+        if client_reference is not None:
+            params["client_reference"] = client_reference
         if status is not None:
             params["status"] = status
         if limit is not None:
@@ -152,9 +156,17 @@ class GconClient:
                     dataset_artifacts: Optional[List[str]] = None,
                     callback_url: Optional[str] = None,
                     verify: Optional[Dict[str, Any]] = None,
-                    idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+                    idempotency_key: Optional[str] = None,
+                    client_reference: Optional[str] = None) -> Dict[str, Any]:
         """
         Submit a new job to the cluster.
+
+        GCON generates the job's canonical `job_id` and returns it -- use the
+        RETURNED id for get/cancel/retry. The `job_id` argument here is only
+        your own label for the job (kept as the first parameter so existing
+        calls still work): it is sent as `client_reference`, which you can
+        later search by with `list_jobs(client_reference=...)`. Pass
+        `client_reference=` explicitly to set the label and ignore `job_id`.
 
         `kind`/`requires`/`stages`/`dataset_artifacts`/`callback_url`/
         `verify` mirror the server's JobSubmitRequest exactly (see the
@@ -196,7 +208,8 @@ class GconClient:
         value over a configured ceiling) -- same clean error shape as
         any other rejected request, not a raw server error.
         """
-        payload: Dict[str, Any] = {"job_id": job_id, "command": command, "artifacts": artifacts}
+        label = client_reference if client_reference is not None else job_id
+        payload: Dict[str, Any] = {"client_reference": label, "command": command, "artifacts": artifacts}
         if kind is not None:
             payload["kind"] = kind
         if requires is not None:
@@ -253,6 +266,11 @@ class GconClient:
 
         `jobs` is a list of dicts, each shaped like:
             {"job_id": "...", "command": "...", "depends_on": ["..."]}
+        Here `job_id` is only a label for `depends_on` within this request;
+        GCON mints the canonical workflow and job ids and returns the
+        label -> id mapping under `"jobs"`. `workflow_id` is your own label,
+        returned as `client_reference`.
+
         `depends_on` is optional per job (defaults to no dependencies
         server-side) -- a job with no `depends_on` runs as soon as the
         coordinator has capacity; one that names other jobs in this

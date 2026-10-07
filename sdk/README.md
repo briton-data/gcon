@@ -31,9 +31,11 @@ print(client.get_cluster())
 print(client.list_nodes())
 print(client.get_health())
 
-# Submit and track a job
-client.submit_job("job-42", "python train.py")
-print(client.get_job("job-42"))
+# Submit and track a job. GCON generates the job's id and returns it; the
+# first argument is only your own label (stored as `client_reference`).
+job = client.submit_job("job-42", "python train.py")
+print(client.get_job(job["job_id"]))
+print(client.list_jobs(client_reference="job-42"))   # find jobs by your label
 
 # Resourced jobs (matched against node capabilities before dispatch)
 client.submit_job("job-gpu-1", "python train.py",
@@ -48,9 +50,10 @@ client.submit_job("job-verified-1", "python critical_calc.py",
                    verify={"replicas": 2, "tolerance": 0.02})
 
 # Cancel it
-client.cancel_job("job-42")
+client.cancel_job(job["job_id"])
 
-# Workflows: a DAG of jobs with dependencies between them
+# Workflows: a DAG of jobs with dependencies between them. Each job_id here is
+# a label for depends_on; the response maps labels to the ids GCON generated.
 client.submit_workflow("wf-1", jobs=[
     {"job_id": "fetch", "command": "python fetch.py"},
     {"job_id": "train", "command": "python train.py", "depends_on": ["fetch"]},
@@ -78,10 +81,9 @@ from gcon_sdk import GconClient, GconAPIError
 
 client = GconClient(api_key="gcon_...")
 try:
-    client.submit_job("dup-id", "echo hi")
-    client.submit_job("dup-id", "echo hi")  # duplicate job_id
+    client.get_job("job_does_not_exist")
 except GconAPIError as e:
-    print(e.status_code, e.detail)  # 400 "Job 'dup-id' already exists."
+    print(e.status_code, e.detail)  # 404
 ```
 
 ## API reference
