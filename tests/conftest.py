@@ -26,6 +26,19 @@ def pytest_configure(config):
         "markers",
         "real_sandbox: use the real GCONAgent.sandboxed detection (no test-wide override)",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_ssrf_guard: keep the outbound-URL safety check fully on (no loopback allowance)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _tests_may_call_local_webhook_servers(request, monkeypatch):
+    """Webhook tests run a receiver on 127.0.0.1; the outbound-URL guard
+    (gcon.transport.url_safety) refuses loopback unless told otherwise. Tests of
+    the guard itself opt out with @pytest.mark.real_ssrf_guard."""
+    if not request.node.get_closest_marker("real_ssrf_guard"):
+        monkeypatch.setenv("GCON_WEBHOOK_ALLOW_PRIVATE_TARGETS", "1")
 
 
 @pytest.fixture(autouse=True)

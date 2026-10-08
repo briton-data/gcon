@@ -29,20 +29,18 @@ from gcon.management.management_layer import ManagementLayer
 @pytest.fixture
 def client_under_strict_policy(tmp_path, monkeypatch):
     policy_file = tmp_path / "policy.json"
-    policy_file.write_text(json.dumps({"require_org_id": True}))
+    policy_file.write_text(json.dumps({"max_replicas": 1}))
     monkeypatch.setenv("GCON_POLICY_FILE", str(policy_file))
 
     coordinator = GCONCoordinator()
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
 
-    # A user/key with NO organization -- exactly what require_org_id
-    # rejects.
-    user = management.create_user(
-        "No Org User", "noorg@example.com", role="Owner", organization_id=None,
-    )
-    key = management.create_api_key(
-        "noorg-key", owner_user_id=user["user_id"], scopes=["Submit workflows"],
-    )
+    # A customer key asking for more replicas than policy allows: a real
+    # policy rejection that reaches the route. (An org-less key can no longer
+    # reach it at all -- the API refuses such keys with a 403 first; see
+    # tests/api/test_org_required.py.)
+    signup = management.signup_customer("Acme", "Ann", "ann@acme.example", "correct-horse-1")
+    key = signup["api_key"]
 
     presentation = PresentationLayer(coordinator)
     app = create_api_v1_app(management, presentation)
@@ -57,7 +55,8 @@ class TestPolicyRejectionReturnsCleanHTTPError:
         client, api_key = client_under_strict_policy
 
         response = client.post(
-            "/jobs", json={"job_id": "policy-rejected-job", "command": "echo hi"},
+            "/jobs", json={"client_reference": "policy-rejected-job", "command": "echo hi",
+                           "verify": {"replicas": 3}},
             headers={"X-API-Key": api_key},
         )
 
@@ -66,4 +65,4 @@ class TestPolicyRejectionReturnsCleanHTTPError:
             f"{response.status_code} -- PolicyRejectionError is escaping "
             f"as an unhandled exception again"
         )
-        assert "org_id" in response.json()["detail"]
+        assert "max_replicas" in response.json()["detail"]
