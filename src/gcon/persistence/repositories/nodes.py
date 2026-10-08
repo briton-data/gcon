@@ -88,8 +88,10 @@ class NodeRepository:
                 conn.execute(
                     """
                     UPDATE nodes
-                    SET hostname = ?, status = ?, transport_endpoint = ?,
-                        agent_version = ?, auth_fingerprint = ?,
+                    SET hostname = COALESCE(?, hostname), status = ?,
+                        transport_endpoint = COALESCE(?, transport_endpoint),
+                        agent_version = COALESCE(?, agent_version),
+                        auth_fingerprint = COALESCE(?, auth_fingerprint),
                         last_seen_at = ?, metadata_json = ?,
                         org_id = COALESCE(?, org_id),
                         ed25519_public_key = COALESCE(?, ed25519_public_key)

@@ -60,6 +60,7 @@ from datetime import datetime, timedelta, UTC
 from typing import Any, Dict, Optional
 
 from gcon.persistence.control_plane import ControlPlane
+from gcon.transport.url_safety import safe_urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ class WebhookDispatcher:
         response_code: Optional[int] = None
         success = False
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            with safe_urlopen(req, timeout=self.timeout_seconds) as resp:
                 response_code = resp.status
                 success = 200 <= resp.status < 300
                 if not success:

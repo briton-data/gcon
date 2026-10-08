@@ -324,11 +324,20 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 )
             org_id = attested_org_id
         else:
-            # No OU on this cert at all -- legacy/dev node. Fall back
-            # to the self-reported value rather than wiping an
-            # existing org_id (NodeRepository.upsert's COALESCE
-            # already protects the durable record on top of this).
-            org_id = self_reported_org_id
+            # No OU on this cert at all -- a legacy/dev cert, e.g. one issued
+            # through the single shared GCON_ENROLL_TOKEN. The org_id the node
+            # reports about ITSELF is never believed: anyone holding that
+            # token could otherwise claim any tenant. The node stays
+            # unattributed (org_id=None; NodeRepository.upsert's COALESCE keeps
+            # any org_id already on record), so no organization's jobs are
+            # dispatched to it on its own say-so.
+            if self_reported_org_id:
+                logger.warning(
+                    "node '%s' reported org_id=%r but its certificate carries no "
+                    "organization; ignoring the self-reported value",
+                    request.node_id, self_reported_org_id,
+                )
+            org_id = None
 
         self.control_plane.nodes.upsert(
             node_id=request.node_id,
@@ -422,6 +431,19 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     reason="node_id is required",
                 )
             return pb.EnrollResponse(accepted=False, reason="node_id is required")
+        # A node name that already belongs to another organization (or to none)
+        # cannot be enrolled under a different one: the certificate would let
+        # the holder take over that node's identity and session.
+        if self.control_plane is not None:
+            existing_node = self.control_plane.nodes.get(request.node_id)
+            if existing_node is not None and existing_node.get("org_id") != org_id:
+                reason = "node_id is already registered to a different organization"
+                logger.warning("Enroll rejected for node_id=%s: %s", request.node_id, reason)
+                self.control_plane.node_enrollment_audit.record(
+                    node_id=request.node_id, accepted=False, org_id=org_id,
+                    enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
+                )
+                return pb.EnrollResponse(accepted=False, reason=reason)
         try:
             cert_pem = tls.sign_agent_csr(
                 self.config.tls_cert_dir, request.csr_pem, request.node_id, org_id=org_id,
@@ -604,12 +626,23 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             )
 
     # -------------------------------------------------------------- logs
+    def _node_ran_job(self, node_id, job_id):
+        """True only if `job_id` was actually dispatched to `node_id` (it has an
+        attempt row there). A session proves who the node is, not which jobs
+        it may write about."""
+        try:
+            return any(a.get("node_id") == node_id for a in self.control_plane.job_attempts.list_for_job(job_id))
+        except Exception:
+            return False
+
     def StreamLogs(self, request_iterator, context):
         last_sequence = 0
         for chunk in request_iterator:
             session = self._sessions.get(chunk.node_id)
             if session is None or session.session_token != chunk.session_token:
                 context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid session")
+            if not self._node_ran_job(chunk.node_id, chunk.job_id):
+                context.abort(grpc.StatusCode.PERMISSION_DENIED, "this node was not assigned that job")
             self.control_plane.execution_logs.append(
                 job_id=chunk.job_id,
                 attempt_id=chunk.attempt_id or None,
@@ -626,6 +659,8 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         session = self._sessions.get(request.node_id)
         if session is None or session.session_token != request.session_token:
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid session")
+        if not self._node_ran_job(request.node_id, request.job_id):
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, "this node was not assigned that job")
 
         import json as _json
 

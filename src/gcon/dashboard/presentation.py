@@ -738,11 +738,11 @@ class PresentationLayer:
         """
         return self.coordinator.get_execution_detail(job_id)
 
-    def get_artifacts(self):
+    def get_artifacts(self, org_id=None, scoped=False):
         """
-        Return all registered artifacts.
+        Return registered artifacts (all of them, or only `org_id`'s when scoped).
         """
-        return self.coordinator.get_artifacts()
+        return self.coordinator.get_artifacts(org_id=org_id, scoped=scoped)
 
     # ------------------------------------------------------------------
     # Real-Time Monitoring

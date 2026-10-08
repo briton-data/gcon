@@ -30,6 +30,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, UTC
 from gcon.monitoring.monitor import ResourceMonitor
 from gcon.execution import docker_executor
+from gcon.execution.output_limits import cap_text
 
 logging.basicConfig(
     level=logging.INFO,
@@ -590,8 +591,8 @@ class GCONAgent:
                 "status": "success" if self.process.returncode == 0 else "failed",
                 "return_code": self.process.returncode,
                 "runtime_seconds": runtime,
-                "stdout": stdout,
-                "stderr": stderr,
+                "stdout": cap_text(stdout),
+                "stderr": cap_text(stderr),
                 "metrics": metrics_dict,
                 "usage": self._read_usage_report(usage_report_path),
                 # Always a list -- possibly partial (see the timeout/

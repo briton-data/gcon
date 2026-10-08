@@ -7,6 +7,15 @@ from typing import Any, Dict, List, Optional
 from gcon.persistence.db import ControlPlaneDatabase
 
 
+# A signed receipt is the durable proof of a job. receipts.job_id is ON DELETE
+# CASCADE, so deleting a job used to delete its receipts as a side effect --
+# retention settings meant for jobs silently destroyed receipts (which have
+# their own, separate retention). Every job deletion here therefore skips a job
+# that still has a receipt; once a receipt is purged by its own retention, the
+# job becomes deletable on the next pass.
+_HAS_NO_RECEIPT = "NOT EXISTS (SELECT 1 FROM receipts r WHERE r.job_id = jobs.job_id)"
+
+
 class JobRepository:
     def __init__(self, db: ControlPlaneDatabase):
         self.db = db
@@ -64,7 +73,14 @@ class JobRepository:
         exists no matter which subsystem created the job_id first.
         Safe to call for a job_id that already exists (no-op).
         """
-        if self.get(job_id) is not None:
+        existing = self.get(job_id)
+        if existing is not None:
+            # "Already there" is only a no-op for the SAME owner. A job_id that
+            # exists under a different organization must never be silently
+            # adopted: the caller would then write attempts, logs and receipts
+            # into someone else's job.
+            if org_id is not None and existing.get("org_id") not in (None, org_id):
+                raise ValueError(f"Job '{job_id}' already exists.")
             return
         try:
             self.create(
@@ -180,7 +196,9 @@ class JobRepository:
         the number of rows removed."""
         if status in ("pending", "running"):
             raise ValueError(f"refusing to delete '{status}' jobs -- they are not terminal")
-        cursor = self.db.execute("DELETE FROM jobs WHERE status = ?", (status,))
+        cursor = self.db.execute(
+            f"DELETE FROM jobs WHERE status = ? AND {_HAS_NO_RECEIPT}", (status,)
+        )
         return cursor.rowcount
 
     def delete_owned_terminal(self, job_id: str, org_id: str, statuses) -> int:
@@ -198,7 +216,7 @@ class JobRepository:
             raise ValueError("only terminal statuses may be deleted")
         marks = ",".join("?" for _ in statuses)
         cursor = self.db.execute(
-            f"DELETE FROM jobs WHERE job_id = ? AND org_id = ? AND status IN ({marks})",
+            f"DELETE FROM jobs WHERE job_id = ? AND org_id = ? AND status IN ({marks}) AND {_HAS_NO_RECEIPT}",
             (job_id, org_id, *statuses),
         )
         return cursor.rowcount
@@ -254,10 +272,11 @@ class JobRepository:
         of age -- an old but still-in-flight job is a bug to
         investigate, not something retention should make disappear."""
         cursor = self.db.execute(
-            """
+            f"""
             DELETE FROM jobs
             WHERE status NOT IN ('pending', 'running')
               AND COALESCE(completed_at, submitted_at) < ?
+              AND {_HAS_NO_RECEIPT}
             """,
             (cutoff_iso,),
         )
@@ -269,11 +288,11 @@ class JobRepository:
         cares about "keep the DB under X rows" more than "keep Y days
         of history"."""
         cursor = self.db.execute(
-            """
+            f"""
             DELETE FROM jobs WHERE job_id IN (
                 SELECT job_id FROM jobs WHERE status NOT IN ('pending', 'running')
                 ORDER BY submitted_at DESC LIMIT -1 OFFSET ?
-            )
+            ) AND {_HAS_NO_RECEIPT}
             """,
             (keep,),
         )

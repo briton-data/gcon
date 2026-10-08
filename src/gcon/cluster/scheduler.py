@@ -112,6 +112,11 @@ class Scheduler:
         except Exception:
             return False
 
+        # Defence in depth: submit_job validates `requires`, but the scheduler
+        # runs on every tenant's jobs, so one bad value must never raise here.
+        if not isinstance(requires, dict):
+            return False
+
         if requires.get("gpu"):
             gpu_name = capabilities.get("gpu", "")
             if not gpu_name or gpu_name == "Unknown GPU":
@@ -123,7 +128,11 @@ class Scheduler:
                 vram_mb = float(capabilities.get("gpu_memory_total_mb", 0))
             except (TypeError, ValueError):
                 vram_mb = 0
-            if vram_mb < float(min_vram_gb) * 1024:
+            try:
+                needed_mb = float(min_vram_gb) * 1024
+            except (TypeError, ValueError):
+                return False
+            if vram_mb < needed_mb:
                 return False
 
         min_cpu_cores = requires.get("min_cpu_cores")
@@ -132,7 +141,11 @@ class Scheduler:
                 cores = float(capabilities.get("cpu_cores", 0))
             except (TypeError, ValueError):
                 cores = 0
-            if cores < float(min_cpu_cores):
+            try:
+                needed_cores = float(min_cpu_cores)
+            except (TypeError, ValueError):
+                return False
+            if cores < needed_cores:
                 return False
 
         return True

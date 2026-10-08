@@ -166,7 +166,7 @@ class JobSubmitRequest(BaseModel):
     )
     command: str = Field(..., description="Shell command the job will run")
     artifacts: Optional[List[str]] = Field(
-        default=None, description="Optional list of file paths to register as artifacts"
+        default=None, description="Not supported through the API: a non-empty list is refused (400). Use dataset_artifacts."
     )
     kind: str = Field(
         default="command",
@@ -390,6 +390,8 @@ def _validate_signup(payload):
     _validate_password(payload.password)
 
 
+SIGNUPS_PER_HOUR_PER_IP = 10
+MAX_SESSION_KEYS_PER_CUSTOMER = 5
 _CLIENT_REFERENCE_MAX = 128
 _IDEMPOTENCY_KEY_MAX = 255
 # Serialises "look up key -> submit -> record key" per (org, key). Only the
@@ -465,6 +467,15 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         def client_ip(request):
             return request.client.host if request.client else None
 
+    # Signup creates an organization, a user and a working API key with no
+    # human check. Without a limit one client can mint them without bound
+    # (16 parallel signups, 0 errors). Every signup attempt counts, per client
+    # IP: SIGNUPS_PER_HOUR_PER_IP of them, then 429 until the window ages out.
+    signup_limiter = LoginRateLimiter(
+        max_attempts=SIGNUPS_PER_HOUR_PER_IP, window_minutes=60, lockout_minutes=60,
+        db=getattr(management, "db", None),
+    )
+
     app = FastAPI(
         title="GCON Public API",
         version="1.0.0",
@@ -483,7 +494,13 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     # Auth dependency factory
     # ------------------------------------------------------------
 
-    def require_scope(scope: Optional[str] = None):
+    def require_scope(scope: Optional[str] = None, tenant: bool = True):
+        # `tenant=True` (the default) marks a route that serves a customer's
+        # own data: the key must belong to an organization. An org-less or
+        # ownerless key resolves to org_id=None, which every query below reads
+        # as "no filter" -- i.e. EVERY tenant's jobs, receipts and workflows --
+        # so it is refused here, once, before any route body runs. Cluster-wide
+        # routes that never filter by organization opt out with tenant=False.
         def dependency(
             authorization: str = Header(default=None),
             x_api_key: str = Header(default=None, alias="X-API-Key"),
@@ -507,6 +524,13 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                 key, owner = management.authenticate_api_key(secret, required_scope=scope)
             except ValueError as e:
                 raise HTTPException(status_code=401, detail=str(e))
+
+            if tenant and (owner is None or getattr(owner, "organization_id", None) is None):
+                raise HTTPException(
+                    status_code=403,
+                    detail="This API key is not attached to an organization, so it "
+                           "cannot be used to read or change customer data.",
+                )
 
             return {"key": key, "owner": owner}
 
@@ -534,7 +558,13 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Create a new organization and customer account",
         responses={400: {"model": ErrorOut}},
     )
-    def auth_signup(payload: CustomerSignupIn):
+    def auth_signup(payload: CustomerSignupIn, request: Request):
+        ip = client_ip(request)
+        try:
+            signup_limiter.check("signup", ip)
+        except ValueError:
+            raise HTTPException(status_code=429, detail="Too many signups from this address. Try again later.")
+        signup_limiter.record_failure("signup", ip)      # counts the attempt, success or not
         try:
             _validate_signup(payload)
             result = management.signup_customer(
@@ -592,6 +622,9 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         session_key = management.create_customer_api_key(
             customer.org_id, customer.customer_user_id, f"Web session {stamp} UTC",
         )
+        # Every login mints a key; without a bound they pile up forever
+        # (and each stays valid 90 days). Keep the newest few per customer.
+        management.limit_session_api_keys(customer.customer_user_id, keep=MAX_SESSION_KEYS_PER_CUSTOMER)
         return {
             "organization": organization,
             "customer_user": customer.to_dict(),
@@ -752,7 +785,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Get current cluster state",
         responses={401: {"model": ErrorOut}},
     )
-    def get_cluster(auth=Depends(require_scope("View monitoring"))):
+    def get_cluster(auth=Depends(require_scope("View monitoring", tenant=False))):
         return jsonable_encoder(presentation.get_cluster_state())
 
     @app.get(
@@ -762,7 +795,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Get overall cluster health",
         responses={401: {"model": ErrorOut}},
     )
-    def get_health(auth=Depends(require_scope("View monitoring"))):
+    def get_health(auth=Depends(require_scope("View monitoring", tenant=False))):
         return jsonable_encoder(presentation.get_cluster_health())
 
     @app.get(
@@ -771,7 +804,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Get aggregate node and job metrics",
         responses={401: {"model": ErrorOut}},
     )
-    def get_metrics(auth=Depends(require_scope("View monitoring"))):
+    def get_metrics(auth=Depends(require_scope("View monitoring", tenant=False))):
         return jsonable_encoder(presentation.get_system_metrics())
 
     # ------------------------------------------------------------
@@ -921,6 +954,17 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         client_reference = _clean_client_reference(
             payload.client_reference if payload.client_reference is not None else payload.job_id
         )
+
+        # `artifacts` takes paths on the COORDINATOR's disk. A customer must never
+        # be able to name one (it would read and hash any file the coordinator
+        # can see, and list the result), so the field is refused here. To use
+        # data in a job, reference an artifact your own jobs produced, in
+        # `dataset_artifacts`.
+        if payload.artifacts:
+            raise HTTPException(
+                status_code=400,
+                detail="Registering artifacts by file path is not supported through the API.",
+            )
 
         def _do_submit(job_id):
             try:
@@ -1268,7 +1312,10 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         responses={401: {"model": ErrorOut}},
     )
     def list_artifacts(auth=Depends(require_scope("View monitoring"))):
-        return jsonable_encoder(presentation.get_artifacts())
+        # Only the caller's own organization's artifacts.
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        return jsonable_encoder(presentation.get_artifacts(org_id=org_id, scoped=True))
 
     # ------------------------------------------------------------
     # Telemetry
@@ -1309,7 +1356,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         summary="Identify the API key making this request",
         responses={401: {"model": ErrorOut}},
     )
-    def whoami(auth=Depends(require_scope())):
+    def whoami(auth=Depends(require_scope(tenant=False))):
         key = auth["key"]
         owner = auth["owner"]
         return {

@@ -191,6 +191,8 @@ class ExecutionVerifier:
         output_hash: str,
         metrics: Optional[Dict[str, Any]] = None,
         attested_node_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate execution proof receipt.
@@ -231,6 +233,14 @@ class ExecutionVerifier:
         }
         if attested_node_id is not None:
             proof_data["attested_node_id"] = attested_node_id
+        # The receipt's top-level agent_id and status live OUTSIDE this payload;
+        # signing them in as well makes them tamper-evident (see
+        # validate_receipt_fields). Absent from receipts made before this
+        # existed, which keep validating exactly as they did.
+        if agent_id is not None:
+            proof_data["agent_id"] = agent_id
+        if status is not None:
+            proof_data["status"] = status
         # key_id is folded into the signed payload itself (not just
         # attached alongside it) -- see HmacKeyring -- so it's
         # tamper-evident the same way every other proof field is: an
@@ -269,12 +279,21 @@ class ExecutionVerifier:
         logger.info(f"Execution proof generated for job {job_id}")
         return proof
     
-    def validate_proof(self, proof: Dict[str, Any]) -> Tuple[bool, str]:
+    def validate_proof(
+        self, proof: Dict[str, Any], max_age_seconds: Optional[float] = None,
+    ) -> Tuple[bool, str]:
         """
         Validate execution proof.
+
+        A signed receipt is a permanent record, so its age does not make it
+        invalid: it used to be rejected after 24 hours, which silently turned
+        every older receipt "invalid" the moment the in-memory cache was
+        rebuilt after a restart. A caller that does want freshness (e.g. to
+        reject a replayed proof) passes `max_age_seconds`.
         
         Args:
             proof: Proof dictionary to validate
+            max_age_seconds: reject a proof older than this; None (default) = no limit
             
         Returns:
             Tuple of (is_valid, message)
@@ -293,20 +312,39 @@ class ExecutionVerifier:
         if not self.verify_signature(proof_copy, signature, key_id=key_id):
             return False, "Invalid signature"
         
-        # Check timestamp is recent (within 24 hours)
+        # The timestamp must be well-formed; it is only compared to the clock
+        # when the caller asks for a maximum age.
         try:
             timestamp = datetime.fromisoformat(proof.get("timestamp", ""))
-            now = datetime.now(UTC)
-            diff = (now - timestamp).total_seconds()
-            if diff > 86400:  # 24 hours
-                return False, "Proof timestamp is too old"
+            if max_age_seconds is not None:
+                diff = (datetime.now(UTC) - timestamp).total_seconds()
+                if diff > max_age_seconds:
+                    return False, "Proof timestamp is too old"
         except (ValueError, TypeError):
             return False, "Invalid timestamp format"
         
         return True, "Proof is valid"
 
     @staticmethod
-    def validate_worker_attestation(receipt: Dict[str, Any]) -> Tuple[bool, str]:
+    def validate_receipt_fields(receipt: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        The receipt's top-level job_id / input_hash / output_hash (and agent_id /
+        status, for receipts that sign them) sit beside the signed proof, not in
+        it, so editing them does not break the signature. This compares each to
+        the value inside the signed proof and fails on any difference.
+        """
+        proof = receipt.get("proof") or {}
+        for field in ("job_id", "input_hash", "output_hash", "agent_id", "status"):
+            if field in proof and receipt.get(field) != proof[field]:
+                return False, f"Receipt {field} does not match the signed proof"
+        return True, "Receipt fields match the signed proof"
+
+    @staticmethod
+    def validate_worker_attestation(
+        receipt: Dict[str, Any],
+        registered_public_key_pem: Optional[str] = None,
+        require_registered_key: bool = False,
+    ) -> Tuple[bool, str]:
         """
         Re-checks a receipt's worker_attestation block (see
         create_receipt) fresh, every call -- there is no stored
@@ -317,9 +355,18 @@ class ExecutionVerifier:
         or computed against a since-rotated key) at creation time.
 
         Independent of validate_proof: this checks the node's OWN
-        Ed25519 signature against the public key embedded in the
-        block, not GCON's HMAC key -- a caller with no access to (or
-        no trust in) GCON's own signing key can still run this check.
+        Ed25519 signature, not GCON's HMAC key -- a caller with no
+        access to (or no trust in) GCON's own signing key can still run
+        this check.
+
+        A key embedded in the same block as the signature proves nothing
+        about WHO signed (anyone can generate a keypair and sign), so the
+        coordinator passes `registered_public_key_pem`, the key the node
+        enrolled with: the block's key must be that key and the signature
+        is verified against it. `require_registered_key=True` makes a node
+        with no key on file fail rather than fall back to the embedded one.
+        Whatever the key, the attestation must agree with the receipt
+        about the job, the node, the status and the output hash.
 
         Returns (False, "No worker attestation on this receipt") --
         not an error -- for a receipt with none (older agent build, or
@@ -336,11 +383,25 @@ class ExecutionVerifier:
         if not payload or not signature or not public_key_pem:
             return False, "Worker attestation is missing payload, signature, or public key"
 
-        if not _verify_worker_attestation(public_key_pem, payload, signature):
+        if registered_public_key_pem is not None:
+            if "".join(public_key_pem.split()) != "".join(registered_public_key_pem.split()):
+                return False, "Worker attestation was not signed by the key registered for this node"
+            verify_key = registered_public_key_pem
+        elif require_registered_key:
+            return False, "No registered key on file for this node to verify the attestation against"
+        else:
+            verify_key = public_key_pem
+
+        if not _verify_worker_attestation(verify_key, payload, signature):
             return False, "Worker attestation signature is invalid"
 
         if payload.get("job_id") != receipt.get("job_id"):
             return False, "Worker attestation job_id does not match the receipt's"
+
+        # What the node signed must be what the receipt says happened.
+        for field, receipt_field in (("node_id", "agent_id"), ("status", "status"), ("output_hash", "output_hash")):
+            if payload.get(field) != receipt.get(receipt_field):
+                return False, f"Worker attestation {field} does not match the receipt's {receipt_field}"
 
         return True, "Worker attestation is valid"
 
@@ -429,6 +490,8 @@ class ExecutionVerifier:
                 output_hash=output_hash,
                 metrics=execution_result.get("metrics", {}),
                 attested_node_id=attested_node_id,
+                agent_id=agent_id,
+                status=execution_result.get("status", "unknown"),
             ),
             "issued_at": datetime.now(UTC).isoformat()
         }

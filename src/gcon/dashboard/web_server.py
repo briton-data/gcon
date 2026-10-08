@@ -652,6 +652,16 @@ class WebServer:
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        @self.app.put("/management/organizations/{org_id}/status")
+        def mgmt_set_organization_status(
+            org_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
+):
+            # Disable (or re-enable) every customer user of this organization.
+            try:
+                return self.management.set_organization_customer_status(org_id, payload.get("status"))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         @self.app.delete("/management/organizations/{org_id}")
         def mgmt_delete_organization(
             org_id: str, user=Depends(self.require_permission("Manage users")),

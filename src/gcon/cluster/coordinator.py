@@ -20,6 +20,8 @@ from gcon.transport.errors import NodeUnavailableError
 
 from gcon.execution.verifier import ExecutionVerifier
 from gcon.execution.artifact_registry import ArtifactRegistry
+from gcon.transport.url_safety import validate_outbound_url
+from gcon.execution.output_limits import cap_result
 from gcon.execution.policy_engine import PolicyEngine
 from gcon.execution.staking import StakeLedger
 from gcon.execution.assurance import synthesize_assurance
@@ -68,6 +70,27 @@ def _log_line(message):
         _coordinator_logger.warning(text)
     else:
         _coordinator_logger.info(text)
+
+_REQUIRES_NUMERIC = ("min_vram_gb", "min_cpu_cores")
+
+
+def _validate_requires(requires):
+    """requires, when given, is a JSON object: `gpu` a boolean and `min_vram_gb` /
+    `min_cpu_cores` finite non-negative numbers. Anything else is a ValueError
+    (HTTP 400)."""
+    if requires is None:
+        return
+    if not isinstance(requires, dict):
+        raise ValueError("requires must be an object, e.g. {\"gpu\": true, \"min_vram_gb\": 12}.")
+    if "gpu" in requires and not isinstance(requires["gpu"], bool):
+        raise ValueError("requires.gpu must be true or false.")
+    for key in _REQUIRES_NUMERIC:
+        if key in requires:
+            value = requires[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or value != value or value in (float("inf"), float("-inf")) or value < 0:
+                raise ValueError(f"requires.{key} must be a non-negative number (got {value!r}).")
+
 
 class GCONCoordinator:
     """
@@ -188,8 +211,13 @@ class GCONCoordinator:
         # docstring for the full history). Missing/malformed file
         # falls back to PolicyEngine's built-in defaults, same as
         # before.
+        # A policy file the operator POINTED at must exist: silently running
+        # without one would turn every submission limit off.
+        _explicit_policy = os.environ.get("GCON_POLICY_FILE")
+        if _explicit_policy and not os.path.isfile(_explicit_policy):
+            raise ValueError(f"GCON_POLICY_FILE={_explicit_policy!r} does not exist.")
         self.policy_engine = PolicyEngine(
-            policy_file=os.environ.get("GCON_POLICY_FILE", "policy.json")
+            policy_file=_explicit_policy or "policy.json"
         )
         # self.jobs/self.receipts are unbounded in-memory dicts -- every
         # job ever submitted stayed in memory for the coordinator's
@@ -679,9 +707,13 @@ class GCONCoordinator:
         # no-op for a node already registered via the real gRPC path.
         if self.control_plane is not None:
             try:
+                # For a node the gRPC Register handler already recorded, keep
+                # what it recorded (real hostname, endpoint, version, the
+                # authenticated fingerprint): this call must not wipe them.
+                already = self.control_plane.nodes.get(node.node_id)
                 self.control_plane.nodes.upsert(
                     node_id=node.node_id,
-                    hostname=node.node_id,
+                    hostname=already["hostname"] if already else node.node_id,
                     status=node.status,
                     org_id=getattr(node, "org_id", None),
                 )
@@ -812,6 +844,10 @@ class GCONCoordinator:
                     "compare against each other."
                 )
 
+        # `requires` is customer input read by the scheduler on every pass, so a
+        # malformed value must be refused here, not discovered there.
+        _validate_requires(requires)
+
         # Real, pre-dispatch assurance gate (see policy_engine.py's
         # module docstring) -- checks only what's knowable right now
         # (declared kind/requires/verify/org_id), so unlike
@@ -828,9 +864,17 @@ class GCONCoordinator:
                 f"Submission rejected by policy: {reason}"
             )
 
+        # callback_url is fetched by the coordinator itself, so it is checked
+        # here for every caller (and again at delivery time): see url_safety.
+        if callback_url:
+            validate_outbound_url(callback_url)
+
         dataset_artifacts = dataset_artifacts or []
         for artifact_id in dataset_artifacts:
-            if self.artifact_registry.get_artifact(artifact_id) is None:
+            known = self.artifact_registry.get_artifact(artifact_id)
+            # An artifact belonging to another organization is reported exactly
+            # like one that does not exist, so ids can't be probed across tenants.
+            if known is None or (org_id is not None and known.org_id != org_id):
                 raise ValueError(
                     f"dataset_artifacts references unknown artifact "
                     f"'{artifact_id}' -- register it first."
@@ -856,7 +900,7 @@ class GCONCoordinator:
         artifact_ids = []
 
         for filepath in artifacts:
-            artifact_id = self.artifact_registry.register_artifact(filepath)
+            artifact_id = self.artifact_registry.register_artifact(filepath, org_id=org_id)
             artifact_ids.append(artifact_id)
         
         
@@ -2047,6 +2091,7 @@ class GCONCoordinator:
         resources = node.report_resources()
         self.receive_resource_report(resources)
 
+        result = cap_result(result)
         result = self._enforce_sandbox_evidence(job_id, job, node, result)
 
         with self.jobs_lock:
@@ -2348,6 +2393,7 @@ class GCONCoordinator:
             resources = node.report_resources()
             self.receive_resource_report(resources)
 
+            result = cap_result(result)
             result = self._enforce_sandbox_evidence(job_id, job, node, result)
 
             with results_lock:
@@ -3726,7 +3772,7 @@ class GCONCoordinator:
     )
 
         artifact_id = self.artifact_registry.register_artifact(
-             stored_path
+             stored_path, org_id=(self.jobs.get(job_id) or {}).get("org_id"),
     )
 
         job = self.jobs.get(job_id)
@@ -4429,8 +4475,20 @@ class GCONCoordinator:
 
         proof = receipt.get("proof", {})
         is_valid, message = self.verifier.validate_proof(proof)
+        if is_valid:
+            is_valid, message = self.verifier.validate_receipt_fields(receipt)
+        registered_key = None
+        if self.control_plane is not None and receipt.get("agent_id"):
+            try:
+                node_row = self.control_plane.nodes.get(receipt["agent_id"])
+                registered_key = node_row.get("ed25519_public_key") if node_row else None
+            except Exception:
+                registered_key = None
         worker_attestation_valid, worker_attestation_message = (
-            self.verifier.validate_worker_attestation(receipt)
+            self.verifier.validate_worker_attestation(
+                receipt, registered_public_key_pem=registered_key,
+                require_registered_key=self.control_plane is not None,
+            )
         )
 
         job_id = receipt.get("job_id")
@@ -4683,14 +4741,15 @@ class GCONCoordinator:
 
         return summary
     
-    def get_artifacts(self):
+    def get_artifacts(self, org_id=None, scoped=False):
         """
-        Return a dashboard-friendly summary of all artifacts.
+        Return a dashboard-friendly summary of artifacts: all of them for the
+        staff dashboard, or with scoped=True only those owned by `org_id`.
         """
 
         artifacts = []
 
-        for artifact in self.artifact_registry.list_artifacts():
+        for artifact in self.artifact_registry.list_artifacts(org_id=org_id, scoped=scoped):
             artifacts.append({
                 "artifact_id": artifact.artifact_id,
                 "filename": artifact.filename,

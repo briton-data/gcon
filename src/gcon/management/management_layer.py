@@ -30,6 +30,7 @@ from .api_keys import APIKeyManager
 from .audit_log import AuditLogger
 
 from gcon.monitoring.notifications import NotificationCenter
+from gcon.transport.url_safety import validate_outbound_url
 from gcon.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -328,6 +329,9 @@ class ManagementLayer:
         user = self.user_registry.add_user(name, email, role, organization_id, status, username=username)
         if password:
             user.set_password(password)
+            # set_password only changes the in-memory user: without this the
+            # hash is lost on the next restart and the new user can't log in.
+            self.user_registry._persist(user)
         self.audit_logger.log("Admin", "created user", user.name)
         self.notification_center.notify("user_registered", f"{user.name} was added")
         return user.to_dict()
@@ -337,7 +341,18 @@ class ManagementLayer:
         user = self.user_registry.set_username(user_id, username)
         return user.to_dict()
 
-    def update_user(self, user_id, **fields):
+    # The only user fields an update request may change. The payload used to be
+    # splatted straight into the registry, so a request could also set
+    # password_hash, user_id, stats and so on.
+    _UPDATABLE_USER_FIELDS = frozenset({"name", "email", "role", "organization_id", "status", "username"})
+
+    def update_user(self, user_id, /, **fields):
+        unknown = sorted(set(fields) - self._UPDATABLE_USER_FIELDS)
+        if unknown:
+            raise ValueError(f"These fields cannot be updated: {', '.join(unknown)}.")
+        role = fields.get("role")
+        if role is not None and role not in rbac.ROLES:
+            raise ValueError(f"Invalid role '{role}'.")
         user = self.user_registry.update_user(user_id, **fields)
         self.audit_logger.log("Admin", "updated user", user.name)
         return user.to_dict()
@@ -462,6 +477,7 @@ class ManagementLayer:
         if not user.check_password(current_password):
             raise ValueError("Current password is incorrect.")
         user.set_password(new_password)
+        self.user_registry._persist(user)
         self.session_manager.destroy_all_for_user(user_id)
         self.audit_logger.log(user.name, "changed password")
         self.notification_center.notify("password_changed", f"{user.name} changed their password")
@@ -473,6 +489,7 @@ class ManagementLayer:
         """
         user = self.user_registry.get_user(user_id)
         user.set_password(new_password)
+        self.user_registry._persist(user)
         self.session_manager.destroy_all_for_user(user_id)
         self.audit_logger.log("Admin", "set password for", user.name)
 
@@ -508,22 +525,29 @@ class ManagementLayer:
         Start a self-service password reset. Always returns None
         with no error, whether or not the email matches an account,
         so this endpoint can't be used to enumerate registered
-        emails. If it does match, logs the reset token at WARNING
-        level (there is no outbound email integration yet -- see
-        docs/deployment.md) so an operator can hand it to the user
-        out of band; a real deployment should replace this log line
-        with an actual email send.
+        emails. If it does match, a reset token is created. The token is a
+        bearer credential, so it is NOT written to the log by default (logs
+        are widely readable and retained): only when GCON_EXPOSE_RESET_TOKEN
+        is set -- the same local-development switch the customer reset flow
+        uses -- is it logged at WARNING so a developer can hand it over. A
+        real deployment should replace this with an actual email send.
         """
         user = self.user_registry.get_user_by_email(email)
         if not user:
             return
         token = self.reset_token_manager.create_token(user.user_id)
-        logger.warning(
-            "Password reset requested for '%s'. Reset token (valid %d minutes): %s\n"
-            "No email integration is configured -- deliver this token to the "
-            "user out of band, e.g. a link to /reset-password?token=%s",
-            email, self.reset_token_manager.ttl_minutes, token, token,
-        )
+        if os.environ.get("GCON_EXPOSE_RESET_TOKEN", "").strip().lower() in ("1", "true", "yes"):
+            logger.warning(
+                "Password reset requested for '%s'. Reset token (valid %d minutes): %s\n"
+                "GCON_EXPOSE_RESET_TOKEN is set (development only): deliver this token "
+                "to the user out of band, e.g. a link to /reset-password?token=%s",
+                email, self.reset_token_manager.ttl_minutes, token, token,
+            )
+        else:
+            logger.warning(
+                "Password reset requested for '%s'. The token is not logged; no email "
+                "integration is configured to deliver it.", email,
+            )
         self.audit_logger.log(user.name, "requested password reset")
 
     def reset_password(self, token, new_password):
@@ -1014,6 +1038,7 @@ class ManagementLayer:
     def create_webhook_subscription(self, org_id, url, event_types):
         if self.coordinator is None or self.coordinator.control_plane is None:
             raise ValueError("No control plane available.")
+        validate_outbound_url(url)
         sub = self.coordinator.control_plane.webhooks.create_subscription(org_id, url, event_types)
         self.audit_logger.log("Admin", f"created webhook subscription for org '{org_id}'", url)
         # Secret is only ever revealed at creation time -- see
@@ -1030,7 +1055,8 @@ class ManagementLayer:
         if self.coordinator is None or self.coordinator.control_plane is None:
             return []
         if job_id:
-            return self.coordinator.control_plane.webhooks.list_for_job(job_id)
+            return [self._mask_delivery_secret(d) for d in
+                    self.coordinator.control_plane.webhooks.list_for_job(job_id)]
         now_iso = datetime.now(UTC).isoformat()
         # due_deliveries surfaces pending/retrying; for a dashboard
         # history view we want everything recent regardless of
@@ -1046,8 +1072,16 @@ class ManagementLayer:
         for r in rows:
             d = dict(r)
             d["payload"] = _json.loads(d.pop("payload_json"))
-            out.append(d)
+            out.append(self._mask_delivery_secret(d))
         return out
+
+    @staticmethod
+    def _mask_delivery_secret(delivery):
+        """A delivery row carries the HMAC secret its payload was signed with;
+        whoever can read delivery history must not be able to forge signatures."""
+        if delivery and delivery.get("secret"):
+            delivery = dict(delivery, secret=_mask_webhook_secret(delivery["secret"]))
+        return delivery
 
     # ------------------------------------------------------------------
     # HA / leader election status (see gcon.cluster.leader_election) --
@@ -1202,6 +1236,13 @@ class ManagementLayer:
         return [k.to_dict() for k in self.api_key_manager.list_keys()]
 
     def create_api_key(self, name, owner_user_id, scopes=None, expires_in_days=90):
+        # A key whose owner does not exist authenticates with no owner, which
+        # the API treats as having no organization. Refuse to mint one: the
+        # owner must be a real staff user or customer user.
+        owner_exists = owner_user_id in self.user_registry.users or \
+            self.customer_registry.users.get(owner_user_id) is not None
+        if not owner_exists:
+            raise ValueError(f"Cannot create an API key for unknown user '{owner_user_id}'.")
         key = self.api_key_manager.create_key(name, owner_user_id, scopes, expires_in_days)
         self.audit_logger.log("Admin", "generated API key", key.name)
         self.notification_center.notify("api_key_created", f"API key '{key.name}' was created")
@@ -1303,6 +1344,31 @@ class ManagementLayer:
         )
         self.audit_logger.log(f"Customer:{org_id}", "generated API key", key.name)
         return key.to_dict(reveal_secret=True)
+
+    def limit_session_api_keys(self, customer_user_id, keep=5):
+        """Revoke this customer's oldest login ("Web session ...") keys beyond
+        the newest `keep`. Keys they created by hand under other names are left
+        alone."""
+        sessions = sorted(
+            (k for k in self.api_key_manager.list_keys()
+             if k.owner_user_id == customer_user_id and k.name.startswith("Web session") and k.status == "Active"),
+            key=lambda k: k.created_at,
+        )
+        for old in sessions[:max(0, len(sessions) - keep)]:
+            self.api_key_manager.revoke_key(old.key_id)
+
+    def set_organization_customer_status(self, org_id, status):
+        """Staff action: disable (or re-enable) every customer user of an
+        organization. A Disabled customer can't log in and none of their API
+        keys authenticate, so this is how an abusive customer is stopped even
+        though revoking one key only makes them log in for another."""
+        customers = self.customer_registry.list_for_org(org_id)
+        if not customers:
+            raise ValueError(f"Organization '{org_id}' has no customer users.")
+        for customer in customers:
+            self.customer_registry.update_status(customer.customer_user_id, status)
+        self.audit_logger.log("Admin", f"set customer status to {status} for", org_id)
+        return {"org_id": org_id, "status": status, "customers": len(customers)}
 
     def revoke_customer_api_key(self, org_id, key_id):
         """Raises ValueError if key_id doesn't exist OR belongs to a

@@ -15,6 +15,9 @@ class Artifact:
     sha256: str
     size: int
     uploaded_at: str
+    # The organization that owns this artifact (None: internal / unattributed).
+    # An artifact is only ever visible to, or usable by, its own organization.
+    org_id: str = None
 
 
 class ArtifactRegistry:
@@ -48,9 +51,9 @@ class ArtifactRegistry:
 
         return sha256.hexdigest()
 
-    def register_artifact(self, filepath):
+    def register_artifact(self, filepath, org_id=None):
         """
-        Register a file as an artifact.
+        Register a file as an artifact owned by `org_id`.
         """
 
         if not os.path.isfile(filepath):
@@ -58,9 +61,13 @@ class ArtifactRegistry:
 
         filename = os.path.basename(filepath)
 
-        # Prevent duplicate registrations
-        if filename in self.filename_index:
-            existing_id = self.filename_index[filename]
+        # Prevent duplicate registrations -- of the same FILE by the same
+        # organization. (This used to key on the bare filename, so two different
+        # `model.bin` files collapsed into one id and the second was silently
+        # bound to the first one's hash.)
+        index_key = (org_id, os.path.abspath(filepath))
+        if index_key in self.filename_index:
+            existing_id = self.filename_index[index_key]
             return existing_id
 
         artifact = Artifact(
@@ -69,11 +76,12 @@ class ArtifactRegistry:
             filepath=os.path.abspath(filepath),
             sha256=self._calculate_sha256(filepath),
             size=os.path.getsize(filepath),
-            uploaded_at=datetime.now(UTC).isoformat()
+            uploaded_at=datetime.now(UTC).isoformat(),
+            org_id=org_id,
         )
 
         self.artifacts[artifact.artifact_id] = artifact
-        self.filename_index[filename] = artifact.artifact_id
+        self.filename_index[index_key] = artifact.artifact_id
 
         return artifact.artifact_id
 
@@ -83,17 +91,20 @@ class ArtifactRegistry:
         """
         return self.artifacts.get(artifact_id)
 
-    def list_artifacts(self):
+    def list_artifacts(self, org_id=None, scoped=False):
         """
-        Return all registered artifacts.
+        Return registered artifacts. With scoped=True, only those owned by
+        `org_id` (a customer must never see another organization's).
         """
+        if scoped:
+            return [a for a in self.artifacts.values() if a.org_id == org_id]
         return list(self.artifacts.values())
 
     def artifact_exists(self, filename):
         """
         Check whether a filename has been registered.
         """
-        return filename in self.filename_index
+        return any(a.filename == filename for a in self.artifacts.values())
 
     def verify_artifact(self, artifact_id):
         """
@@ -121,7 +132,7 @@ class ArtifactRegistry:
         if artifact is None:
             return False
 
-        self.filename_index.pop(artifact.filename, None)
+        self.filename_index.pop((artifact.org_id, artifact.filepath), None)
 
         return True
 

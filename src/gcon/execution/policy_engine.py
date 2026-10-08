@@ -45,6 +45,13 @@ ever having been rejectable at submission (declared nothing policy
 could object to in advance), and vice versa.
 """
 import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class PolicyEngine:
@@ -80,10 +87,22 @@ class PolicyEngine:
             # discarded the defaults instead of merging. New keys the
             # file doesn't mention keep their "no restriction"
             # default; any key the file DOES set overrides it.
-            if isinstance(loaded, dict):
-                self.policy.update(loaded)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+            if not isinstance(loaded, dict):
+                raise ValueError(f"Policy file {policy_file!r} must contain a JSON object.")
+            self.policy.update(loaded)
+        except FileNotFoundError:
+            # No policy file is a legitimate "use the defaults" -- but say so,
+            # because with no file the submission limits (max_replicas,
+            # max_requires, require_org_id) are all off.
+            logger.warning(
+                "No policy file at %r: running with default limits; submission "
+                "limits (max_replicas, max_requires, require_org_id) are NOT enforced.",
+                policy_file,
+            )
+        except json.JSONDecodeError as e:
+            # A policy file that exists but can't be read must not quietly turn
+            # every limit off (it used to): refuse to start instead.
+            raise ValueError(f"Policy file {policy_file!r} is not valid JSON: {e}") from e
 
     def check_runtime(self, receipt):
         """
@@ -219,6 +238,8 @@ class PolicyEngine:
         max_replicas = self.policy.get("max_replicas")
         if verify is not None and max_replicas is not None:
             replicas = verify.get("replicas", 2)
+            if not _is_number(replicas):
+                return False, f"verify.replicas must be a number (got {replicas!r})"
             if replicas > max_replicas:
                 return False, (
                     f"Requested {replicas} replicas exceeds policy's "
@@ -229,6 +250,8 @@ class PolicyEngine:
         if requires:
             for key, ceiling in max_requires.items():
                 requested = requires.get(key)
+                if requested is not None and not _is_number(requested):
+                    return False, f"requires.{key} must be a number (got {requested!r})"
                 if requested is not None and ceiling is not None and requested > ceiling:
                     return False, (
                         f"Requested {key}={requested} exceeds policy's "
