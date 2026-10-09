@@ -3010,12 +3010,19 @@ class GCONCoordinator:
             self.scheduler_stats.tick("dispatching")
 
             job_id = self.job_queue.get()
-            _log_line(f"[QUEUE] Dispatching {job_id}")
-            _log_line(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
 
             try:
                 self.assign_job(job_id)
                 consecutive_misses = 0
+                # Logged only once the job really was dispatched. Logging
+                # before the attempt wrote two lines on every pass, and a
+                # job nobody can take is retried ~10x/second, so one
+                # undispatchable job produced ~20 log lines a second forever
+                # (and "Remaining jobs" was wrong, the job was still waiting).
+                # A waiting job is reported once, via the job_dispatch_failed
+                # telemetry event.
+                _log_line(f"[QUEUE] Dispatching {job_id}")
+                _log_line(f"[QUEUE] Remaining jobs: {self.job_queue.qsize()}")
             except RuntimeError as miss:
                 # Expected, recoverable: "no available node right now".
                 # Put the job back and try again on the next tick.
