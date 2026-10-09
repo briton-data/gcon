@@ -136,7 +136,10 @@ class WorkflowEngine:
         """
         from gcon.cluster.coordinator import NotLeaderError
 
-        for job_id in list(state.ready_jobs):
+        # ready_jobs is a set, whose string order changes between processes
+        # (hash randomization). Submit in the workflow's own job order so which
+        # job a per-org cap or a full queue refuses is deterministic.
+        for job_id in [j for j in workflow.jobs if j in state.ready_jobs]:
 
             job = workflow.get_job(job_id)
 
