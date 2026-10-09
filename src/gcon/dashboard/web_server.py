@@ -507,7 +507,10 @@ class WebServer:
                 status=payload.get("status", "Active"),
                 password=payload.get("password"),
                 username=payload.get("username"),
+                actor=user,
     )
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
@@ -516,7 +519,9 @@ class WebServer:
         def mgmt_update_user(
             user_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),):
             try:
-                return self.management.update_user(user_id, **payload)
+                return self.management.update_user(user_id, actor=user, **payload)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
@@ -525,7 +530,10 @@ class WebServer:
         def mgmt_delete_user(
             user_id: str,
             user=Depends(self.require_permission("Manage users")),):
-            self.management.delete_user(user_id)
+            try:
+                self.management.delete_user(user_id, actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             return {"deleted": user_id}
 
         @self.app.post("/management/users/{user_id}/status")
@@ -533,7 +541,9 @@ class WebServer:
             user_id: str, payload: dict,user=Depends(self.require_permission("Manage users")),
 ):
             try:
-                return self.management.set_user_status(user_id, payload["status"])
+                return self.management.set_user_status(user_id, payload["status"], actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -546,7 +556,9 @@ class WebServer:
             user_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
 ):
             try:
-                self.management.set_password(user_id, payload["password"])
+                self.management.set_password(user_id, payload["password"], actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             except KeyError:
                 raise HTTPException(status_code=400, detail="Missing 'password'.")
             except ValueError as e:
@@ -567,7 +579,9 @@ class WebServer:
             user_id: str, user=Depends(self.require_permission("Manage users")),
 ):
             try:
-                self.management.force_logout_user(user_id)
+                self.management.force_logout_user(user_id, actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e))
             return {"logged_out": user_id}

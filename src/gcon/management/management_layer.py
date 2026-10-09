@@ -322,7 +322,26 @@ class ManagementLayer:
         data["stats"] = self.get_user_stats(user.user_id)
         return data
 
-    def create_user(self, name, email, role, organization_id=None, status="Active", password=None, username=None):
+    @staticmethod
+    def _guard_owner(actor, target=None, new_role=None):
+        """
+        The Owner role is only ever granted, changed or taken over by an
+        Owner. "Manage users" alone is not enough: Administrator has it,
+        and without this an Administrator could make themselves (or an
+        accomplice) Owner, or reset an Owner's password and log in as them.
+
+        `actor` is the logged-in staff user performing the request. None
+        means a trusted internal caller (bootstrap, tests), never a request.
+        """
+        if actor is None or actor.role == "Owner":
+            return
+        if new_role == "Owner":
+            raise PermissionError("Only an Owner can grant the Owner role.")
+        if target is not None and target.role == "Owner":
+            raise PermissionError("Only an Owner can modify an Owner account.")
+
+    def create_user(self, name, email, role, organization_id=None, status="Active", password=None, username=None, *, actor=None):
+        self._guard_owner(actor, new_role=role)
         if self.user_registry.get_user_by_email(email):
             raise ValueError(f"A user with email '{email}' already exists.")
 
@@ -346,25 +365,28 @@ class ManagementLayer:
     # password_hash, user_id, stats and so on.
     _UPDATABLE_USER_FIELDS = frozenset({"name", "email", "role", "organization_id", "status", "username"})
 
-    def update_user(self, user_id, /, **fields):
+    def update_user(self, user_id, /, *, actor=None, **fields):
         unknown = sorted(set(fields) - self._UPDATABLE_USER_FIELDS)
         if unknown:
             raise ValueError(f"These fields cannot be updated: {', '.join(unknown)}.")
         role = fields.get("role")
         if role is not None and role not in rbac.ROLES:
             raise ValueError(f"Invalid role '{role}'.")
+        self._guard_owner(actor, self.user_registry.get_user(user_id), new_role=role)
         user = self.user_registry.update_user(user_id, **fields)
         self.audit_logger.log("Admin", "updated user", user.name)
         return user.to_dict()
 
-    def delete_user(self, user_id):
+    def delete_user(self, user_id, *, actor=None):
         user = self.user_registry.get_user(user_id)
+        self._guard_owner(actor, user)
         name = user.name
         self.user_registry.delete_user(user_id)
         self.org_registry.remove_user_everywhere(user_id)
         self.audit_logger.log("Admin", "deleted user", name)
 
-    def set_user_status(self, user_id, status):
+    def set_user_status(self, user_id, status, *, actor=None):
+        self._guard_owner(actor, self.user_registry.get_user(user_id))
         user = self.user_registry.set_status(user_id, status)
         self.audit_logger.log("Admin", f"set status to {status}", user.name)
         return user.to_dict()
@@ -482,12 +504,13 @@ class ManagementLayer:
         self.audit_logger.log(user.name, "changed password")
         self.notification_center.notify("password_changed", f"{user.name} changed their password")
 
-    def set_password(self, user_id, new_password):
+    def set_password(self, user_id, new_password, *, actor=None):
         """
         Admin-initiated password set (e.g. right after creating a
         user), no current password required.
         """
         user = self.user_registry.get_user(user_id)
+        self._guard_owner(actor, user)
         user.set_password(new_password)
         self.user_registry._persist(user)
         self.session_manager.destroy_all_for_user(user_id)
@@ -506,6 +529,10 @@ class ManagementLayer:
             raise ValueError("Email and password are required.")
         if role not in rbac.ROLES:
             raise ValueError(f"Invalid role '{role}'.")
+        if role == "Owner":
+            # Unauthenticated endpoint: an approver activating a pending
+            # account would otherwise be activating an Owner by accident.
+            raise ValueError("The Owner role cannot be requested at signup.")
         if self.user_registry.get_user_by_email(email):
             raise ValueError(f"A user with email '{email}' already exists.")
 
@@ -577,13 +604,14 @@ class ManagementLayer:
         self.user_registry.get_user(user_id)  # raises ValueError if unknown
         return self.session_manager.list_active_for_user(user_id)
 
-    def force_logout_user(self, user_id):
+    def force_logout_user(self, user_id, *, actor=None):
         """
         Admin-initiated: invalidate every active session for a user
         without touching their password (unlike set_password, which
         also does this as a side effect of a reset).
         """
         user = self.user_registry.get_user(user_id)
+        self._guard_owner(actor, user)
         self.session_manager.destroy_all_for_user(user_id)
         self.audit_logger.log("Admin", "force logged out", user.name)
 
