@@ -54,6 +54,20 @@ from gcon.transport.proto import gcon_transport_pb2_grpc as pb_grpc
 logger = logging.getLogger(__name__)
 
 
+_TLS_TRUST_FAILURE_MARKERS = (
+    "certificate verify failed",
+    "certificate signature failure",
+    "unknown ca",
+    "bad certificate",
+    "handshake failed",
+)
+
+
+def _looks_like_tls_trust_failure(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TLS_TRUST_FAILURE_MARKERS)
+
+
 class AgentDaemon:
     def __init__(
         self,
@@ -67,6 +81,7 @@ class AgentDaemon:
         sni_override: Optional[str] = None,
         enroll_token: Optional[str] = None,
         enroll_address: Optional[str] = None,
+        enroll_insecure: bool = False,
     ):
         self.node_id = node_id
         self.coordinator_address = coordinator_address
@@ -96,6 +111,9 @@ class AgentDaemon:
         # coordinator_address only for the simple case (no proxy in
         # front, internal port + 1 reachable directly).
         self.enroll_address = enroll_address or coordinator_address
+        # Legacy: enroll over a plaintext channel (no CA needed, nothing
+        # verified). Off by default; see _ensure_enrolled.
+        self.enroll_insecure = enroll_insecure
         self.capabilities = {k: str(v) for k, v in (capabilities or {}).items()}
         self.config = config or TransportConfig.load(control_plane=None)
 
@@ -131,10 +149,19 @@ class AgentDaemon:
                 logger.info("Connecting to coordinator at %s ...", self.coordinator_address)
                 self._connect_and_serve()
                 backoff = self.config.reconnect_initial_backoff_seconds
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Lost connection to coordinator; reconnecting in %.1fs", backoff
                 )
+                if _looks_like_tls_trust_failure(exc):
+                    logger.error(
+                        "The TLS handshake with the coordinator failed on certificate "
+                        "verification. If the coordinator was redeployed without persistent "
+                        "storage, its certificate authority was recreated and this worker's "
+                        "certificate is no longer trusted: delete the certificate files in %s "
+                        "and run the join command again to enroll this worker anew.",
+                        self.cert_dir,
+                    )
                 self._stop.wait(backoff)
                 backoff = min(
                     backoff * self.config.reconnect_backoff_multiplier,
@@ -189,15 +216,17 @@ class AgentDaemon:
         (every boot after the first) -- so this is safe to call
         unconditionally on every startup, not just "first ever" ones.
 
-        Deliberately dials with grpc.insecure_channel for this one
-        call: this node has no CA cert yet to verify the coordinator
-        against, so there's nothing to pin TLS to on the very first
-        contact. Security here comes from `enroll_token` (must match
-        the coordinator's GCON_ENROLL_TOKEN) instead of transport
-        verification -- standard trust-on-first-use, same trust model
-        as e.g. SSH host keys on first connect. Every call after this
-        one uses full mTLS as normal, verified against the CA cert
-        this call just fetched and saved.
+        The coordinator's CA certificate (public, not a secret) must
+        already be in the cert dir as ca.cert.pem, delivered with the
+        join command from a channel the user already trusts (the
+        customer website over HTTPS). Enrollment is then an ordinary
+        server-verified TLS connection against that CA, so neither the
+        token nor the certificate that comes back can be read or
+        replaced by anyone on the network.
+
+        Without a CA on disk this refuses to enroll rather than trust
+        whoever answers -- unless `enroll_insecure` was set explicitly
+        (legacy trust-on-first-use over plaintext, the old behaviour).
         """
         cert_path = os.path.join(self.cert_dir, f"agent-{self.node_id}.cert.pem")
         ca_cert_path = os.path.join(self.cert_dir, tls.CA_CERT_FILE)
@@ -212,11 +241,42 @@ class AgentDaemon:
             )
 
         os.makedirs(self.cert_dir, exist_ok=True)
+        if self.enroll_insecure:
+            logger.warning(
+                "\n" + "!" * 72 + "\n"
+                "!! INSECURE ENROLLMENT -- LOCAL DEVELOPMENT ONLY\n"
+                "!! The enroll token is sent in plaintext and the coordinator is NOT\n"
+                "!! verified: anyone on the network path can read the token or hand\n"
+                "!! this worker a certificate authority of their own.\n"
+                "!! Never do this over the internet. Use the join command from the\n"
+                "!! website (it carries the CA certificate) instead.\n"
+                + "!" * 72
+            )
+            channel = grpc.insecure_channel(self.enroll_address)
+        elif os.path.exists(ca_cert_path):
+            with open(ca_cert_path, "rb") as f:
+                trusted_ca = f.read()
+            options = []
+            sni_name = self.sni_override or self.enroll_address.rsplit(":", 1)[0]
+            if sni_name:
+                options.append(("grpc.ssl_target_name_override", sni_name))
+            channel = grpc.secure_channel(
+                self.enroll_address,
+                grpc.ssl_channel_credentials(root_certificates=trusted_ca),
+                options=options,
+            )
+        else:
+            raise RuntimeError(
+                f"Cannot enroll '{self.node_id}': the coordinator's CA certificate is not at "
+                f"{ca_cert_path}. Enrollment is verified against it so the token and the "
+                "certificate cannot be intercepted -- put the CA certificate there (the join "
+                "command from the website does this), or pass --enroll-insecure to accept an "
+                "unverified plaintext enrollment."
+            )
         key_pem, csr_pem = tls.generate_agent_csr(self.node_id)
 
         logger.info("No cert on disk for '%s' -- self-enrolling with coordinator at %s ...",
                     self.node_id, self.enroll_address)
-        channel = grpc.insecure_channel(self.enroll_address)
         try:
             stub = pb_grpc.AgentControlStub(channel)
             response = stub.Enroll(

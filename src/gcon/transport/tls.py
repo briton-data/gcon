@@ -417,6 +417,72 @@ def cert_fingerprint(cert_path: str) -> str:
     return cert.fingerprint(hashes.SHA256()).hex()
 
 
+def _normalize_fingerprint(value: str) -> str:
+    return "".join(c for c in (value or "") if c not in ": \t\r\n").lower()
+
+
+def install_ca(cert_dir: str, ca_b64: str = "", expected_fingerprint: str = "") -> str:
+    """
+    Put the coordinator's CA certificate (public, not a secret) where a
+    worker's enrollment expects it: <cert_dir>/ca.cert.pem.
+
+    `ca_b64` is the base64 of the PEM, as carried by a generated join
+    command. If `expected_fingerprint` (SHA-256 hex, colons optional) is
+    given, the certificate must match it. With no `ca_b64`, the CA already
+    on disk is checked instead. Raises ValueError for anything that is not a
+    parseable certificate or does not match, so a worker never enrolls
+    against a trust anchor it was not given. Returns the CA's fingerprint.
+    """
+    import base64
+    import binascii
+
+    path = os.path.join(cert_dir, CA_CERT_FILE)
+    if ca_b64:
+        try:
+            pem = base64.b64decode(ca_b64, validate=True)
+            cert = x509.load_pem_x509_certificate(pem)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("The CA certificate is not valid base64-encoded PEM.") from exc
+    else:
+        if not os.path.exists(path):
+            raise ValueError(f"No CA certificate given and none at {path}.")
+        with open(path, "rb") as f:
+            pem = f.read()
+        try:
+            cert = x509.load_pem_x509_certificate(pem)
+        except ValueError as exc:
+            raise ValueError(f"The CA certificate at {path} is not a valid certificate.") from exc
+
+    fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+    if expected_fingerprint and _normalize_fingerprint(expected_fingerprint) != fingerprint:
+        raise ValueError(
+            "The CA certificate does not match the expected fingerprint "
+            f"(got {fingerprint}); refusing to trust it."
+        )
+    if ca_b64:
+        os.makedirs(cert_dir, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(pem)
+    return fingerprint
+
+
+def read_ca(cert_dir: str) -> dict:
+    """
+    The coordinator's CA certificate and its SHA-256 fingerprint, for handing
+    to a website that builds a worker's join command. Public information.
+    """
+    import base64
+
+    with open(os.path.join(cert_dir, CA_CERT_FILE), "rb") as f:
+        pem = f.read()
+    cert = x509.load_pem_x509_certificate(pem)
+    return {
+        "ca_cert_pem": pem.decode("ascii"),
+        "ca_cert_b64": base64.b64encode(pem).decode("ascii"),
+        "sha256_fingerprint": cert.fingerprint(hashes.SHA256()).hex(),
+    }
+
+
 def load_server_credentials(cert_dir: str, hostname: str = "localhost"):
     """
     Build gRPC server credentials for the coordinator: presents the

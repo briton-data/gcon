@@ -89,6 +89,17 @@ def _enroll_token() -> str:
     return os.environ.get("GCON_ENROLL_TOKEN", "")
 
 
+def _enroll_plaintext_allowed() -> bool:
+    """
+    GCON_ENROLL_INSECURE=1 serves the enroll port WITHOUT TLS, the way it
+    always used to. Off by default: over plaintext the token is readable on
+    the network and a man in the middle can hand the worker a CA of their
+    own, which the worker would then trust as the coordinator. Kept only so
+    an existing dev/single-tenant setup can opt back in explicitly.
+    """
+    return os.environ.get("GCON_ENROLL_INSECURE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _peer_common_name(context: grpc.ServicerContext) -> Optional[str]:
     """Extract the client certificate's Common Name from an mTLS peer
     connection -- this is the agent's authenticated identity, as
@@ -719,6 +730,12 @@ class GrpcTransport(Transport):
             if self.config.grpc_host not in ("0.0.0.0", "")
             else "localhost"
         )
+        # Whether a CA already exists BEFORE the credentials below create one.
+        # If it does not but workers are already enrolled, the cert directory
+        # was lost (e.g. a redeploy with no persistent volume): a fresh CA
+        # means every existing worker certificate is now untrusted.
+        ca_existed = os.path.exists(os.path.join(self.config.tls_cert_dir, tls.CA_KEY_FILE)) and \
+            os.path.exists(os.path.join(self.config.tls_cert_dir, tls.CA_CERT_FILE))
         # Dynamic (hot-reloadable) credentials, not the static
         # tls.load_server_credentials -- so gcon.transport.tls_rotation
         # .rotate_ca()/reissue_coordinator_cert() take effect for the
@@ -728,12 +745,25 @@ class GrpcTransport(Transport):
         credentials = tls_rotation.load_dynamic_server_credentials(
             self.config.tls_cert_dir, hostname=hostname,
         )
+        if not ca_existed and self.control_plane is not None:
+            enrolled = [n for n in self.control_plane.nodes.list_all() if n.get("auth_fingerprint")]
+            if enrolled:
+                logger.warning(
+                    "A NEW certificate authority was just created in %s, but %d worker(s) are "
+                    "already enrolled under the previous one. Their certificates are no longer "
+                    "trusted and they cannot reconnect until they are enrolled again. This "
+                    "means the certificate directory (and, to keep tokens/nodes/receipts, the "
+                    "data directory) is not on persistent storage -- mount a persistent volume "
+                    "for both before relying on this deployment.",
+                    self.config.tls_cert_dir, len(enrolled),
+                )
         bind_addr = f"{self.config.grpc_host}:{self.config.grpc_port}"
         actual_port = self._server.add_secure_port(bind_addr, credentials)
         self._server.start()
         logger.info("GrpcTransport listening on %s (TLS, mTLS required)", bind_addr)
 
-        # Second, separate server: plaintext, same servicer, but only
+        # Second, separate server: no client certificate required (TLS by
+        # default, plaintext only with GCON_ENROLL_INSECURE), same servicer, but only
         # Enroll is actually usable here (every other handler
         # immediately aborts via _peer_common_name(context) returning
         # None -- see Register). This exists solely so a worker with
@@ -749,14 +779,39 @@ class GrpcTransport(Transport):
             pb_grpc.add_AgentControlServicer_to_server(self.servicer, self._enroll_server)
             enroll_port = getattr(self.config, "grpc_enroll_port", self.config.grpc_port + 1)
             enroll_bind_addr = f"{self.config.grpc_host}:{enroll_port}"
-            self._enroll_server.add_insecure_port(enroll_bind_addr)
+            if _enroll_plaintext_allowed():
+                self._enroll_server.add_insecure_port(enroll_bind_addr)
+                logger.warning(
+                    "GrpcTransport enroll port listening on %s in PLAINTEXT "
+                    "(GCON_ENROLL_INSECURE is set): enroll tokens are readable on the network "
+                    "and workers cannot verify who they are enrolling with.",
+                    enroll_bind_addr,
+                )
+            else:
+                # Server-side TLS only (the worker has no certificate yet, so
+                # no client auth here). The worker verifies this server against
+                # the CA certificate it was given with its join command.
+                leaf = tls.issue_coordinator_cert(self.config.tls_cert_dir, hostname=hostname)
+                with open(leaf.key_path, "rb") as f:
+                    leaf_key = f.read()
+                with open(leaf.cert_path, "rb") as f:
+                    leaf_cert = f.read()
+                self._enroll_server.add_secure_port(
+                    enroll_bind_addr, grpc.ssl_server_credentials([(leaf_key, leaf_cert)]),
+                )
+                logger.info(
+                    "GrpcTransport enroll port listening on %s (TLS, token-gated, Enroll only)",
+                    enroll_bind_addr,
+                )
             self._enroll_server.start()
-            logger.info(
-                "GrpcTransport enroll port listening on %s (plaintext, token-gated, Enroll only)",
-                enroll_bind_addr,
-            )
         else:
-            logger.info("GCON_ENROLL_TOKEN not set -- self-enrollment port disabled")
+            logger.warning(
+                "Worker self-enrollment is DISABLED: the enroll port is not open because "
+                "GCON_ENROLL_TOKEN is not set. Workers cannot enroll themselves, and that "
+                "includes per-organization enroll tokens (they are checked on the enroll port). "
+                "Set GCON_ENROLL_TOKEN to open it; note that this value is itself a valid "
+                "operator enroll token for workers with no organization."
+            )
 
         return actual_port
 
