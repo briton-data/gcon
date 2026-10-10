@@ -419,6 +419,45 @@ same process.
 
 ---
 
+### Shared worker pool
+
+GCON operates a pool of shared, sandboxed workers. Your organization's own
+workers are always tried first; the pool is used only when none of them is
+available, and only as your organization's mode allows.
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/org/shared-pool` | *(any valid key)* | The organization's current mode and what each mode means |
+
+The mode is **read-only here**. An API key can leak, and a leaked key must not
+be able to move your jobs onto shared machines, so GCON changes the mode on your
+request (an Owner or Administrator on GCON's side, audit-logged).
+
+- `off`: your jobs never run on shared workers.
+- `basic` (default): a job may run on a shared worker only if it brings nothing
+  of its own beyond the command (no artifacts, no datasets).
+- `full`: you have opted in; jobs may use shared workers including their
+  artifacts and datasets.
+
+Shared workers always run jobs in a fresh container with its own private
+directory, and the result must carry that worker's signed attestation that it
+ran in a container. A job's `execution_pool` field says where it ran:
+`shared`, or `dedicated` for one of your own workers. The receipt names the
+worker that ran it and carries that worker's own signature.
+
+### Worker enrollment
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/enroll/ca` | *(none, public)* | The coordinator's CA certificate (`ca_cert_pem`, `ca_cert_b64`) and its `sha256_fingerprint` |
+
+A CA certificate is not a secret. A website that builds a worker's join command
+fetches it here and puts `ca_cert_b64` (and optionally the fingerprint) into the
+command, so a customer never handles a CA file: the worker installs it and
+verifies enrollment against it.
+
+---
+
 ## Python SDK
 
 ### Installation

@@ -11,11 +11,12 @@ Production-ready deployment instructions for GCON clusters.
 3. [Standalone Server Deployment](#standalone-server-deployment)
 4. [Docker Deployment](#docker-deployment)
 5. [Multi-Node Cluster](#multi-node-cluster)
-6. [High Availability](#high-availability)
-7. [Security Hardening](#security-hardening)
-8. [Monitoring & Observability](#monitoring--observability)
-9. [Troubleshooting](#troubleshooting)
-10. [Operations Runbooks](#operations-runbooks)
+6. [Persistent Storage & Worker Enrollment](#persistent-storage--worker-enrollment)
+7. [High Availability](#high-availability)
+8. [Security Hardening](#security-hardening)
+9. [Monitoring & Observability](#monitoring--observability)
+10. [Troubleshooting](#troubleshooting)
+11. [Operations Runbooks](#operations-runbooks)
 
 ---
 
@@ -468,6 +469,65 @@ version of this. For a production deployment today, that still means:
   design (see `docs/TRANSPORT_AND_PERSISTENCE.md`) but isn't fully wired
   through yet. Don't configure env vars for a backend that isn't wired
   up; GCON will silently ignore them and keep using SQLite.
+
+---
+
+## Persistent Storage & Worker Enrollment
+
+**The coordinator needs persistent storage for two directories.** On a platform
+whose filesystem is wiped on every deploy (Railway without a volume, a plain
+container), anything not on a volume is lost:
+
+| Directory | Setting | Holds |
+|---|---|---|
+| Certificate directory | `GCON_TLS_CERT_DIR` (default `keys/grpc`) | the certificate authority that every worker certificate is signed by, and the revocation list |
+| Data directory | `GCON_DATA_DIR` (default `data`) | the database: enrolled workers, enroll tokens, users, API keys, receipts |
+
+If the certificate directory is lost, the coordinator creates a **new**
+certificate authority on the next start and every enrolled worker is rejected
+(`certificate verify failed` / `certificate signature failure`). The coordinator
+logs `A NEW certificate authority was just created ... workers are already
+enrolled` when it detects this. Mount a volume for both directories. Workers
+cannot re-enroll themselves safely after an authority is lost, because they
+would have to trust whatever answers; delete the worker's certificate files and
+run its join command again.
+
+**Enrollment is verified TLS.** The enroll port (gRPC port + 1, opened when
+`GCON_ENROLL_TOKEN` is set; the coordinator logs a warning at startup when it is
+not, because per-organization enroll tokens are checked on that port too) serves
+server-side TLS. A worker enrolls with:
+
+1. the coordinator's CA certificate (public, not a secret), which a generated
+   join command carries as `GCON_CA_CERT_B64` / `--ca-cert-b64` (fetch it from
+   `GET /enroll/ca`), so a customer never handles a CA file. `GCON_CA_FINGERPRINT`
+   / `--ca-fingerprint` adds an optional check that it is the expected CA;
+2. an enroll token.
+
+A worker with no CA certificate refuses to enroll. `GCON_ENROLL_INSECURE=1` on the
+coordinator and `--enroll-insecure` on the worker restore the old plaintext
+trust-on-first-use behaviour, **for local development only**: both sides print a
+loud warning, the token is readable on the network, and the worker cannot tell
+who it is enrolling with.
+
+### Running the shared worker pool
+
+A shared-pool worker is an ordinary worker that runs jobs **in docker**
+(`GCON_EXECUTION_BACKEND=docker`), has **no organization**, and that a GCON
+Owner or Administrator has **explicitly put in the pool**
+(`PUT /management/nodes/{node_id}/shared-pool` with `{"enabled": true}`; audited).
+Being org-less and sandboxed is not enough, and a worker cannot declare itself
+a pool member. A worker that belongs to an organization can never be one.
+
+Each organization's mode (`off`, `basic`, `full`) is set the same way by an Owner
+or Administrator (`PUT /management/organizations/{org_id}/shared-pool`, audited).
+Customers can read it but not change it, and an API key cannot change it. The
+scheduler gives a customer's job to a pool worker only when none of that
+customer's own workers is available and the mode allows the job.
+
+Because such a worker serves several customers, the sandbox is its only
+isolation boundary. Each docker run gets a fresh container and its own private
+directory, deleted afterwards; nothing carries over between jobs. Keep the
+worker's host and Docker daemon dedicated to the pool.
 
 ---
 
