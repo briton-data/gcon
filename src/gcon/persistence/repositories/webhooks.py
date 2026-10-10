@@ -6,7 +6,12 @@ import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
+import logging
+
+from gcon.persistence import secret_box
 from gcon.persistence.db import ControlPlaneDatabase
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookRepository:
@@ -16,6 +21,25 @@ class WebhookRepository:
 
     def __init__(self, db: ControlPlaneDatabase):
         self.db = db
+        self._seal_legacy_plaintext_secrets()
+
+    def _seal_legacy_plaintext_secrets(self) -> None:
+        """Secrets written before encryption at rest existed are plain text:
+        encrypt them in place. A no-op once none are left."""
+        try:
+            for table, key in (("webhook_subscriptions", "subscription_id"),
+                               ("webhook_deliveries", "delivery_id")):
+                rows = self.db.query(
+                    f"SELECT {key} AS id, secret FROM {table} WHERE secret NOT LIKE ?",
+                    (secret_box.PREFIX + "%",),
+                )
+                for row in rows:
+                    self.db.execute(
+                        f"UPDATE {table} SET secret = ? WHERE {key} = ?",
+                        (secret_box.seal(row["secret"]), row["id"]),
+                    )
+        except Exception:
+            logger.warning("could not encrypt existing webhook secrets", exc_info=True)
 
     # ------------------------------------------------------ subscriptions
     def create_subscription(
@@ -30,7 +54,7 @@ class WebhookRepository:
                 (subscription_id, org_id, url, secret, event_types_json, active, created_at)
             VALUES (?, ?, ?, ?, ?, 1, ?)
             """,
-            (subscription_id, org_id, url, secret, json.dumps(event_types), now),
+            (subscription_id, org_id, url, secret_box.seal(secret), json.dumps(event_types), now),
         )
         return self.get_subscription(subscription_id)
 
@@ -66,6 +90,7 @@ class WebhookRepository:
         d = dict(row)
         d["event_types"] = json.loads(d.pop("event_types_json"))
         d["active"] = bool(d["active"])
+        d["secret"] = secret_box.open_(d["secret"])
         return d
 
     # --------------------------------------------------------- deliveries
@@ -93,8 +118,8 @@ class WebhookRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
             """,
             (
-                delivery_id, subscription_id, org_id, url, secret, job_id, event_type,
-                json.dumps(payload), now, now,
+                delivery_id, subscription_id, org_id, url, secret_box.seal(secret), job_id,
+                event_type, json.dumps(payload), now, now,
             ),
         )
         return self.get_delivery(delivery_id)
@@ -156,4 +181,5 @@ class WebhookRepository:
             return None
         d = dict(row)
         d["payload"] = json.loads(d.pop("payload_json"))
+        d["secret"] = secret_box.open_(d["secret"])
         return d

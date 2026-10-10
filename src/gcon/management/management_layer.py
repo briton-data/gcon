@@ -41,8 +41,9 @@ def _mask_webhook_secret(secret):
     separate helper (not imported from there) since webhook secrets
     are hex, not the gcon_-prefixed API key format, and don't share
     that module's length assumptions."""
-    if not secret or len(secret) < 12:
-        return "*" * len(secret or "")
+    if not secret or len(secret) < 12 or secret.startswith("enc:v1:"):
+        # (An encrypted value from a raw row: never show any part of it.)
+        return "*" * (32 if secret and secret.startswith("enc:v1:") else len(secret or ""))
     return f"{secret[:6]}{'*' * 24}{secret[-4:]}"
 
 # Bootstrap owner account, created once on first boot. Always set
