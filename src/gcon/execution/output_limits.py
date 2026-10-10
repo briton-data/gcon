@@ -44,3 +44,60 @@ def cap_result(result):
             if field in result:
                 result[field] = cap_text(result[field])
     return result
+
+
+class BoundedCapture:
+    """Collects a stream's text but only ever HOLDS the first `limit` bytes.
+
+    cap_text() above bounds what is sent and stored, but it runs after the whole
+    output is already in memory: `Popen.communicate()` buffers everything the job
+    printed first. A job printing gigabytes therefore exhausted the WORKER's
+    memory (a customer's own machine, or a shared-pool host) before any cap ran.
+    This is fed chunk by chunk while the job runs, keeps the first `limit`
+    bytes, and only counts the rest, so memory stays at the cap however much the
+    job prints. The result is the same shape cap_text() produces (the kept bytes
+    plus a marker saying how much was dropped).
+    """
+
+    def __init__(self, limit=None):
+        self.limit = limit or max_job_output_bytes()
+        self._kept = []
+        self._kept_bytes = 0
+        self._total_bytes = 0
+
+    def feed(self, chunk):
+        if not chunk:
+            return
+        raw = chunk.encode("utf-8", errors="replace")
+        self._total_bytes += len(raw)
+        room = self.limit - self._kept_bytes
+        if room <= 0:
+            return
+        if len(raw) <= room:
+            self._kept.append(chunk)
+            self._kept_bytes += len(raw)
+        else:
+            # Cut on a character boundary, as cap_text does.
+            self._kept.append(raw[:room].decode("utf-8", errors="ignore"))
+            self._kept_bytes += room
+
+    def text(self):
+        kept = "".join(self._kept)
+        dropped = self._total_bytes - self._kept_bytes
+        if dropped > 0:
+            kept += f"\n[output truncated: {dropped} of {self._total_bytes} bytes dropped]"
+        return kept
+
+
+def drain_stream(stream, capture, chunk_size=65536):
+    """Read `stream` to EOF into `capture`. Always keeps reading (discarding what
+    does not fit), so the job never blocks on a full pipe because of the cap."""
+    try:
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            capture.feed(chunk)
+    except (ValueError, OSError):
+        # The pipe was closed under us (the process was killed): nothing more to read.
+        pass

@@ -30,7 +30,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, UTC
 from gcon.monitoring.monitor import ResourceMonitor
 from gcon.execution import docker_executor
-from gcon.execution.output_limits import cap_text
+from gcon.execution.output_limits import BoundedCapture, drain_stream
 
 logging.basicConfig(
     level=logging.INFO,
@@ -613,8 +613,27 @@ class GCONAgent:
                 **self._job_popen_identity,
             )
             
-            # Monitor execution
-            stdout, stderr = self.process.communicate(timeout=timeout)
+            # Monitor execution. communicate() would hold EVERYTHING the job
+            # printed in this process's memory before any cap ran; the streams
+            # are drained into bounded captures instead, so a job that prints
+            # without end cannot exhaust the worker (see output_limits).
+            stdout_capture, stderr_capture = BoundedCapture(), BoundedCapture()
+            readers = [
+                threading.Thread(target=drain_stream, args=(self.process.stdout, stdout_capture), daemon=True),
+                threading.Thread(target=drain_stream, args=(self.process.stderr, stderr_capture), daemon=True),
+            ]
+            for reader in readers:
+                reader.start()
+            self.process.wait(timeout=timeout)
+            # communicate() also waited for the pipes to close (a background
+            # child can outlive the shell and keep them open); keep that, and
+            # keep its timeout behaviour.
+            deadline = (self.start_time + timeout) if timeout else None
+            for reader in readers:
+                reader.join(timeout=None if deadline is None else max(0.0, deadline - time.time()))
+                if reader.is_alive():
+                    raise subprocess.TimeoutExpired(command, timeout)
+            stdout, stderr = stdout_capture.text(), stderr_capture.text()
             self.end_time = time.time()
             self._stop_stage_watcher(stage_thread, stage_stop, stage_report_path)
 
@@ -626,8 +645,8 @@ class GCONAgent:
                 "status": "success" if self.process.returncode == 0 else "failed",
                 "return_code": self.process.returncode,
                 "runtime_seconds": runtime,
-                "stdout": cap_text(stdout),
-                "stderr": cap_text(stderr),
+                "stdout": stdout,
+                "stderr": stderr,
                 "metrics": metrics_dict,
                 "usage": self._read_usage_report(usage_report_path),
                 # Always a list -- possibly partial (see the timeout/
