@@ -525,7 +525,9 @@ class ManagementLayer:
         user = self.user_registry.get_user_by_email(email)
 
         if not user or not user.check_password(password):
-            self.audit_logger.log(email or "unknown", "failed login attempt")
+            # Masked: the typed value is untrusted (it is sometimes a password
+            # pasted into the wrong box) and an address is personal data.
+            self.audit_logger.log(mask_email(email) or "unknown", "failed login attempt")
             raise ValueError("Invalid email or password.")
 
         if user.status != "Active":
@@ -556,6 +558,11 @@ class ManagementLayer:
         try:
             user = self.user_registry.get_user(user_id)
         except ValueError:
+            return None
+        # Same rule as login(): only an Active account has a session. Without
+        # this, suspending someone left their existing session working for up
+        # to a day.
+        if user.status != "Active":
             return None
         # Keeps the Users page's "Online / Last seen" live: any authenticated
         # dashboard request counts as activity, written at most once a minute.

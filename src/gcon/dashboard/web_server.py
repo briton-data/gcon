@@ -448,13 +448,28 @@ class WebServer:
             session_token = websocket.cookies.get(
             SESSION_COOKIE_NAME
 )
-            if not self.management.get_current_user(session_token):
+            user = self.management.get_current_user(session_token)
+            if not user:
                 await websocket.close(code=4401)
                 return 
-            
+            if not self.management.user_has_permission(user, "View monitoring"):
+                await websocket.close(code=4403)
+                return
+
             await websocket.accept()
             try:
                 while True:
+                    # The login is re-checked every cycle, not just at connect:
+                    # logging out, a force-logout, an expired session, a
+                    # suspension or losing "View monitoring" ends the stream.
+                    user = self.management.get_current_user(session_token)
+                    if not user:
+                        await websocket.close(code=4401)
+                        return
+                    if not self.management.user_has_permission(user, "View monitoring"):
+                        await websocket.close(code=4403)
+                        return
+
                     health = self.presentation.get_cluster_health()
                     trust = self.presentation.get_trust_score()
                     payload = {

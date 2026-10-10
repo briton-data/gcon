@@ -840,7 +840,15 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         responses={401: {"model": ErrorOut}},
     )
     def get_cluster(auth=Depends(require_scope("View monitoring", tenant=False))):
-        return jsonable_encoder(presentation.get_cluster_state())
+        state = jsonable_encoder(presentation.get_cluster_state())
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if org_id is not None:
+            # The totals stay platform-wide, but worker ids are other
+            # customers' (and GCON's own) infrastructure names: a customer
+            # only gets its own organization's.
+            state["registered_nodes"] = [n["node_id"] for n in presentation.get_nodes(org_id=org_id)]
+        return state
 
     @app.get(
         "/health",
