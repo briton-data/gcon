@@ -44,6 +44,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import PurePosixPath, PureWindowsPath
@@ -168,6 +169,34 @@ def job_io_dir() -> str:
     if hasattr(os, "getuid") and os.stat(path).st_uid != os.getuid():
         raise PermissionError(f"{path!r} is owned by another user; refusing to use it for job IO.")
     return path
+
+
+def new_run_dir() -> str:
+    """
+    A fresh, private (0700) directory for ONE run, created inside
+    job_io_dir() and named uniquely every time.
+
+    job_io_dir() itself is shared by every job a worker ever runs. Mounting
+    it into the container let one job leave files (or read another job's
+    report files) for the next -- state carried between jobs, which on a
+    worker shared by several customers is a cross-tenant leak. Each run now
+    mounts only its own directory; nothing is ever mounted twice.
+    """
+    return tempfile.mkdtemp(prefix="run-", dir=job_io_dir())
+
+
+def remove_run_dir(path: Optional[str]) -> None:
+    """
+    Delete a run directory. Best effort: files a container running as root
+    created in a subdirectory may be undeletable by the worker's own user.
+    That is only host disk litter, never a leak: the name is unique, so no
+    later job is ever given this directory.
+    """
+    if not path:
+        return
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(path):
+        logger.warning("Could not fully remove job run directory %s; it will not be reused.", path)
 
 
 def _safe_job_id_component(job_id: str) -> str:

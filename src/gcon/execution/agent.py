@@ -416,6 +416,41 @@ class GCONAgent:
         stage_report_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
+        Run one job (see _execute_job for the full contract).
+
+        On the docker backend every run gets its OWN fresh private directory,
+        mounted into the container as /gcon_io and deleted afterwards, and the
+        usage/stage report files live inside it. Callers still pass their
+        report paths under the shared job-IO directory; for a docker run they
+        are swapped for files in the private directory, and _execute_job reads
+        them back itself, so nothing outside this method changes. Without it
+        the container mounted a directory shared by every job on the worker,
+        so files one job left behind were visible to the next one.
+        """
+        run_dir = None
+        if self.execution_backend == "docker":
+            run_dir = docker_executor.new_run_dir()
+            if usage_report_path:
+                usage_report_path = os.path.join(run_dir, "usage.json")
+            if stage_report_path:
+                stage_report_path = os.path.join(run_dir, "stages.jsonl")
+        try:
+            return self._execute_job(
+                job_id, job_script, timeout, usage_report_path, stage_report_path, run_dir=run_dir,
+            )
+        finally:
+            docker_executor.remove_run_dir(run_dir)
+
+    def _execute_job(
+        self,
+        job_id,
+        job_script: str,
+        timeout: Optional[int] = None,
+        usage_report_path: Optional[str] = None,
+        stage_report_path: Optional[str] = None,
+        run_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
         Execute a job script and monitor execution.
         
         Args:
@@ -523,10 +558,10 @@ class GCONAgent:
                     job_id=job_id,
                     job_script=job_script,
                     image=self.docker_image,
-                    # Only the job's own report-file directory is mounted --
-                    # not the whole system temp dir. Callers build
-                    # usage/stage_report_path with docker_executor.job_io_path.
-                    host_temp_dir=docker_executor.job_io_dir(),
+                    # Only this run's own private directory is mounted -- not
+                    # the shared job-IO directory, and not the whole system
+                    # temp dir (see execute_job).
+                    host_temp_dir=run_dir or docker_executor.job_io_dir(),
                     usage_report_path=usage_report_path,
                     stage_report_path=stage_report_path,
                     memory_limit=self.docker_memory_limit,
