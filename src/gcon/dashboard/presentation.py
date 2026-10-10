@@ -280,6 +280,44 @@ class PresentationLayer:
     def get_cluster_state(self):
         return self.coordinator.get_cluster_state()
     
+    def get_org_cluster_state(self, org_id):
+        """One organization's slice of get_cluster_state(): the same keys, but only
+        its own workers and its own jobs. The platform-wide version counts every
+        customer's (and GCON's) infrastructure and work, which a customer must not
+        learn from a count."""
+        nodes = self.coordinator.get_nodes(org_id=org_id)
+        jobs = self.coordinator.get_jobs(org_id=org_id)
+        by_status = {}
+        for job in jobs:
+            by_status[job.get("status")] = by_status.get(job.get("status"), 0) + 1
+        return {
+            "total_nodes": len(nodes),
+            "idle_nodes": sum(1 for n in nodes if n.get("status") == "idle"),
+            "registered_node_count": len(nodes),
+            "registered_nodes": [n["node_id"] for n in nodes],
+            "running_jobs": by_status.get("running", 0),
+            "completed_jobs": by_status.get("completed", 0),
+            "failed_jobs": by_status.get("failed", 0),
+        }
+
+    def get_org_metrics(self, org_id):
+        """One organization's slice of get_system_metrics(): usage of its own workers
+        and counts of its own jobs only. The platform-only fields (uptime, event
+        count, disk, artifact count, coordinator/scheduler status, node summary)
+        are not part of it."""
+        nodes = self.coordinator.get_nodes(org_id=org_id)
+        jobs = self.coordinator.get_jobs(org_id=org_id)
+        cpu = [n["cpu"] for n in nodes if isinstance(n.get("cpu"), (int, float))]
+        mem = [n["memory"] for n in nodes if isinstance(n.get("memory"), (int, float))]
+        return {
+            "avg_cpu": round(sum(cpu) / len(cpu), 1) if cpu else 0,
+            "avg_memory": round(sum(mem) / len(mem), 1) if mem else 0,
+            "queued_jobs": sum(1 for j in jobs if j["status"] == "pending"),
+            "running_jobs": sum(1 for j in jobs if j["status"] == "running"),
+            "completed_jobs": sum(1 for j in jobs if j["status"] == "completed"),
+            "failed_jobs": sum(1 for j in jobs if j["status"] == "failed"),
+        }
+
     def get_cluster_health(self):
         """
         Return overall cluster health.
