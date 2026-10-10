@@ -44,6 +44,10 @@ jobs:
         fi
         pip install -e ".[dev]"
 
+        # The SDK is a separate package (sdk/), not part of gcon: tests/sdk and
+        # the multiprocess fault-injection test import gcon_sdk / requests.
+        pip install -e sdk
+
     - name: Verify Python syntax
       run: |
         python -m compileall .
