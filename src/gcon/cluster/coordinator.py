@@ -322,6 +322,8 @@ class GCONCoordinator:
         # path) pass none and simply run with no persisted history,
         # exactly as before.
         self.control_plane = control_plane
+        if control_plane is not None:
+            self.registry.shared_pool_lookup = control_plane.shared_pool_nodes.is_member
         # Job-lifecycle telemetry (see gcon.telemetry's module
         # docstring): trace_id minted once per job at submit_job(),
         # threaded through dispatch/execution/verification, one
@@ -993,7 +995,52 @@ class GCONCoordinator:
         API or belongs to an organization -- the customer asks what to run,
         the platform decides how privileged the worker is.
         """
-        return self._sandbox_policy == "required" or bool(job.get("require_sandbox", True))
+        return (
+            self._sandbox_policy == "required"
+            or bool(job.get("require_sandbox", True))
+            # A job on a shared worker is always held to the sandbox check,
+            # whatever else was asked: there the sandbox is the only boundary.
+            or job.get("execution_pool") == "shared"
+        )
+
+    def _shared_pool_allowed(self, job):
+        """
+        May this job be placed on the shared pool (operator-run workers that
+        serve any organization) when none of its own organization's workers
+        is available? Decided by the customer's pool mode -- see
+        OrgPoolSettingsRepository. Fails closed: no org, no control plane, or
+        any error reading the setting means no.
+        """
+        org_id = job.get("org_id")
+        if not org_id or self.control_plane is None:
+            return False
+        try:
+            mode = self.control_plane.org_pool_settings.get_mode(org_id)
+        except Exception:
+            return False
+        if mode == "full":
+            return True
+        if mode != "basic":
+            return False
+        # basic: only jobs that bring nothing of the customer's own beyond
+        # the command (no artifacts, no datasets).
+        return not (job.get("artifacts") or job.get("dataset_artifacts"))
+
+    def _note_execution_pool(self, job, nodes):
+        """
+        Record on an organization's job whether it landed on one of its own
+        (dedicated) workers or on the shared pool.
+        """
+        if not job.get("org_id"):
+            return
+        shared = False
+        for node in nodes:
+            try:
+                if self.registry.get_node_info(node.node_id).get("shared_pool"):
+                    shared = True
+            except ValueError:
+                pass
+        job["execution_pool"] = "shared" if shared else "dedicated"
 
     def _enforce_sandbox_evidence(self, job_id, job, node, result):
         """
@@ -1108,6 +1155,7 @@ class GCONCoordinator:
         node = self.scheduler.select_node(
             requires=job.get("requires"), org_id=job.get("org_id"),
             require_sandbox=self._must_sandbox(job),
+            shared_pool=self._shared_pool_allowed(job),
         )
 
         if node is None:
@@ -1161,6 +1209,7 @@ class GCONCoordinator:
             )
 
         self._count_dispatch_attempt(job_id, job)
+        self._note_execution_pool(job, [node])
         job["status"] = "running"
         job["node_id"] = node.node_id
 
@@ -1232,6 +1281,7 @@ class GCONCoordinator:
             node = self.scheduler.select_node(
                 requires=job.get("requires"), org_id=job.get("org_id"),
                 require_sandbox=self._must_sandbox(job),
+                shared_pool=self._shared_pool_allowed(job),
             )
             if node is None:
                 for claimed in nodes:
@@ -1249,6 +1299,7 @@ class GCONCoordinator:
                 )
             nodes.append(node)
 
+        self._note_execution_pool(job, nodes)
         for node in nodes:
             node.status = "busy"
             try:
@@ -4090,6 +4141,10 @@ class GCONCoordinator:
                 "kind": job.get("kind", "command"),
                 "requires": job.get("requires"),
                 "verify": job.get("verify"),
+                # 'shared' if an organization's job ran on the shared worker
+                # pool, 'dedicated' if on one of its own workers, None for a
+                # job with no org or not yet placed.
+                "execution_pool": job.get("execution_pool"),
                 # Replicated-execution verdict (None for a job that
                 # wasn't replicated) -- whether the replicas agreed.
                 "verification": self._job_verification(job),

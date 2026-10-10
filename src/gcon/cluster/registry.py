@@ -24,6 +24,10 @@ class NodeRegistry:
         self.nodes = {}
         self.timeout = timedelta(seconds=timeout_seconds)
         self._lock = threading.RLock()
+        # node_id -> bool: has the operator put this worker in the shared
+        # pool? Set by the coordinator when it has a control plane; read
+        # once per registration (never on the scheduling hot path).
+        self.shared_pool_lookup = None
 
     def register(self, node):
         """
@@ -95,6 +99,14 @@ class NodeRegistry:
                 # unchanged. getattr with a default: not every node
                 # type is required to have this attribute.
                 "org_id": getattr(node, "org_id", None),
+                # In the shared pool (serves any organization's jobs, as that
+                # organization allows)? Only an operator can put a worker
+                # there -- never the worker itself -- and only one with no
+                # organization of its own.
+                "shared_pool": (
+                    getattr(node, "org_id", None) is None
+                    and bool(self.shared_pool_lookup and self.shared_pool_lookup(node.node_id))
+                ),
                 # Real remote IP captured at registration time (see
                 # RemoteNodeProxy.address / grpc_transport._peer_address).
                 # None for local/in-process nodes (GCONNode), which
@@ -102,6 +114,18 @@ class NodeRegistry:
                 # placeholder, a legitimate "not applicable" value.
                 "address": getattr(node, "address", None),
             }
+
+    def set_shared_pool(self, node_id, enabled):
+        """
+        Apply an operator's pool decision to a worker that is already
+        registered, so it takes effect without waiting for a reconnect.
+        A no-op for a node that is not currently registered (the stored
+        decision is read when it registers).
+        """
+        with self._lock:
+            info = self.nodes.get(node_id)
+            if info is not None:
+                info["shared_pool"] = bool(enabled) and info.get("org_id") is None
 
     def remove(self, node_id):
         """

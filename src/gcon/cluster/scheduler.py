@@ -34,7 +34,7 @@ class Scheduler:
             from gcon.execution.staking import StakeLedger
             self.stake_ledger = StakeLedger(control_plane)
 
-    def select_node(self, requires=None, org_id=None, require_sandbox=False):
+    def select_node(self, requires=None, org_id=None, require_sandbox=False, shared_pool=False):
         """
         Select the least-loaded idle node satisfying `requires` (if
         given) and atomically claim it (marks it busy in the
@@ -70,6 +70,15 @@ class Scheduler:
         inside a container (node.sandboxed) -- the coordinator's
         GCON_SANDBOX_POLICY=required. A node that doesn't declare
         `sandboxed` at all is treated as NOT sandboxed.
+
+        `shared_pool`: the caller (the coordinator) has decided this
+        org's job may run on the shared pool -- the workers an operator has
+        explicitly put there (and which have no org of their own). The org's
+        OWN workers are always tried first;
+        only if none is available does this fall back to a pool worker,
+        and a pool worker must be sandboxed whatever `require_sandbox`
+        says: a worker serving several organizations has the sandbox as
+        its only isolation boundary. Never applies to a job with no org.
         """
 
         def score(info):
@@ -86,13 +95,22 @@ class Scheduler:
             filters.append(lambda info: self.stake_ledger.meets_minimum(info["node"].node_id))
         if require_sandbox:
             filters.append(lambda info: bool(getattr(info["node"], "sandboxed", False)))
-        filters.append(lambda info: info.get("org_id") == org_id)
+        base_filters = list(filters)
 
-        filter_fn = None
-        if filters:
-            filter_fn = lambda info: all(f(info) for f in filters)
+        def claim(extra):
+            all_filters = base_filters + extra
+            return self.registry.claim_best_idle_node(
+                score, filter_fn=lambda info: all(f(info) for f in all_filters),
+            )
 
-        return self.registry.claim_best_idle_node(score, filter_fn=filter_fn)
+        node = claim([lambda info: info.get("org_id") == org_id])
+        if node is None and shared_pool and org_id is not None:
+            node = claim([
+                lambda info: info.get("org_id") is None,
+                lambda info: info.get("shared_pool") is True,
+                lambda info: bool(getattr(info["node"], "sandboxed", False)),
+            ])
+        return node
 
     def _satisfies(self, info, requires):
         """
