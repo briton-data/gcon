@@ -602,4 +602,31 @@ MIGRATIONS: List[Migration] = [
             "ALTER TABLE job_submission_idempotency_keys ADD COLUMN request_hash TEXT",
         ],
     ),
+    Migration(
+        version=14,
+        name="org_shared_pool_settings",
+        up_sql=[
+            # One row per organization that has chosen a shared-pool mode
+            # (see OrgPoolSettingsRepository). No row means the default.
+            # Deliberately its own table: it is a tenancy decision made by
+            # the customer, not a property of the organization record, and
+            # the scheduler reads it on every dispatch.
+            """
+            CREATE TABLE org_pool_settings (
+                org_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            # Which workers the operator has explicitly put in the shared
+            # pool. A worker is never in the pool just because it has no org.
+            """
+            CREATE TABLE shared_pool_nodes (
+                node_id TEXT PRIMARY KEY,
+                added_by TEXT NOT NULL,
+                added_at TEXT NOT NULL
+            )
+            """,
+        ],
+    ),
 ]
