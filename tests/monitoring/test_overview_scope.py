@@ -92,7 +92,7 @@ def test_claim_release_endpoints(client, monkeypatch):
     assert c.post(url + "/claim").status_code == 200
     open_now = c.get("/management/incidents").json()["open"]
     mine = next(i for i in open_now if i["incident_id"] == inc["incident_id"])
-    assert mine["owner"] == "owner@example.com"
+    assert mine["owner"] == "GCON Owner"        # the bootstrap owner has no username; never the email
 
     assert c.post(url + "/release").status_code == 200
     open_now = c.get("/management/incidents").json()["open"]

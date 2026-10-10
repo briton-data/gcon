@@ -296,7 +296,8 @@ def test_issue5_admin_unlock_end_to_end(client):
 
     locked_ids = client.get("/management/locked-users").json()
     users = {u["email"]: u["user_id"] for u in client.get("/management/users").json()}
-    target_id = users["locked@x.test"]
+    # /management/users returns masked emails (l***@x.test), never the real one.
+    target_id = users["l***@x.test"]
     assert target_id in locked_ids
 
     unlock = client.post(f"/management/users/{target_id}/unlock")
