@@ -106,6 +106,7 @@ async function fetchJson(url, options) {
         throw new Error("Not authenticated");
     }
     if (!response.ok) {
+        if (response.status === 403) noteForbidden();
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `${url} returned ${response.status}`);
     }
@@ -126,6 +127,7 @@ async function fetchJsonWithHeaders(url, options) {
         throw new Error("Not authenticated");
     }
     if (!response.ok) {
+        if (response.status === 403) noteForbidden();
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `${url} returned ${response.status}`);
     }
@@ -133,9 +135,24 @@ async function fetchJsonWithHeaders(url, options) {
     return { data: await response.json(), headers: response.headers };
 }
 
+// A 403 means "your role can't do this", not "the coordinator is down":
+// tell the user, leave a page they shouldn't be on, and don't let the
+// loader's catch flip the badge to Disconnected.
+let forbiddenAt = 0;
+let lastForbiddenToast = 0;
+function noteForbidden() {
+    forbiddenAt = Date.now();
+    if (Date.now() - lastForbiddenToast > 3000) {
+        lastForbiddenToast = Date.now();
+        showToast("Your role doesn't have access to that.", true);
+    }
+    if (!canAccessTab(currentTab)) switchTab("control-center");
+}
+
 function setConnectionStatus(ok) {
     const el = document.getElementById("conn-status");
     if (!el) return;
+    if (!ok && Date.now() - forbiddenAt < 2000) return;
     if (ok) {
         el.className = "badge bg-success me-3";
         el.textContent = "● Coordinator Online";
@@ -277,6 +294,19 @@ function applyPermissionGating() {
     document.querySelectorAll("#tab-nav a[data-tab], #tab-nav-mgmt a[data-tab]").forEach(el => {
         el.classList.toggle("d-none", !canAccessTab(el.dataset.tab));
     });
+    // A group with nothing left in it hides its heading too.
+    document.querySelectorAll("#tab-nav .list-group, #tab-nav-mgmt .list-group").forEach(group => {
+        const links = [...group.querySelectorAll("a[data-tab]")];
+        const empty = links.length > 0 && links.every(a => a.classList.contains("d-none"));
+        group.classList.toggle("d-none", empty);
+        const heading = group.previousElementSibling;
+        if (heading && /^H[56]$/.test(heading.tagName)) heading.classList.toggle("d-none", empty);
+    });
+    const mgmt = document.getElementById("tab-nav-mgmt");
+    if (mgmt && mgmt.previousElementSibling) {
+        const anyShown = [...mgmt.querySelectorAll(".list-group")].some(g => !g.classList.contains("d-none"));
+        mgmt.previousElementSibling.classList.toggle("d-none", !anyShown);
+    }
     if (!canAccessTab(currentTab)) {
         switchTab("control-center");
     }
@@ -2454,6 +2484,24 @@ function refreshHealthInspector() {
 let usersData = [];
 let usersStatusFilter = "all";
 
+// "Online" / "Last seen 2 mins ago" / "5 days ago" / "2 months ago".
+// "Online" comes only from the server's `online` flag (live session + a request
+// in the last 2 minutes), never from the timestamp alone, so a logged-out user
+// or a stale page can't keep showing it.
+function lastSeenText(iso, online) {
+    if (online === true) return "Online";
+    const t = iso ? new Date(iso).getTime() : NaN;
+    if (Number.isNaN(t)) return "Never";
+    const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+    if (mins < 1) return "Last seen just now";
+    const plural = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+    if (mins < 60) return `Last seen ${plural(mins, "min")}`;
+    if (mins < 1440) return `Last seen ${plural(Math.floor(mins / 60), "hour")}`;
+    if (mins < 43200) return `Last seen ${plural(Math.floor(mins / 1440), "day")}`;
+    if (mins < 525600) return `Last seen ${plural(Math.floor(mins / 43200), "month")}`;
+    return `Last seen ${plural(Math.floor(mins / 525600), "year")}`;
+}
+
 let lockedUserIds = new Set();
 
 async function loadUsersTab() {
@@ -2475,6 +2523,9 @@ async function loadUsersTab() {
     } catch (err) {
         console.error("Failed to load users tab:", err);
         setConnectionStatus(false);
+        // Can't reach the coordinator, so nobody can be shown as Online.
+        usersData.forEach(u => { u.online = false; });
+        renderUsersTable();
     }
 }
 
@@ -2492,36 +2543,30 @@ function renderUsersTable() {
     if (query) {
         rows = rows.filter(u =>
             u.name.toLowerCase().includes(query) ||
-            u.email.toLowerCase().includes(query) ||
             u.role.toLowerCase().includes(query)
         );
     }
 
     if (rows.length === 0) {
-        body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">No users found.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">No users found.</td></tr>`;
         return;
     }
 
     let html = "";
     for (const u of rows) {
         const isLocked = lockedUserIds.has(u.user_id);
-        const jobsSubmitted = u.stats ? u.stats.jobs_submitted : 0;
         html += `
             <tr data-user-id="${escapeHtml(u.user_id)}">
                 <td class="gcon-row-link" data-open-user="${escapeHtml(u.user_id)}">
                     <span class="gcon-avatar">${escapeHtml(u.avatar_initials)}</span>
                     ${escapeHtml(u.name)}
                 </td>
-                <td>${escapeHtml(u.email)}</td>
                 <td>${escapeHtml(u.role)}</td>
                 <td>${statusBadge(u.status)}${isLocked ? ' <span class="badge bg-danger">Locked</span>' : ""}${!u.has_password ? ' <span class="badge bg-warning text-dark">No Password</span>' : ""}</td>
-                <td>${escapeHtml(new Date(u.last_active).toLocaleString())}</td>
-                <td>${escapeHtml(jobsSubmitted)}</td>
+                <td class="${u.online === true ? "text-success" : "text-secondary"}">${escapeHtml(lastSeenText(u.last_active, u.online))}</td>
                 <td>
-                    <button class="btn btn-sm btn-outline-light user-view-btn" data-user-id="${escapeHtml(u.user_id)}">View</button>
-                    <button class="btn btn-sm btn-outline-light user-reset-pw-btn" data-user-id="${escapeHtml(u.user_id)}" data-user-name="${escapeHtml(u.name)}">Reset Password</button>
+                    <button class="btn btn-sm btn-outline-light user-view-btn" data-user-id="${escapeHtml(u.user_id)}">Manage</button>
                     ${isLocked ? `<button class="btn btn-sm btn-outline-warning user-unlock-btn" data-user-id="${escapeHtml(u.user_id)}">Unlock</button>` : ""}
-                    <button class="btn btn-sm btn-outline-danger user-delete-btn" data-user-id="${escapeHtml(u.user_id)}">Delete</button>
                 </td>
             </tr>
         `;
@@ -2530,21 +2575,6 @@ function renderUsersTable() {
 
     document.querySelectorAll(".gcon-row-link[data-open-user], .user-view-btn").forEach(el => {
         el.addEventListener("click", () => openUserDrawer(el.dataset.userId || el.dataset.openUser));
-    });
-    document.querySelectorAll(".user-delete-btn").forEach(btn => {
-        btn.addEventListener("click", async () => {
-            if (!confirm("Delete this user?")) return;
-            try {
-                await fetchJson(`/management/users/${btn.dataset.userId}`, { method: "DELETE" });
-                await loadUsersTab();
-            } catch (err) {
-                console.error("Failed to delete user:", err);
-                showToast(err.message || "Failed to delete user.", true);
-            }
-        });
-    });
-    document.querySelectorAll(".user-reset-pw-btn").forEach(btn => {
-        btn.addEventListener("click", () => openResetPasswordModal(btn.dataset.userId, btn.dataset.userName));
     });
     document.querySelectorAll(".user-unlock-btn").forEach(btn => {
         btn.addEventListener("click", async () => {
@@ -2697,7 +2727,6 @@ async function openUserDrawer(userId) {
             <span class="gcon-avatar gcon-avatar-lg">${escapeHtml(user.avatar_initials)}</span>
             <div>
                 <div class="fw-bold">${escapeHtml(user.name)}</div>
-                <div class="text-secondary small">${escapeHtml(user.email)}</div>
                 <div class="mt-1">${statusBadge(user.status)} <span class="badge bg-dark">${escapeHtml(user.role)}</span></div>
             </div>
         </div>
@@ -2719,7 +2748,7 @@ async function openUserDrawer(userId) {
                 <div class="col-6"><small class="text-secondary">CPU Usage</small><div class="fw-bold">${user.stats.cpu_usage}%</div></div>
                 <div class="col-6"><small class="text-secondary">Storage Usage</small><div class="fw-bold">${user.stats.storage_usage_gb} GB</div></div>
                 <div class="col-6"><small class="text-secondary">Member Since</small><div class="fw-bold">${new Date(user.created_at).toLocaleDateString()}</div></div>
-                <div class="col-6"><small class="text-secondary">Last Active</small><div class="fw-bold">${new Date(user.last_active).toLocaleString()}</div></div>
+                <div class="col-6"><small class="text-secondary">Last Active</small><div class="fw-bold">${escapeHtml(lastSeenText(user.last_active, user.online))}</div></div>
             </div>
         </div>
 
@@ -2785,6 +2814,12 @@ async function openUserDrawer(userId) {
                 <div id="ud-session-count" class="text-secondary small mb-2">Checking active sessions…</div>
                 <button class="btn btn-outline-warning btn-sm" id="ud-force-logout-btn">Force Logout</button>
             </div>
+            ${currentUserPermissions.has("Manage users") ? `
+            <hr class="my-3">
+            <div class="d-flex gap-2">
+                <button class="btn btn-outline-light btn-sm" id="ud-reset-pw-btn">Reset Password</button>
+                <button class="btn btn-outline-danger btn-sm" id="ud-delete-btn">Delete User</button>
+            </div>` : ""}
         </div>
     `;
 
@@ -2832,6 +2867,26 @@ async function openUserDrawer(userId) {
         const el = document.getElementById("ud-session-count");
         if (el) el.textContent = "Could not load session info.";
     });
+
+    const resetPwBtn = document.getElementById("ud-reset-pw-btn");
+    if (resetPwBtn) {
+        resetPwBtn.addEventListener("click", () => openResetPasswordModal(user.user_id, user.name));
+    }
+
+    const deleteBtn = document.getElementById("ud-delete-btn");
+    if (deleteBtn) {
+        deleteBtn.addEventListener("click", async () => {
+            if (!confirm(`Delete ${user.name}?`)) return;
+            try {
+                await fetchJson(`/management/users/${user.user_id}`, { method: "DELETE" });
+                closeDrawer();
+                if (currentTab === "users") await loadUsersTab();
+            } catch (err) {
+                console.error("Failed to delete user:", err);
+                showToast(err.message || "Failed to delete user.", true);
+            }
+        });
+    }
 
     const forceLogoutBtn = document.getElementById("ud-force-logout-btn");
     if (forceLogoutBtn) {
