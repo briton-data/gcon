@@ -348,17 +348,20 @@ class TestCoordinatorFailover:
             "no state persistence exists (AUDIT_REPORT.md 4.1)"
         )
 
-    def test_scheduler_thread_death_is_detected_by_health_service(self, cluster):
+    def test_scheduler_thread_death_is_detected_by_health_service(self, cluster, monkeypatch):
+        # A single crash is now recovered by the supervisor (see
+        # test_scheduler_restart.py). What health must still detect is a
+        # scheduler that cannot stay up: a crash that keeps recurring.
+        monkeypatch.setenv("GCON_SCHEDULER_MAX_RESTARTS", "1")
         coordinator, agents = cluster
-        monkey = ChaosMonkey(coordinator)
-        monkey.crash_scheduler_loop()
-        # force the crash to actually happen by nudging the scheduler
+        coordinator.scheduler.select_node = lambda *a, **k: (_ for _ in ()).throw(
+            TypeError("persistent chaos-injected fault"))
         coordinator.submit_job(unique_id("crash-trigger"), TRIVIAL_CMD)
 
         assert_eventually(
             lambda: not coordinator.scheduler_thread.is_alive(),
-            timeout=5.0,
-            description="scheduler thread to die from the injected non-RuntimeError",
+            timeout=15.0,
+            description="scheduler supervisor to give up on a persistently crashing loop",
         )
         health = coordinator.get_cluster_health()
         assert health["checks"]["coordinator"]["healthy"] is False, (

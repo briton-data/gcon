@@ -55,3 +55,51 @@ def test_a_real_job_that_floods_stdout_comes_back_capped(monkeypatch):
         assert len(job["result"]["stdout"]) < 2200 and "truncated" in job["result"]["stdout"]
     finally:
         coord.shutdown()
+
+
+# ---- the worker holds only the cap, not the whole output -------------------
+
+from gcon.execution.output_limits import BoundedCapture
+
+
+def test_bounded_capture_keeps_the_first_bytes_and_counts_the_rest():
+    capture = BoundedCapture(limit=10)
+    for chunk in ("abcdef", "ghijkl", "mnop"):
+        capture.feed(chunk)
+    text = capture.text()
+    assert text.startswith("abcdefghij") and "6 of 16 bytes dropped" in text
+
+
+def test_bounded_capture_leaves_output_that_fits_untouched():
+    capture = BoundedCapture(limit=100)
+    capture.feed("hello ")
+    capture.feed("world")
+    assert capture.text() == "hello world"
+
+
+def test_bounded_capture_cuts_on_a_character_boundary():
+    capture = BoundedCapture(limit=5)
+    capture.feed("é" * 10)              # 2 bytes each
+    capture.text().encode("utf-8")      # never a split character
+    assert "truncated" in capture.text()
+
+
+def test_a_flood_far_over_the_cap_does_not_grow_the_worker(monkeypatch):
+    """communicate() held the whole output (and a decoded copy) before any cap
+    ran. 150 MB printed under a 1 MiB cap must now cost the worker about the cap."""
+    import psutil
+
+    monkeypatch.setenv("GCON_MAX_JOB_OUTPUT_BYTES", str(1024 * 1024))
+    agent = GCONAgent(node_id="flood-worker")
+    proc = psutil.Process()
+    before = proc.memory_info().rss
+    result = agent.execute_job(
+        "flood-mem",
+        "python3 -c \"import sys\nfor _ in range(150): sys.stdout.write('y' * 1048576)\"",
+        timeout=60,
+    )
+    grown_mb = (proc.memory_info().rss - before) / (1024 * 1024)
+    assert result["status"] == "success" and result["return_code"] == 0
+    assert "truncated" in result["stdout"]
+    assert f"{150 * 1048576 - 1048576} of {150 * 1048576} bytes dropped" in result["stdout"]
+    assert grown_mb < 60, f"worker grew {grown_mb:.0f} MB for a 1 MiB cap"
