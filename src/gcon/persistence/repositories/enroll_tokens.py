@@ -37,7 +37,10 @@ class EnrollTokenRepository:
     def __init__(self, db: ControlPlaneDatabase):
         self.db = db
 
-    def create_token(self, org_id: str, label: Optional[str] = None) -> str:
+    def create_token(
+        self, org_id: str, label: Optional[str] = None,
+        expires_at: Optional[str] = None, max_uses: Optional[int] = None,
+    ) -> str:
         """Mints a new token for `org_id`, stores only its hash, and
         returns the plaintext -- the one and only time it's ever
         available. Callers (e.g. scripts/create_enroll_token.py) are
@@ -45,16 +48,22 @@ class EnrollTokenRepository:
         itself never displays it again."""
         if not org_id:
             raise ValueError("org_id is required")
+        # Both limits are optional (None = unlimited, as before). A successful
+        # enrollment is one use.
+        if max_uses is not None and (isinstance(max_uses, bool) or not isinstance(max_uses, int) or max_uses < 1):
+            raise ValueError("max_uses must be a whole number of at least 1")
+        if expires_at is not None:
+            datetime.fromisoformat(expires_at)      # ValueError if it is not an ISO timestamp
         token = "gcon_enroll_" + secrets.token_urlsafe(32)
         token_id = uuid.uuid4().hex
         now = datetime.now(UTC).isoformat()
         self.db.execute(
             """
             INSERT INTO enroll_tokens
-                (token_id, org_id, token_hash, label, created_at, revoked_at)
-            VALUES (?, ?, ?, ?, ?, NULL)
+                (token_id, org_id, token_hash, label, created_at, revoked_at, expires_at, max_uses)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
             """,
-            (token_id, org_id, _hash_token(token), label, now),
+            (token_id, org_id, _hash_token(token), label, now, expires_at, max_uses),
         )
         return token
 
@@ -79,6 +88,33 @@ class EnrollTokenRepository:
             "SELECT * FROM enroll_tokens WHERE token_hash = ?", (_hash_token(token),)
         )
         return dict(row) if row else None
+
+    @staticmethod
+    def unusable_reason(row: Dict[str, Any]) -> Optional[str]:
+        """Why a (non-revoked) token row can no longer enroll a worker, or None."""
+        expires_at = row.get("expires_at")
+        if expires_at and datetime.fromisoformat(expires_at) <= datetime.now(UTC):
+            return "enroll token has expired"
+        max_uses = row.get("max_uses")
+        if max_uses is not None and (row.get("uses") or 0) >= max_uses:
+            return "enroll token has already been used the allowed number of times"
+        return None
+
+    def consume(self, token_id: str) -> bool:
+        """Count one successful enrollment against the token. Atomic: two
+        enrollments racing for the last remaining use cannot both succeed.
+        False if the token is revoked, expired or out of uses."""
+        now = datetime.now(UTC).isoformat()
+        cur = self.db.execute(
+            """
+            UPDATE enroll_tokens SET uses = uses + 1
+            WHERE token_id = ? AND revoked_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
+              AND (max_uses IS NULL OR uses < max_uses)
+            """,
+            (token_id, now),
+        )
+        return cur.rowcount == 1
 
     def list_for_org(self, org_id: str) -> List[Dict[str, Any]]:
         rows = self.db.query(

@@ -629,4 +629,16 @@ MIGRATIONS: List[Migration] = [
             """,
         ],
     ),
+    Migration(
+        version=15,
+        name="enroll_token_expiry_and_use_limit",
+        up_sql=[
+            # Both optional: NULL means "no limit", which is what every
+            # existing token keeps. No default is chosen here -- the caller
+            # that mints a token decides.
+            "ALTER TABLE enroll_tokens ADD COLUMN expires_at TEXT",
+            "ALTER TABLE enroll_tokens ADD COLUMN max_uses INTEGER",
+            "ALTER TABLE enroll_tokens ADD COLUMN uses INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
 ]

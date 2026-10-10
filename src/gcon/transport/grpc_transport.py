@@ -417,6 +417,16 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         if self.control_plane is not None:
             token_row = self.control_plane.enroll_tokens.get_by_token(request.enroll_token)
             if token_row is not None and token_row.get("revoked_at") is None:
+                # A real token that is expired or out of uses is refused as
+                # such -- it must not fall through to the legacy shared token.
+                unusable = self.control_plane.enroll_tokens.unusable_reason(token_row)
+                if unusable:
+                    self.control_plane.node_enrollment_audit.record(
+                        node_id=request.node_id or "(unknown)", accepted=False,
+                        org_id=token_row["org_id"], enroll_token_id=token_row["token_id"],
+                        source_ip=source_ip, reason=unusable,
+                    )
+                    return pb.EnrollResponse(accepted=False, reason=unusable)
                 org_id = token_row["org_id"]
                 enroll_token_id = token_row["token_id"]
         if org_id is None:
@@ -467,6 +477,16 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     enroll_token_id=enroll_token_id, source_ip=source_ip, reason=str(e),
                 )
             return pb.EnrollResponse(accepted=False, reason=str(e))
+
+        # The certificate is signed but not yet handed out: count the use now,
+        # atomically, so the last remaining use cannot be taken twice.
+        if enroll_token_id is not None and not self.control_plane.enroll_tokens.consume(enroll_token_id):
+            reason = "enroll token has expired or been used up"
+            self.control_plane.node_enrollment_audit.record(
+                node_id=request.node_id, accepted=False, org_id=org_id,
+                enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
+            )
+            return pb.EnrollResponse(accepted=False, reason=reason)
 
         ca_cert_path = os.path.join(self.config.tls_cert_dir, tls.CA_CERT_FILE)
         with open(ca_cert_path, "rb") as f:
