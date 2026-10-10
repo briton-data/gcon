@@ -93,6 +93,13 @@ class JobOut(BaseModel):
         default=None,
         description="Replicated-execution request the job was submitted with, if any.",
     )
+    execution_pool: Optional[str] = Field(
+        default=None,
+        description=(
+            "'shared' if this job ran on GCON's shared worker pool, 'dedicated' if it ran "
+            "on one of your organization's own workers; absent until the job is placed."
+        ),
+    )
     verification: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
@@ -722,6 +729,53 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     # semantically about key management, so requiring either one
     # would arbitrarily lock out a key that only has the other.
     # ------------------------------------------------------------
+
+    _POOL_MODE_HELP = {
+        "off": "Your jobs never run on GCON's shared workers.",
+        "basic": "Jobs that bring no artifacts or datasets of your own may run on shared workers "
+                 "when none of your own workers is available. (default)",
+        "full": "Jobs may run on shared workers including their artifacts and datasets.",
+    }
+
+    @app.get(
+        "/org/shared-pool",
+        tags=["Organization"],
+        summary="Whether this organization's jobs may run on GCON's shared worker pool "
+                "(read-only: GCON changes it on request, an API key cannot)",
+        responses={401: {"model": ErrorOut}},
+    )
+    def get_shared_pool(auth=Depends(require_scope())):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if org_id is None or presentation.coordinator.control_plane is None:
+            raise HTTPException(status_code=400, detail="This key has no organization.")
+        mode = presentation.coordinator.control_plane.org_pool_settings.get_mode(org_id)
+        return {"mode": mode, "description": _POOL_MODE_HELP[mode], "modes": _POOL_MODE_HELP}
+
+    @app.get(
+        "/enroll/ca",
+        tags=["Workers"],
+        summary="The coordinator's CA certificate and its fingerprint (public)",
+        responses={503: {"model": ErrorOut}},
+    )
+    def get_enroll_ca():
+        """
+        Public on purpose: a CA certificate is not a secret, and a website
+        building a worker's join command needs it so the customer never has to
+        handle a CA file. Workers verify enrollment against it.
+        """
+        from gcon.transport import tls
+        from gcon.transport.config import TransportConfig
+
+        plane = presentation.coordinator.control_plane
+        try:
+            cert_dir = TransportConfig.load(plane).tls_cert_dir
+            return tls.read_ca(cert_dir)
+        except (OSError, ValueError):
+            raise HTTPException(
+                status_code=503,
+                detail="The coordinator has not created its certificate authority yet.",
+            )
 
     @app.get(
         "/auth/api-keys",

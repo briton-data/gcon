@@ -345,6 +345,47 @@ class ManagementLayer:
         data["online"] = self._is_online(user, active_ids)
         return data
 
+    # ---- shared worker pool (a tenancy decision; see OrgPoolSettingsRepository)
+    # Who may change it: GCON's Owner and Administrator, nobody else -- not an
+    # Operator, and never an API key. A leaked key must not be able to move an
+    # organization's jobs onto shared machines (and run up the pool's cost).
+    _POOL_ADMIN_ROLES = ("Owner", "Administrator")
+
+    def _pool_control_plane(self, actor):
+        if actor is None or actor.role not in self._POOL_ADMIN_ROLES:
+            raise PermissionError("Only an Owner or Administrator can change shared-pool settings.")
+        plane = getattr(self.coordinator, "control_plane", None)
+        if plane is None:
+            raise ValueError("Shared-pool settings need a coordinator with a control plane.")
+        return plane
+
+    def set_org_shared_pool_mode(self, org_id, mode, *, actor):
+        plane = self._pool_control_plane(actor)
+        org = self.org_registry.get_organization(org_id)
+        previous = plane.org_pool_settings.get_mode(org.org_id)
+        mode = plane.org_pool_settings.set_mode(org.org_id, mode)
+        self.audit_logger.log(
+            actor.name, f"set shared-pool mode {previous} -> {mode} for organization", org.name)
+        return {"org_id": org.org_id, "mode": mode, "previous_mode": previous}
+
+    def set_node_shared_pool(self, node_id, enabled, *, actor):
+        plane = self._pool_control_plane(actor)
+        row = plane.nodes.get(node_id)
+        if row is None:
+            raise ValueError(f"Worker '{node_id}' is not known to this coordinator.")
+        if row.get("org_id") is not None:
+            raise ValueError("A worker that belongs to an organization cannot join the shared pool.")
+        enabled = bool(enabled)
+        if enabled:
+            plane.shared_pool_nodes.add(node_id, actor.name)
+        else:
+            plane.shared_pool_nodes.remove(node_id)
+        self.coordinator.registry.set_shared_pool(node_id, enabled)
+        self.audit_logger.log(
+            actor.name, "added worker to the shared pool" if enabled else "removed worker from the shared pool",
+            node_id)
+        return {"node_id": node_id, "shared_pool": enabled}
+
     @staticmethod
     def _guard_owner(actor, target=None, new_role=None):
         """

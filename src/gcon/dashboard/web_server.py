@@ -653,6 +653,32 @@ class WebServer:
             except (KeyError, ValueError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        # Shared worker pool -- Owner/Administrator only, audit-logged. The
+        # role is checked in the management layer itself (not just here).
+        @self.app.put("/management/organizations/{org_id}/shared-pool")
+        def mgmt_set_org_shared_pool(
+            org_id: str, payload: dict, user=Depends(self.require_permission("Manage cluster")),
+        ):
+            try:
+                return self.management.set_org_shared_pool_mode(
+                    org_id, payload.get("mode"), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.put("/management/nodes/{node_id}/shared-pool")
+        def mgmt_set_node_shared_pool(
+            node_id: str, payload: dict, user=Depends(self.require_permission("Manage cluster")),
+        ):
+            try:
+                return self.management.set_node_shared_pool(
+                    node_id, bool(payload.get("enabled")), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         @self.app.put("/management/organizations/{org_id}")
         def mgmt_update_organization(
             org_id: str, payload: dict, user=Depends(self.require_permission("Manage users")),
