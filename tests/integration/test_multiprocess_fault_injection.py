@@ -418,19 +418,39 @@ class RealClusterProcesses:
         )
         return self.worker_proc
 
-    def login_and_get_api_key(self):
+    def put_worker_in_shared_pool(self, node_id, timeout=30):
+        """
+        The public API only places a customer's job on that customer's own
+        workers or on a worker the operator has put in the shared pool. This
+        test's worker belongs to no organization, so the operator (the staff
+        Owner) flags it -- which only works once the real worker process has
+        registered, so this retries until it has.
+        """
         session = requests.Session()
         r = session.post(f"{self.base_url}/auth/login",
                           json={"email": OWNER_EMAIL, "password": OWNER_PASSWORD}, timeout=5)
         assert r.status_code == 200, f"real login should succeed: {r.status_code} {r.text}"
-        me = session.get(f"{self.base_url}/auth/me", timeout=5).json()
-        r = session.post(f"{self.base_url}/management/api-keys", json={
-            "name": "Multiprocess Fault Test Key",
-            "owner_user_id": me["user_id"],
-            "scopes": ["Submit workflows", "View monitoring"],
-        }, timeout=5)
-        assert r.status_code == 200, f"real API key creation should succeed: {r.status_code} {r.text}"
-        return r.json()["secret"]
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            r = session.put(f"{self.base_url}/management/nodes/{node_id}/shared-pool",
+                             json={"enabled": True}, timeout=5)
+            if r.status_code == 200:
+                return
+            last = f"{r.status_code} {r.text}"
+            time.sleep(0.5)
+        raise AssertionError(
+            f"the real worker process should have registered and joined the shared pool; last answer: {last}")
+
+    def signup_customer_and_get_api_key(self):
+        # Customer routes refuse a key that belongs to no organization, so the
+        # job is submitted the way a real customer would: with a signup key.
+        r = requests.post(f"{self.base_url}/api/v1/auth/signup", json={
+            "org_name": "Chaos Test Org", "name": "Chaos Customer",
+            "email": "customer@chaos.example", "password": "correct-horse-1",
+        }, timeout=10)
+        assert r.status_code == 200, f"customer signup should succeed: {r.status_code} {r.text}"
+        return r.json()["api_key"]["secret"]
 
     def shutdown(self):
         for proc in (self.worker_proc, self.coordinator_proc):
@@ -481,17 +501,11 @@ def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(
 
     real_cluster.start_coordinator("coordinator-1.log")
     real_cluster.start_worker(sandboxed=True)
-    secret = real_cluster.login_and_get_api_key()
+    # The real worker process registers with the real coordinator, then the
+    # operator puts it in the shared pool so a customer's job can run on it.
+    real_cluster.put_worker_in_shared_pool("worker-restart-1")
+    secret = real_cluster.signup_customer_and_get_api_key()
     api_headers = {"Authorization": f"Bearer {secret}"}
-
-    assert _wait_until(
-        lambda: requests.get(
-            f"{real_cluster.base_url}/api/v1/nodes", headers=api_headers, timeout=2
-        ).json() and len(requests.get(
-            f"{real_cluster.base_url}/api/v1/nodes", headers=api_headers, timeout=2
-        ).json()) >= 1,
-        timeout=20,
-    ), "the real worker process should have registered with the real coordinator process"
 
     r = requests.post(f"{real_cluster.base_url}/api/v1/jobs", headers=api_headers,
                        json={"client_reference": "mp-restart-job-1", "command": "sleep 6 && echo done"}, timeout=5)
