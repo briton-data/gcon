@@ -3300,8 +3300,13 @@ function connectLiveSocket() {
         setConnectionStatus(true);
     };
 
-    liveSocket.onclose = () => {
+    liveSocket.onclose = (event) => {
+        if (event.code === 4401) {          // signed out, expired or suspended
+            window.location.href = "/login";
+            return;
+        }
         setConnectionStatus(false);
+        if (event.code === 4403) return;    // this role may not watch live data: don't retry
         setTimeout(connectLiveSocket, 5000);
     };
 
