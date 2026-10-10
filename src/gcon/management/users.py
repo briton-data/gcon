@@ -119,6 +119,12 @@ class User:
         return user
 
 
+def mask_email(email):
+    """'briton@gmail.com' -> 'b***@gmail.com' (same shape as the dashboard's maskEmail)."""
+    local, sep, domain = str(email or "").partition("@")
+    return f"{local[:1]}***@{domain}" if sep and domain else ""
+
+
 class UserRegistry:
     def __init__(self, db: Database = None):
         self.db = db or Database(":memory:")

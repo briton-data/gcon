@@ -202,6 +202,16 @@ class SessionManager:
 
         return sum(1 for s in self.sessions.values() if s["expires_at"] > now)
 
+    def active_user_ids(self):
+        """Ids of every user with at least one unexpired session."""
+        now = datetime.now(UTC)
+        if self.db is not None:
+            rows = self.db.query(
+                "SELECT DISTINCT user_id FROM sessions WHERE expires_at > ?", (now.isoformat(),)
+            )
+            return {r["user_id"] for r in rows}
+        return {s["user_id"] for s in self.sessions.values() if s["expires_at"] > now}
+
     def list_active_for_user(self, user_id):
         """
         Return metadata for a user's active sessions -- created_at

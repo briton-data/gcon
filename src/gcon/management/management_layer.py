@@ -23,7 +23,7 @@ from datetime import datetime, UTC
 
 from . import rbac
 from .auth import SessionManager, ResetTokenManager, CustomerSessionManager, CustomerResetTokenManager
-from .users import UserRegistry, bootstrap_owner_account
+from .users import UserRegistry, bootstrap_owner_account, mask_email
 from .organizations import OrganizationRegistry
 from .customers import CustomerUserRegistry, _CustomerOwnerView
 from .api_keys import APIKeyManager
@@ -302,14 +302,36 @@ class ManagementLayer:
     # Users
     # ------------------------------------------------------------
 
-    def get_users(self):
-        return [self._user_dict_with_live_stats(u) for u in self.user_registry.list_users()]
+    def get_users(self, mask_pii=False):
+        active = self.session_manager.active_user_ids()
+        return [self._masked(self._user_dict_with_live_stats(u, active), mask_pii)
+                for u in self.user_registry.list_users()]
 
-    def get_user(self, user_id):
+    def get_user(self, user_id, mask_pii=False):
         user = self.user_registry.get_user(user_id)
-        return self._user_dict_with_live_stats(user)
+        return self._masked(self._user_dict_with_live_stats(user), mask_pii)
 
-    def _user_dict_with_live_stats(self, user):
+    @staticmethod
+    def _masked(user_dict, mask_pii):
+        if mask_pii:
+            user_dict["email"] = mask_email(user_dict.get("email"))
+        return user_dict
+
+    # A user is "online" only while they hold a live session AND made a request
+    # in the last two minutes. Logging out (or a force-logout) ends the session,
+    # so they drop to "Last seen" straight away instead of waiting out a timer.
+    ONLINE_WINDOW_SECONDS = 120
+
+    def _is_online(self, user, active_ids=None):
+        if active_ids is None:
+            active_ids = self.session_manager.active_user_ids()
+        last = user.last_active
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - last).total_seconds()
+        return user.user_id in active_ids and age <= self.ONLINE_WINDOW_SECONDS
+
+    def _user_dict_with_live_stats(self, user, active_ids=None):
         """
         A user's `to_dict()` carries whatever was last persisted to
         `stats`, which only covers counters that are incremented as a
@@ -320,6 +342,7 @@ class ManagementLayer:
         """
         data = user.to_dict()
         data["stats"] = self.get_user_stats(user.user_id)
+        data["online"] = self._is_online(user, active_ids)
         return data
 
     @staticmethod
@@ -490,9 +513,17 @@ class ManagementLayer:
         if not user_id:
             return None
         try:
-            return self.user_registry.get_user(user_id)
+            user = self.user_registry.get_user(user_id)
         except ValueError:
             return None
+        # Keeps the Users page's "Online / Last seen" live: any authenticated
+        # dashboard request counts as activity, written at most once a minute.
+        last = user.last_active
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        if (datetime.now(UTC) - last).total_seconds() > 60:
+            self.user_registry.touch_last_active(user_id)
+        return user
 
     def change_password(self, user_id, current_password, new_password):
         user = self.user_registry.get_user(user_id)
@@ -1129,9 +1160,21 @@ class ManagementLayer:
         if cp is None:
             return {"open": [], "resolved": []}
         return {
-            "open": cp.incidents.open_incidents(),
-            "resolved": cp.incidents.recent_resolved(resolved_limit),
+            "open": [self._with_owner_label(i) for i in cp.incidents.open_incidents()],
+            "resolved": [self._with_owner_label(i) for i in cp.incidents.recent_resolved(resolved_limit)],
         }
+
+    def _with_owner_label(self, incident):
+        """
+        Incidents claimed before this fix stored the claimer's email as the
+        owner. Show their username (or name) instead, and never an email
+        address, even if the account no longer exists.
+        """
+        owner = incident.get("owner")
+        if owner and "@" in owner:
+            user = self.user_registry.get_user_by_email(owner)
+            incident = {**incident, "owner": (user.username or user.name) if user else "A former user"}
+        return incident
 
     def set_incident_owner(self, incident_id, user, claim=True):
         """Take (claim=True) or release an open incident as `user` (a User)."""
@@ -1139,7 +1182,7 @@ class ManagementLayer:
         if cp is None:
             raise ValueError("No control-plane database attached")
         from datetime import datetime, UTC
-        owner = (user.email or user.name) if claim else None
+        owner = (user.username or user.name) if claim else None
         if not cp.incidents.set_owner(incident_id, owner, datetime.now(UTC).isoformat()):
             raise ValueError("Incident not found or already resolved")
         self.audit_logger.log(user.name, "took ownership of incident" if claim else "released incident", incident_id)
@@ -1503,7 +1546,7 @@ class ManagementLayer:
     # Export
     # ------------------------------------------------------------
 
-    def export(self, entity, fmt):
+    def export(self, entity, fmt, mask_pii=False):
         exporters = {
             "users": self.get_users,
             "organizations": self.get_organizations,
@@ -1514,6 +1557,8 @@ class ManagementLayer:
             raise ValueError(f"Unknown export entity '{entity}'.")
 
         rows = exporters[entity]()
+        if mask_pii and entity == "users":
+            rows = [{**r, "email": mask_email(r.get("email"))} for r in rows]
 
         if fmt == "json":
             return json.dumps(rows, indent=2), "application/json", f"{entity}.json"

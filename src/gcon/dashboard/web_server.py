@@ -485,12 +485,12 @@ class WebServer:
 
         @self.app.get("/management/users")
         def mgmt_users(user=Depends(self.require_permission("Manage users"))):
-            return self.management.get_users()
+            return self.management.get_users(mask_pii=True)
 
         @self.app.get("/management/users/{user_id}")
         def mgmt_get_user(user_id: str, user=Depends(self.require_permission("Manage users"))):
             try:
-                return self.management.get_user(user_id)
+                return self.management.get_user(user_id, mask_pii=True)
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e))
         
@@ -1001,7 +1001,7 @@ class WebServer:
 
         @self.app.get("/management/export/{entity}")
         def mgmt_export(entity: str, format: str = "json",user=Depends(self.require_permission("Manage users"))):
-            content, mime, filename = self.management.export(entity, format)
+            content, mime, filename = self.management.export(entity, format, mask_pii=True)
             return Response(
                 content=content,
                 media_type=mime,
