@@ -245,6 +245,11 @@ class ObservabilityService:
                 # loop moves on; a failed job is retried only when asked.
                 "backoff": "none",
             },
+            "restarts": {
+                "total": stats["restarts_total"],
+                "last_at": stats["last_restart_at"],
+                "last_message": stats["last_restart_message"],
+            },
             "recent_control": recent_control,
             "counting_since": stats["since"],
         }
@@ -391,6 +396,8 @@ class ObservabilityService:
             "workers_idle": waiting["idle_workers"],
             "workers_quarantined": sum(1 for n in nodes if n.get("quarantined")),
             "scheduler_on": bool(not getattr(self.c, "scheduler_paused", False)),
+            "scheduler_restarts_recent": self.c.scheduler_stats.recent_restarts(
+                _env_float("GCON_SCHEDULER_RESTART_WINDOW_SECONDS", 300)),
             "receipts_verified": getattr(self.c, "_verified_receipt_count", None),
             "receipts_unverified": getattr(self.c, "_unverified_receipt_count", None),
             "disputed_jobs": disputed,
@@ -427,6 +434,11 @@ class ObservabilityService:
             fire("scheduler_paused", "scheduler", "warning",
                  f"Scheduler is paused with {pending} job(s) waiting", pending=pending,
                  impact=f"{pending} job(s) will not be dispatched")
+        if snap.get("scheduler_restarts_recent"):
+            n = snap["scheduler_restarts_recent"]
+            fire("scheduler_restarted", "scheduler", "warning",
+                 f"Scheduler loop crashed and was restarted {n} time(s) recently",
+                 restarts=n, impact="dispatch paused briefly on each restart")
         if snap.get("receipts_unverified"):
             fire("receipts_unverified", "receipts", "warning",
                  f"{snap['receipts_unverified']} receipt(s) failing signature verification",

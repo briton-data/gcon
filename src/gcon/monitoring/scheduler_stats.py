@@ -33,6 +33,11 @@ class SchedulerStats:
         self.last_failure_at: Optional[datetime] = None
         self.last_failure_kind: Optional[str] = None
         self.last_failure_message: Optional[str] = None
+        # Unexpected loop crashes the supervisor recovered from (or gave up on).
+        self.restarts_total = 0
+        self._restart_times = deque(maxlen=200)          # time.time() floats
+        self.last_restart_at: Optional[datetime] = None
+        self.last_restart_message: Optional[str] = None
 
     # ---- written by the scheduler loop / dispatch path -------------------
     def tick(self, state: str) -> None:
@@ -51,6 +56,18 @@ class SchedulerStats:
         self.last_failure_at = datetime.now(UTC)
         self.last_failure_kind = kind
         self.last_failure_message = (message or "")[:300]
+
+    def restarted(self, message: str) -> None:
+        """The loop died with an unexpected exception (not RuntimeError's normal
+        "no node" path) and the supervisor is about to start it again."""
+        self.restarts_total += 1
+        self._restart_times.append(time.time())
+        self.last_restart_at = datetime.now(UTC)
+        self.last_restart_message = (message or "")[:300]
+
+    def recent_restarts(self, window_seconds: float) -> int:
+        cutoff = time.time() - window_seconds
+        return sum(1 for t in list(self._restart_times) if t >= cutoff)
 
     # ---- read by the observability service --------------------------------
     def loop_age_seconds(self) -> Optional[float]:
@@ -87,4 +104,7 @@ class SchedulerStats:
             "last_failure_at": iso(self.last_failure_at),
             "last_failure_kind": self.last_failure_kind,
             "last_failure_message": self.last_failure_message,
+            "restarts_total": self.restarts_total,
+            "last_restart_at": iso(self.last_restart_at),
+            "last_restart_message": self.last_restart_message,
         }

@@ -32,6 +32,9 @@ class EventType:
     # Scheduler Events
     SCHEDULER_PAUSED = "SCHEDULER_PAUSED"
     SCHEDULER_RESUMED = "SCHEDULER_RESUMED"
+    # The scheduler loop crashed unexpectedly and the supervisor restarted it
+    # (or gave up after repeated crashes -- payload["gave_up"]).
+    SCHEDULER_RESTARTED = "SCHEDULER_RESTARTED"
     QUEUE_CLEARED = "QUEUE_CLEARED"
     FAILED_JOBS_RETRIED = "FAILED_JOBS_RETRIED"
     EMERGENCY_STOP = "EMERGENCY_STOP"

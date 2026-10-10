@@ -373,10 +373,14 @@ class GCONCoordinator:
         self._last_retention_sweep = 0.0
         self.restore_from_persistence()
 
+        # The thread is a small supervisor around scheduler_loop: it restarts
+        # the loop if it dies unexpectedly (see _scheduler_supervisor). The
+        # attribute keeps its name and meaning -- is_alive() is still what
+        # health and observability read to mean "dispatch is running".
         self.scheduler_thread = threading.Thread(
-                target=self.scheduler_loop,                       
+                target=self._scheduler_supervisor,
                 daemon=True
-        )       
+        )
         self.scheduler_thread.start()
 
         self.health_check_thread = threading.Thread(
@@ -2994,25 +2998,90 @@ class GCONCoordinator:
             return None
         return None
 
+    def _scheduler_supervisor(self):
+        """
+        Runs scheduler_loop() and starts it again if it dies.
+
+        scheduler_loop deliberately lets an unexpected exception escape (it is
+        not swallowed -- see its docstring) so a real fault is never hidden.
+        Before, that ended the only thread dispatching jobs and nothing
+        brought it back until the whole coordinator was restarted by hand.
+        Now the escape is caught HERE: it is logged with its traceback,
+        counted (scheduler_stats.restarts_total, shown on the Scheduler page
+        and raised as an incident), published as SCHEDULER_RESTARTED, and the
+        loop is started again after a short, growing pause.
+
+        A crash that keeps recurring is not retried forever: more than
+        GCON_SCHEDULER_MAX_RESTARTS (default 5) crashes within
+        GCON_SCHEDULER_RESTART_WINDOW_SECONDS (default 300) and the
+        supervisor stops, so this thread ends and health/observability report
+        the scheduler dead exactly as they did before this existed.
+        """
+        def _int_env(name, default):
+            try:
+                value = int(os.environ.get(name, "").strip() or default)
+            except ValueError:
+                return default
+            return value if value > 0 else default
+
+        crash_times = deque()
+
+        while not self._shutdown_event.is_set():
+            try:
+                self.scheduler_loop()
+                return              # scheduler_loop only returns normally on shutdown
+            except Exception as exc:
+                # Read at crash time, so a changed setting applies without a restart.
+                max_restarts = _int_env("GCON_SCHEDULER_MAX_RESTARTS", 5)
+                window = _int_env("GCON_SCHEDULER_RESTART_WINDOW_SECONDS", 300)
+                now = time.monotonic()
+                crash_times.append(now)
+                while crash_times and now - crash_times[0] > window:
+                    crash_times.popleft()
+                gave_up = len(crash_times) > max_restarts
+                self.scheduler_stats.restarted(f"{type(exc).__name__}: {exc}")
+                _coordinator_logger.error(
+                    "[SCHEDULER] Loop crashed (%d in the last %ds): %s",
+                    len(crash_times), window, exc, exc_info=True,
+                )
+                try:
+                    self.event_bus.publish(Event(
+                        timestamp=datetime.now(UTC),
+                        event_type=EventType.SCHEDULER_RESTARTED,
+                        source="Coordinator",
+                        payload={"error": f"{type(exc).__name__}: {exc}"[:300],
+                                 "crashes_in_window": len(crash_times),
+                                 "gave_up": gave_up},
+                    ))
+                except Exception:
+                    _coordinator_logger.warning("could not publish SCHEDULER_RESTARTED", exc_info=True)
+                if gave_up:
+                    _coordinator_logger.critical(
+                        "[SCHEDULER] Crashed more than %d times in %ds: not restarting it again. "
+                        "No jobs will be dispatched until the coordinator is restarted.",
+                        max_restarts, window,
+                    )
+                    return
+                # 1s, 2s, 4s ... capped at 30s; woken early by shutdown.
+                self._shutdown_event.wait(min(30, 2 ** (len(crash_times) - 1)))
+
     def scheduler_loop(self):
         """
         Continuously assign waiting jobs to idle nodes.
 
-        This loop runs on a single daemon thread with no supervisor to
-        restart it. RuntimeError is assign_job()'s expected "no
-        available node right now" signal and is handled by simply
-        requeuing the job and retrying later -- that is a normal,
-        recoverable condition and must never kill this thread.
+        RuntimeError is assign_job()'s expected "no available node right
+        now" signal and is handled by simply requeuing the job and retrying
+        later -- that is a normal, recoverable condition and must never
+        end the loop.
 
         Anything else (a bug in select_node/assign_job, corrupted
         internal state, etc.) is genuinely unexpected. It is
-        deliberately NOT swallowed: health_service.check_coordinator()
-        determines cluster health by checking
-        `scheduler_thread.is_alive()`, so an unexpected exception here
-        is allowed to propagate and kill the thread, making the
-        failure observable to health monitoring instead of silently
-        degrading job dispatch forever. The job is put back on the
-        queue first so it isn't lost.
+        deliberately NOT swallowed here: it propagates out of this method,
+        so a real fault is never hidden. The job is put back on the
+        queue first so it isn't lost. _scheduler_supervisor catches it,
+        records and announces it, and starts this loop again; if it keeps
+        crashing the supervisor gives up and the thread ends, which
+        health_service/observability read via `scheduler_thread.is_alive()`.
         """
 
         # Consecutive assign_job() failures since the last success. The
@@ -3097,7 +3166,8 @@ class GCONCoordinator:
                 # that absorbs every exception can never be observed as
                 # unhealthy even when something is seriously wrong. Put
                 # the job back so it isn't lost, then let the exception
-                # propagate and kill this thread so monitoring catches it.
+                # propagate to _scheduler_supervisor, which records it and
+                # restarts the loop (or gives up if it keeps crashing).
                 self.job_queue.put(job_id)
                 raise
 
