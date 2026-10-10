@@ -15,13 +15,17 @@ mkdir -p "$CERT_DIR"
 # with a plain `>` it was created with the default umask (typically 0644,
 # readable by every process in the container -- including job code). The
 # umask is set in a subshell so it doesn't leak into jobs the worker starts.
+# Each file is written only if its variable is set. A worker that self-enrolls
+# is given just the CA certificate (and an enroll token); writing empty
+# agent cert/key files here would make it think it is already enrolled.
 (
   umask 077
-  echo "$GCON_CA_CERT_B64"    | base64 -d > "$CERT_DIR/ca.cert.pem"
-  echo "$GCON_AGENT_CERT_B64" | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.cert.pem"
-  echo "$GCON_AGENT_KEY_B64"  | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
+  [ -n "$GCON_CA_CERT_B64" ]    && echo "$GCON_CA_CERT_B64"    | base64 -d > "$CERT_DIR/ca.cert.pem"
+  [ -n "$GCON_AGENT_CERT_B64" ] && echo "$GCON_AGENT_CERT_B64" | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.cert.pem"
+  [ -n "$GCON_AGENT_KEY_B64" ]  && echo "$GCON_AGENT_KEY_B64"  | base64 -d > "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
+  true
 )
-chmod 600 "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
+[ -f "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem" ] && chmod 600 "$CERT_DIR/agent-${GCON_NODE_ID}.key.pem"
 
 # The files are the source of truth from here on (nothing in the worker reads
 # these variables), and leaving them set keeps the private key readable by any
