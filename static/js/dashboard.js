@@ -1772,6 +1772,11 @@ async function loadSchedulerTab() {
     setText("sch-fa", f.last_at ? fmtAgo((Date.now() - new Date(f.last_at).getTime()) / 1000) : "--");
     setMsg("sch-last-msg", f.last_message ? `Last failure: ${f.last_message}` : "No scheduling failures since counting began.");
 
+    const rs = s.restarts || {total: 0};
+    setMsg("sch-restarts", rs.total
+        ? `Loop restarts since counting began: ${rs.total}. Last ${fmtAgo((Date.now() - new Date(rs.last_at).getTime()) / 1000)}: ${rs.last_message}`
+        : "The scheduler loop has not crashed since counting began.");
+
     setText("sch-maxatt", s.retry.max_attempts ?? "--");
     setText("sch-retried", s.retry.jobs_retried);
     setText("sch-cap", s.retry.failed_at_attempt_cap);
