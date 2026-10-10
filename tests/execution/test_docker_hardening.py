@@ -172,13 +172,20 @@ class TestAgentDockerBranch:
     def test_only_the_dedicated_directory_is_mounted(self, monkeypatch, temp_root):
         command, _ = self._run(monkeypatch, temp_root)
         mount = _pair(command, "-v")
-        assert mount == f"{job_io_dir()}:{CONTAINER_MOUNT}"
-        assert mount.split(":")[0] != str(temp_root)  # not the whole temp dir
+        host_side, container_side = mount.rsplit(":", 1)
+        assert container_side == CONTAINER_MOUNT
+        # A private directory for THIS run, inside the dedicated job-IO
+        # directory -- not the shared job-IO directory itself (which every
+        # job on the worker would see) and not the whole temp dir.
+        assert os.path.dirname(host_side) == job_io_dir()
+        assert os.path.basename(host_side).startswith("run-")
+        assert host_side != str(temp_root)
 
     def test_report_path_is_remapped_into_the_container(self, monkeypatch, temp_root):
-        command, usage = self._run(monkeypatch, temp_root)
+        command, _usage = self._run(monkeypatch, temp_root)
         env_flags = [command[i + 1] for i, c in enumerate(command) if c == "-e"]
-        assert f"GCON_USAGE_REPORT_PATH={CONTAINER_MOUNT}/{os.path.basename(usage)}" in env_flags
+        # The report file lives in the run's private directory (see execute_job).
+        assert f"GCON_USAGE_REPORT_PATH={CONTAINER_MOUNT}/usage.json" in env_flags
 
     def test_hardening_flags_reach_the_real_command(self, monkeypatch, temp_root):
         command, _ = self._run(monkeypatch, temp_root)

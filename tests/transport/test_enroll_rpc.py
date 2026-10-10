@@ -39,6 +39,9 @@ def enroll_setup(tmp_path, monkeypatch):
     # this pytest process by some other test module; this is no
     # longer an import-order-dependent test-isolation trap.
     monkeypatch.setenv("GCON_ENROLL_TOKEN", "shared-dev-token-123")
+    # These tests drive the Enroll RPC over a plaintext channel, which is now
+    # an explicit opt-in. Enrollment over TLS is covered in test_enroll_tls.py.
+    monkeypatch.setenv("GCON_ENROLL_INSECURE", "1")
 
     control_plane = ControlPlane(path=str(tmp_path / "cp.db"))
     cert_dir = str(tmp_path / "certs")

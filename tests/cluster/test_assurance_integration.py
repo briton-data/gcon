@@ -22,8 +22,28 @@ def _wait_for(predicate, timeout=5, interval=0.05):
     return False
 
 
-def test_ordinary_completed_job_is_verified_and_assured():
+def _load_independent_policy(coordinator, tmp_path):
+    """
+    Give a coordinator a policy whose verdict does not depend on how busy the
+    machine is. The repo-root policy.json caps HOST-wide cpu/memory percent at
+    90/95, and PolicyEngine fills any key a policy file omits with those
+    defaults, so on a small machine under load (right after a heavy test run,
+    or two replicas starting at once) an ordinary `echo hi` could be flagged as
+    a violation and these tests failed intermittently. Suspected cause, not
+    proven: the assertions below print the assurance details so a recurrence
+    shows which check tripped.
+    """
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps({
+        "version": "1.0", "max_runtime": 30.0,
+        "max_cpu_percent": 1_000_000.0, "max_memory_percent": 1_000_000.0,
+    }))
+    coordinator.policy_engine = coordinator.policy_engine.__class__(policy_file=str(policy_path))
+
+
+def test_ordinary_completed_job_is_verified_and_assured(tmp_path):
     coordinator = GCONCoordinator()
+    _load_independent_policy(coordinator, tmp_path)
     coordinator.register_agent(GCONAgent(node_id="node-assure-1"))
 
     coordinator.submit_job("job-assure-1", "echo hello")
@@ -33,7 +53,7 @@ def test_ordinary_completed_job_is_verified_and_assured():
     receipt = coordinator.receipts["job-assure-1"]
     detail = coordinator.get_receipt_detail(receipt["receipt_id"])
 
-    assert detail["assurance"]["level"] == "verified"
+    assert detail["assurance"]["level"] == "verified", detail["assurance"]
     assert detail["assurance"]["assured"] is True
     assert detail["assurance"]["signals"]["crypto"]["passed"] is True
     # LocalTransport nodes have no per-node identity, so no
@@ -70,7 +90,7 @@ def test_policy_violating_job_downgrades_assurance_but_stays_crypto_valid(tmp_pa
     coordinator.shutdown()
 
 
-def test_replicated_job_assurance_is_self_consistent_with_its_execution_proof():
+def test_replicated_job_assurance_is_self_consistent_with_its_execution_proof(tmp_path):
     """Two real nodes run an identical command. Whichever way real
     replication.compare_results() comes out, get_receipt_detail()'s
     "assurance" field must accurately reflect it -- that's what #7
@@ -78,6 +98,7 @@ def test_replicated_job_assurance_is_self_consistent_with_its_execution_proof():
     the outcome itself is pinned down by the two strict tests below.
     """
     coordinator = GCONCoordinator()
+    _load_independent_policy(coordinator, tmp_path)
     coordinator.register_agent(GCONAgent(node_id="node-assure-3"))
     coordinator.register_agent(GCONAgent(node_id="node-assure-4"))
 
@@ -94,7 +115,7 @@ def test_replicated_job_assurance_is_self_consistent_with_its_execution_proof():
 
     if detail["execution_proof"]["agreement"] is True:
         assert replication_signal["passed"] is True
-        assert detail["assurance"]["level"] == "verified"
+        assert detail["assurance"]["level"] == "verified", detail["assurance"]
         assert detail["assurance"]["assured"] is True
     else:
         assert replication_signal["passed"] is False
@@ -119,10 +140,11 @@ def test_assurance_precedence_matches_module_ordering(valid):
     )
 
 
-def test_honest_identical_replicas_are_verified():
+def test_honest_identical_replicas_are_verified(tmp_path):
     """Deterministic output on two healthy nodes must come out verified.
     Previously ~90% of these were "disputed" on runtime jitter alone."""
     coordinator = GCONCoordinator()
+    _load_independent_policy(coordinator, tmp_path)
     coordinator.register_agent(GCONAgent(node_id="node-assure-5"))
     coordinator.register_agent(GCONAgent(node_id="node-assure-6"))
     try:
@@ -133,7 +155,7 @@ def test_honest_identical_replicas_are_verified():
             assert _wait_for(lambda: job_id in coordinator.receipts)
             detail = coordinator.get_receipt_detail(coordinator.receipts[job_id]["receipt_id"])
             assert detail["execution_proof"]["agreement"] is True, detail["execution_proof"]
-            assert detail["assurance"]["level"] == "verified"
+            assert detail["assurance"]["level"] == "verified", detail["assurance"]
     finally:
         coordinator.shutdown()
 
