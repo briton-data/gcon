@@ -14,7 +14,7 @@ interactive docs at `/api/v1/docs` over this file.
 
 1. [REST API Overview](#rest-api-overview)
 2. [Authentication](#authentication)
-3. [Endpoints](#endpoints)
+3. [Endpoints](#endpoints) (including [Billing](#billing))
 4. [Python SDK](#python-sdk)
 5. [Verification](#verification)
 6. [Error Handling](#error-handling)
@@ -401,6 +401,57 @@ same process.
 
 ---
 
+### Billing
+
+Read-only. Invoices are generated and finalized by GCON staff; there is no
+customer route that creates, changes or charges anything. All four routes need
+the `View monitoring` scope and only ever return your own organization's data.
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/billing/pricing` | `View monitoring` | The current price list (rates in cents per unit) |
+| `GET` | `/billing/usage` | `View monitoring` | Preview your usage and charges for a period (nothing is created or charged) |
+| `GET` | `/billing/invoices` | `View monitoring` | Your issued invoices, newest period first (`?limit=` 1-200, default 50) |
+| `GET` | `/billing/invoices/{invoice_id}` | `View monitoring` | One invoice with its line items |
+
+**Usage preview.** `GET /billing/usage?period_start=2026-10-01&period_end=2026-11-01`
+returns what an invoice for that period would contain right now, built from your
+completed jobs and receipts with the same rules staff use to generate the real
+invoice. Give both parameters (ISO-8601 date or timestamp, end exclusive, no
+timezone means UTC) or neither, which means the current UTC calendar month. A
+period can span at most 366 days. A bad period is a `400` with the reason.
+
+```json
+{
+  "period_start": "2026-10-01T00:00:00+00:00",
+  "period_end": "2026-11-01T00:00:00+00:00",
+  "currency": "usd",
+  "usage": {
+    "job_count": 12, "compute_seconds": 3600.0,
+    "llm_input_tokens": 0, "llm_output_tokens": 0,
+    "receipt_count": 0, "verification_count": 0, "assurance_decision_count": 0
+  },
+  "line_items": [
+    {"description": "Compute (measured job runtime)", "quantity": 3600.0,
+     "unit": "gpu_second", "unit_price_cents": 0.05, "amount_cents": 180}
+  ],
+  "amount_cents": 180
+}
+```
+
+**Invoices.** Only invoices that staff have issued are visible: `open`, `paid`,
+`failed` or `void`. A `draft` is a staff working copy and is never shown. An
+invoice that does not exist, belongs to another organization, or is still a
+draft all return the same `404`. Payment-gateway details (provider, charge id,
+error text) are not part of the customer view.
+
+> **Payments are not live.** The payment provider defaults to a mock and the
+> Stripe provider is not implemented, so `paid` on an invoice does not mean
+> money moved. Do not present these invoices to customers as real charges until
+> a real provider is configured.
+
+---
+
 ### Auth
 
 | Method | Path | Scope | Summary |
@@ -491,6 +542,13 @@ print(client.list_workflows())
 print(client.list_receipts())
 print(client.list_artifacts())
 
+# Billing (read-only)
+print(client.get_pricing())
+print(client.get_usage())                       # current month
+print(client.get_usage("2026-10-01", "2026-11-01"))
+print(client.list_invoices())
+print(client.get_invoice("<invoice_id>"))
+
 # Who am I
 print(client.whoami())
 ```
@@ -501,7 +559,8 @@ print(client.whoami())
 > `list_workflows`, `list_receipts`, and `list_artifacts`. It does **not**
 > have a `submit_workflow`, `get_receipt`, or `verify_receipt` wrapper
 > yet — call `POST /workflows` directly (e.g. with `requests`) until the
-> SDK grows a helper for it.
+> SDK grows a helper for it. It also has the billing reads `get_pricing`,
+> `get_usage`, `list_invoices` and `get_invoice`.
 
 Use it as a context manager to close the underlying session:
 
@@ -569,6 +628,25 @@ independent cross-node agreement evidence, Python API only today).
 
 ---
 
+## Rate limiting
+
+Every route that needs an API key is limited to **600 requests per minute per
+organization** (a rolling 60 seconds) by default. The count is per organization,
+so extra API keys do not buy extra allowance. Over the limit you get `429 Too
+Many Requests` with a `Retry-After` header (whole seconds) and the usual
+`{"detail": ...}` body. Requests that fail authentication are not counted. The
+sign-up and login routes have their own, stricter limits.
+
+The limit is held in memory by the coordinator process: restarting it resets the
+counts, and it limits request *rate* only (how many jobs one organization can
+have running is a separate setting, `GCON_MAX_CONCURRENT_JOBS_PER_ORG`). Operators
+change it with `GCON_API_RATE_LIMIT_PER_MINUTE` (`0` turns it off).
+
+Clients should wait `Retry-After` seconds and retry, rather than retrying
+immediately.
+
+---
+
 ## Error Handling
 
 ### HTTP status codes actually used by `/api/v1`
@@ -578,12 +656,14 @@ independent cross-node agreement evidence, Python API only today).
 | `200 OK` | Request succeeded | all `GET`s and successful `POST`s |
 | `400 Bad Request` | Invalid input / `ValueError` from the coordinator (duplicate job/workflow id, bad DAG, job not cancellable, etc.) | `submit_job`, `cancel_job`, `submit_workflow` |
 | `401 Unauthorized` | Missing, invalid, expired, or under-scoped API key | `require_scope()` |
-| `404 Not Found` | Node or job id doesn't exist | `get_node`, `get_job` |
+| `404 Not Found` | Node, job or invoice id doesn't exist (or belongs to another organization) | `get_node`, `get_job`, `get_billing_invoice` |
+| `429 Too Many Requests` | Over the per-organization request limit; see `Retry-After` and [Rate limiting](#rate-limiting) | `require_scope()` |
 | `422 Unprocessable Entity` | Request body fails Pydantic validation | FastAPI's default, before your handler runs |
 
-There is currently no `201 Created`, `409 Conflict`, or `503 Service
-Unavailable` in this router — duplicate-id and "not ready" conditions both
-surface as `400`.
+There is currently no `201 Created` or `409 Conflict` in this router —
+duplicate-id and "not ready" conditions both surface as `400`. `503` is
+returned only by `GET /billing/usage`, when billing data is not available on
+the coordinator.
 
 ### Error response format
 

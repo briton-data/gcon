@@ -176,6 +176,9 @@ GCON_FORCE_HTTPS=0                 # 1 to terminate TLS here too, enable
 GCON_API_CORS_ORIGINS=             # comma-separated origins allowed to
                                     # call /api/v1 from a browser; unset =
                                     # no CORS (API-key/SDK clients unaffected)
+GCON_API_RATE_LIMIT_PER_MINUTE=600 # requests per organization per rolling
+                                    # minute on /api/v1; 0 = off. In memory,
+                                    # per process, resets on restart.
 ```
 
 There is no `GCON_STORAGE_BACKEND`, `GCON_API_KEY_REQUIRED`, or
