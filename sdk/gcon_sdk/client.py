@@ -339,6 +339,37 @@ class GconClient:
             params["since"] = since
         return self._request("GET", "/telemetry/events", params=params)
 
+    # ------------------------------------------------------------
+    # Billing (read-only)
+    # ------------------------------------------------------------
+
+    def get_pricing(self) -> Dict[str, Any]:
+        """The current price list (rates are in cents per unit)."""
+        return self._request("GET", "/billing/pricing")
+
+    def get_usage(self, period_start: Optional[str] = None,
+                  period_end: Optional[str] = None) -> Dict[str, Any]:
+        """Preview your organization's usage and charges for a period:
+        what an invoice would contain right now. Nothing is created or
+        charged. Pass both `period_start` and `period_end` (ISO-8601,
+        end exclusive, no timezone means UTC), or neither for the
+        current UTC calendar month."""
+        params: Dict[str, Any] = {}
+        if period_start is not None:
+            params["period_start"] = period_start
+        if period_end is not None:
+            params["period_end"] = period_end
+        return self._request("GET", "/billing/usage", params=params)
+
+    def list_invoices(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Your organization's issued invoices (open, paid, failed,
+        void), newest period first. Drafts are not shown."""
+        return self._request("GET", "/billing/invoices", params={"limit": limit})
+
+    def get_invoice(self, invoice_id: str) -> Dict[str, Any]:
+        """One of your organization's invoices, with its line items."""
+        return self._request("GET", f"/billing/invoices/{invoice_id}")
+
     def close(self):
         self._session.close()
 
