@@ -406,6 +406,13 @@ class RealClusterProcesses:
             # Jobs from the public API only run on a worker that has verified
             # its sandbox (run_worker's startup probe), so this one needs Docker.
             env["GCON_EXECUTION_BACKEND"] = "docker"
+            # The job folder is private to the worker's own OS user (mode 0700)
+            # and containers drop every capability, so a container running as
+            # root cannot write to it unless the worker is root too -- the
+            # sandbox check then fails on "io_dir_writable". An unprivileged
+            # worker on Linux therefore runs its job containers as itself.
+            if hasattr(os, "getuid"):
+                env["GCON_JOB_DOCKER_USER"] = f"{os.getuid()}:{os.getgid()}"
             # The probe runs a throwaway container from this image before the
             # worker registers. Pull it first, so a cold machine's download
             # time is not mistaken for a worker that never came up.
