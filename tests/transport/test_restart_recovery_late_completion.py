@@ -104,6 +104,12 @@ def test_late_completion_from_a_superseded_attempt_does_not_overwrite_job_status
             lambda: coordinator.jobs["job-restart-late"]["status"] == "running", timeout=5
         )
 
+        # The job flips to "running" just before the transport writes its
+        # attempt row, so wait for the row instead of reading it at once.
+        assert wait_until(
+            lambda: len(coordinator.control_plane.job_attempts.list_for_job("job-restart-late")) == 1,
+            timeout=5,
+        )
         attempts_before = coordinator.control_plane.job_attempts.list_for_job("job-restart-late")
         assert len(attempts_before) == 1
 
