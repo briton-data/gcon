@@ -54,6 +54,7 @@ counter.
 from __future__ import annotations
 
 import json as _json
+from datetime import datetime, timedelta, UTC
 from typing import Any, Dict, List, Optional
 
 from gcon.billing.pricing import PricingConfig, load_pricing
@@ -306,3 +307,111 @@ def finalize_invoice(
     return control_plane.invoices.mark_status(
         invoice_id, "failed", provider=result.provider, provider_error=result.error,
     )
+
+
+# ---------------------------------------------------------------
+# Customer-facing reads (GET /api/v1/billing/...)
+# ---------------------------------------------------------------
+
+# A usage preview scans the org's jobs and receipts for the period; a year is
+# enough for any real invoice question and keeps one request from asking for
+# an unbounded scan.
+MAX_PREVIEW_DAYS = 366
+
+
+def default_billing_period(now: Optional[datetime] = None):
+    """The current UTC calendar month as (start, end), end exclusive."""
+    now = now or datetime.now(UTC)
+    start = now.astimezone(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start, end
+
+
+def _parse_instant(value: Any, name: str) -> datetime:
+    """An ISO-8601 date or timestamp as an aware UTC datetime. No timezone
+    means UTC."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be an ISO-8601 date or timestamp.")
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(
+            f"{name} '{value}' is not a valid ISO-8601 date or timestamp "
+            "(for example 2026-10-01 or 2026-10-01T00:00:00Z)."
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def preview_usage(
+    control_plane: ControlPlane,
+    org_id: str,
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
+    pricing: Optional[PricingConfig] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    What an invoice for this org and period would contain right now, computed
+    with exactly the helpers `generate_invoice` uses but WITHOUT creating or
+    changing anything. Same completed jobs, same receipts, same line items --
+    so if staff later generate an invoice for the identical period the numbers
+    match, unless more usage was recorded in between.
+
+    Give both `period_start` and `period_end` (end exclusive), or neither for
+    the current UTC calendar month. Raises ValueError for anything else.
+    """
+    if not org_id:
+        raise ValueError("An organization is required to preview usage.")
+    if (period_start is None) != (period_end is None):
+        raise ValueError(
+            "Give both period_start and period_end, or neither "
+            "(neither means the current UTC calendar month)."
+        )
+    if period_start is None:
+        start, end = default_billing_period(now)
+    else:
+        start = _parse_instant(period_start, "period_start")
+        end = _parse_instant(period_end, "period_end")
+    if end <= start:
+        raise ValueError("period_end must be after period_start.")
+    if end - start > timedelta(days=MAX_PREVIEW_DAYS):
+        raise ValueError(f"A usage period can span at most {MAX_PREVIEW_DAYS} days.")
+
+    pricing = pricing or load_pricing(control_plane)
+    start_iso, end_iso = start.isoformat(), end.isoformat()
+    jobs = _jobs_for_period(control_plane, org_id, start_iso, end_iso)
+    receipts = _receipts_for_period(control_plane, org_id, start_iso, end_iso)
+    usage = {**compute_usage_totals(jobs), **compute_receipt_usage_totals(receipts)}
+    line_items = build_line_items(usage, pricing)
+    return {
+        "period_start": start_iso,
+        "period_end": end_iso,
+        "currency": pricing.currency,
+        "usage": usage,
+        "line_items": line_items,
+        "amount_cents": sum(item["amount_cents"] for item in line_items),
+    }
+
+
+_CUSTOMER_INVOICE_FIELDS = (
+    "invoice_id", "period_start", "period_end", "currency", "amount_cents",
+    "status", "created_at", "finalized_at", "paid_at",
+)
+_CUSTOMER_LINE_ITEM_FIELDS = ("description", "quantity", "unit", "unit_price_cents", "amount_cents")
+
+
+def customer_invoice_view(invoice: Dict[str, Any]) -> Dict[str, Any]:
+    """An invoice as a customer may see it. Deliberately leaves out the
+    payment-gateway fields (provider, provider_charge_id, provider_error) and
+    the org id: those are internal bookkeeping, not part of the invoice."""
+    view = {field: invoice.get(field) for field in _CUSTOMER_INVOICE_FIELDS}
+    view["line_items"] = [
+        {field: item.get(field) for field in _CUSTOMER_LINE_ITEM_FIELDS}
+        for item in invoice.get("line_items") or []
+    ]
+    return view

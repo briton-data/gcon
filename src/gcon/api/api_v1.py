@@ -16,6 +16,7 @@ raw schema at /api/v1/openapi.json.
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -23,12 +24,13 @@ import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Depends, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, model_validator
 
 from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
 from gcon.management.rate_limit import LoginRateLimiter
+from gcon.management.request_limiter import RequestRateLimiter, limit_from_env
 from gcon.management.auth import RESET_TOKEN_TTL_MINUTES
 from gcon.management.mailer import SmtpMailer, password_reset_message
 
@@ -305,6 +307,57 @@ class ErrorOut(BaseModel):
     detail: str
 
 
+class PricingOut(BaseModel):
+    currency: str
+    gpu_second_cents: float
+    llm_input_token_cents: float
+    llm_output_token_cents: float
+    flat_fee_per_job_cents: float
+    verification_check_cents: float
+    assurance_decision_cents: float
+    receipt_cents: float
+
+
+class InvoiceLineItemOut(BaseModel):
+    description: str
+    quantity: float
+    unit: str
+    unit_price_cents: float
+    amount_cents: int
+
+
+class InvoiceOut(BaseModel):
+    invoice_id: str
+    period_start: str
+    period_end: str
+    currency: str
+    amount_cents: int
+    status: str = Field(description="open, paid, failed or void. Draft invoices are not shown.")
+    created_at: Optional[str] = None
+    finalized_at: Optional[str] = None
+    paid_at: Optional[str] = None
+    line_items: List[InvoiceLineItemOut]
+
+
+class UsageTotalsOut(BaseModel):
+    job_count: int
+    compute_seconds: float
+    llm_input_tokens: int
+    llm_output_tokens: int
+    receipt_count: int
+    verification_count: int
+    assurance_decision_count: int
+
+
+class UsagePreviewOut(BaseModel):
+    period_start: str
+    period_end: str = Field(description="Exclusive.")
+    currency: str
+    usage: UsageTotalsOut
+    line_items: List[InvoiceLineItemOut]
+    amount_cents: int = Field(description="Total of the line items. A preview, not an invoice.")
+
+
 class CustomerSignupIn(BaseModel):
     org_name: str
     name: str
@@ -483,6 +536,17 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         db=getattr(management, "db", None),
     )
 
+    # General request limit: at most GCON_API_RATE_LIMIT_PER_MINUTE requests
+    # per organization in any rolling minute (default 600, 0 = off), applied
+    # in require_scope after the key has authenticated. See
+    # gcon.management.request_limiter for what it does and does not cover.
+    request_limit = limit_from_env()
+    request_limiter = RequestRateLimiter(request_limit) if request_limit > 0 else None
+    if request_limiter is not None:
+        log.info("Public API request limit: %d per organization per minute", request_limit)
+    else:
+        log.warning("Public API request limit is OFF (%s=0)", "GCON_API_RATE_LIMIT_PER_MINUTE")
+
     app = FastAPI(
         title="GCON Public API",
         version="1.0.0",
@@ -495,6 +559,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        responses={429: {"model": ErrorOut, "description": "Too many requests -- see the Retry-After header."}},
     )
 
     # ------------------------------------------------------------
@@ -538,6 +603,24 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                     detail="This API key is not attached to an organization, so it "
                            "cannot be used to read or change customer data.",
                 )
+
+            if request_limiter is not None:
+                # Count per organization so extra API keys do not buy extra
+                # allowance; org-less (staff) keys are counted per key.
+                org = getattr(owner, "organization_id", None) if owner is not None else None
+                allowed, retry_after = request_limiter.hit(
+                    f"org:{org}" if org else f"key:{key.key_id}"
+                )
+                if not allowed:
+                    wait = max(1, math.ceil(retry_after))
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"Rate limit exceeded: at most {request_limit} requests per "
+                            f"minute. Retry in {wait} second(s)."
+                        ),
+                        headers={"Retry-After": str(wait)},
+                    )
 
             return {"key": key, "owner": owner}
 
@@ -1411,6 +1494,83 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         return jsonable_encoder(presentation.get_telemetry_events(
             job_id=job_id, node_id=node_id, since=since, org_id=org_id, limit=limit,
         ))
+
+    # ------------------------------------------------------------
+    # Billing (read-only). Invoices are generated and finalized by
+    # staff; customers can see the price list, a live preview of
+    # their own usage, and their own issued invoices.
+    # ------------------------------------------------------------
+
+    def _org_of(auth):
+        owner = auth["owner"]
+        return getattr(owner, "organization_id", None) if owner else None
+
+    @app.get(
+        "/billing/pricing",
+        response_model=PricingOut,
+        tags=["Billing"],
+        summary="Current price list",
+        responses={401: {"model": ErrorOut}},
+    )
+    def get_billing_pricing(auth=Depends(require_scope("View monitoring"))):
+        return jsonable_encoder(management.get_pricing())
+
+    @app.get(
+        "/billing/usage",
+        response_model=UsagePreviewOut,
+        tags=["Billing"],
+        summary="Preview your usage and charges for a period",
+        description=(
+            "What an invoice for your organization would contain for the period, "
+            "computed from your completed jobs and receipts right now. Nothing is "
+            "created or charged. Give both `period_start` and `period_end` "
+            "(ISO-8601, end exclusive, no timezone means UTC), or neither for the "
+            "current UTC calendar month. At most 366 days."
+        ),
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 503: {"model": ErrorOut}},
+    )
+    def get_billing_usage(
+        period_start: Optional[str] = None,
+        period_end: Optional[str] = None,
+        auth=Depends(require_scope("View monitoring")),
+    ):
+        try:
+            return jsonable_encoder(
+                management.preview_org_usage(_org_of(auth), period_start, period_end)
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @app.get(
+        "/billing/invoices",
+        response_model=List[InvoiceOut],
+        tags=["Billing"],
+        summary="List your organization's invoices",
+        description="Issued invoices only (open, paid, failed, void), newest period first.",
+        responses={401: {"model": ErrorOut}},
+    )
+    def list_billing_invoices(
+        limit: int = Query(50, ge=1, le=200),
+        auth=Depends(require_scope("View monitoring")),
+    ):
+        return jsonable_encoder(management.get_customer_invoices(_org_of(auth), limit=limit))
+
+    @app.get(
+        "/billing/invoices/{invoice_id}",
+        response_model=InvoiceOut,
+        tags=["Billing"],
+        summary="Get one of your organization's invoices",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def get_billing_invoice(invoice_id: str, auth=Depends(require_scope("View monitoring"))):
+        invoice = management.get_customer_invoice(_org_of(auth), invoice_id)
+        if invoice is None:
+            # Same 404 for "doesn't exist", "belongs to another company" and
+            # "still a draft", so it cannot be used to probe invoice ids.
+            raise HTTPException(status_code=404, detail=f"Invoice '{invoice_id}' not found.")
+        return jsonable_encoder(invoice)
 
     # ------------------------------------------------------------
     # Whoami

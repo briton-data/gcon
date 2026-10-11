@@ -83,6 +83,9 @@ class WebServer:
                 allow_credentials=False,
                 allow_methods=["*"],
                 allow_headers=["*"],
+                # Without this a browser hides Retry-After from the page's
+                # JavaScript on a cross-origin 429 (the status is still visible).
+                expose_headers=["Retry-After"],
             )
         self.app.mount("/api/v1", self.api_v1_app)
 

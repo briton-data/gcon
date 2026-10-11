@@ -93,6 +93,17 @@ class InvoiceRepository:
         )
         return [self.get(r["invoice_id"]) for r in rows]
 
+    def list_issued_for_org(self, org_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """An org's invoices that have left `draft` (open/paid/failed/void),
+        newest period first. Drafts are staff working copies and are never
+        shown to the customer."""
+        rows = self.db.query(
+            "SELECT invoice_id FROM invoices WHERE org_id = ? AND status != 'draft' "
+            "ORDER BY period_start DESC LIMIT ?",
+            (org_id, limit),
+        )
+        return [self.get(r["invoice_id"]) for r in rows]
+
     def list_all(self, status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
         if status:
             rows = self.db.query(

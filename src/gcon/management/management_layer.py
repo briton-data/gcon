@@ -1113,6 +1113,41 @@ class ManagementLayer:
         self.audit_logger.log("Admin", f"finalized invoice '{invoice_id}'", invoice.get("status", ""))
         return invoice
 
+    # Customer-facing billing reads (GET /api/v1/billing/...). Every method
+    # takes the caller's org_id and refuses to run without one: unlike
+    # get_invoices() above, which returns EVERY org's invoices when org_id is
+    # empty, these can never fall through to another organization's data.
+    def get_customer_invoices(self, org_id, limit=50):
+        if not org_id:
+            raise ValueError("An organization is required.")
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            return []
+        from gcon.billing.invoicing import customer_invoice_view
+        issued = self.coordinator.control_plane.invoices.list_issued_for_org(org_id, limit=limit)
+        return [customer_invoice_view(invoice) for invoice in issued]
+
+    def get_customer_invoice(self, org_id, invoice_id):
+        """None when the invoice does not exist, belongs to another
+        organization, or is still a draft -- the caller cannot tell which."""
+        if not org_id:
+            raise ValueError("An organization is required.")
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            return None
+        from gcon.billing.invoicing import customer_invoice_view
+        invoice = self.coordinator.control_plane.invoices.get(invoice_id)
+        if invoice is None or invoice.get("org_id") != org_id or invoice.get("status") == "draft":
+            return None
+        return customer_invoice_view(invoice)
+
+    def preview_org_usage(self, org_id, period_start=None, period_end=None):
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise RuntimeError("Billing data is not available on this coordinator.")
+        from gcon.billing.invoicing import preview_usage
+        return preview_usage(
+            self.coordinator.control_plane, org_id,
+            period_start=period_start, period_end=period_end,
+        )
+
     # ------------------------------------------------------------------
     # Webhooks (see gcon.transport.webhooks) -- standing org-level
     # subscriptions and their delivery history. Per-job ad-hoc
