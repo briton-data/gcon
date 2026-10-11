@@ -406,6 +406,11 @@ class RealClusterProcesses:
             # Jobs from the public API only run on a worker that has verified
             # its sandbox (run_worker's startup probe), so this one needs Docker.
             env["GCON_EXECUTION_BACKEND"] = "docker"
+            # The probe runs a throwaway container from this image before the
+            # worker registers. Pull it first, so a cold machine's download
+            # time is not mistaken for a worker that never came up.
+            image = env.get("GCON_JOB_DOCKER_IMAGE", "python:3.12-slim")
+            subprocess.run(["docker", "pull", image], capture_output=True, timeout=300, check=False)
         self.worker_proc = subprocess.Popen(
             [
                 sys.executable, "scripts/run_worker.py",
@@ -418,13 +423,23 @@ class RealClusterProcesses:
         )
         return self.worker_proc
 
-    def put_worker_in_shared_pool(self, node_id, timeout=30):
+    def _log_tail(self, name, lines=40):
+        try:
+            with open(self.tmp_path / name, errors="replace") as f:
+                return "".join(f.readlines()[-lines:]) or "(empty)"
+        except OSError:
+            return "(no such log)"
+
+    def put_worker_in_shared_pool(self, node_id, timeout=150):
         """
         The public API only places a customer's job on that customer's own
         workers or on a worker the operator has put in the shared pool. This
         test's worker belongs to no organization, so the operator (the staff
         Owner) flags it -- which only works once the real worker process has
-        registered, so this retries until it has.
+        registered, so this retries until it has. A sandboxed worker proves its
+        Docker sandbox before it registers, which can take a while on a cold
+        machine -- hence the long wait; if the worker process exits instead, or
+        never registers, the failure shows its log.
         """
         session = requests.Session()
         r = session.post(f"{self.base_url}/auth/login",
@@ -433,6 +448,10 @@ class RealClusterProcesses:
         deadline = time.monotonic() + timeout
         last = None
         while time.monotonic() < deadline:
+            if self.worker_proc is not None and self.worker_proc.poll() is not None:
+                raise AssertionError(
+                    f"the worker process exited (code {self.worker_proc.returncode}) before it registered -- "
+                    f"usually its Docker sandbox check failed.\n--- worker.log ---\n{self._log_tail('worker.log')}")
             r = session.put(f"{self.base_url}/management/nodes/{node_id}/shared-pool",
                              json={"enabled": True}, timeout=5)
             if r.status_code == 200:
@@ -440,7 +459,9 @@ class RealClusterProcesses:
             last = f"{r.status_code} {r.text}"
             time.sleep(0.5)
         raise AssertionError(
-            f"the real worker process should have registered and joined the shared pool; last answer: {last}")
+            f"the real worker process should have registered and joined the shared pool; last answer: {last}\n"
+            f"--- worker.log ---\n{self._log_tail('worker.log')}\n"
+            f"--- coordinator-1.log ---\n{self._log_tail('coordinator-1.log')}")
 
     def signup_customer_and_get_api_key(self):
         # Customer routes refuse a key that belongs to no organization, so the
