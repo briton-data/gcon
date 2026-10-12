@@ -409,27 +409,53 @@ same process.
 
 Every organization is on one of three plans, set by GCON staff (a customer cannot
 choose or change their own): **Standard**, **Pro** or **Enterprise**. A plan
-controls exactly two things: how many API requests per minute the organization may
-make, and how many of its jobs may be pending or running at once. Staff can edit
-each plan's numbers at any time and the change applies on the customer's next
-request, so always read the current values from this route instead of hard-coding
-them.
+controls exactly four things: how many API requests per minute the organization may
+make, how many of its jobs may be pending or running at once, which programs its
+jobs may start with, and how long one job may run. Staff can edit each plan's
+numbers at any time and the change applies on the customer's next request or job,
+so always read the current values from this route instead of hard-coding them.
 
 ```json
 {
   "plan": "Standard",
   "requests_per_minute": 600,
   "max_concurrent_jobs": 50,
+  "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
+  "max_runtime_seconds": 3600,
   "jobs_in_flight": 3
 }
 ```
 
-`null` for a limit means that plan has no limit. Starting values: Standard 600
-requests/minute and 50 concurrent jobs, Pro 3000 and 200, Enterprise 12000 and
-1000. An organization still carrying an old label (such as "Free") is limited as
-Standard until staff pick a plan for it, and then `plan` shows that old label.
+`null` for a limit means that plan has no limit; `allowed_programs: null` means any
+program. Starting values (staff can change them): Standard 600 requests/minute,
+50 concurrent jobs, 1 hour per job and the four programs above; Pro 3000, 200, 4
+hours and also `bash`, `sh`, `pip`, `pip3`; Enterprise 12000, 1000, 24 hours and
+any program. An organization still carrying an old label (such as "Free") is
+limited as Standard until staff pick a plan for it, and then `plan` shows that old
+label.
 
-Submitting a job when you are at your concurrent-job limit returns `429` (see
+#### Command rules
+
+A job's `command` is checked before it is queued, so a bad one costs nothing:
+
+- It cannot be empty, longer than 10,000 characters, or contain control/binary
+  characters. This applies to everyone.
+- On a plan with a list of allowed programs, the command must be **one simple
+  command** that starts with a listed program, written as listed
+  (`python`, not `/usr/bin/python`). Anything that could run a second program is
+  refused: `;`, `&&`, `||`, `|`, `&`, redirects such as `>`, command substitution
+  (`` ` `` and `$(...)`), several lines, and a variable prefix such as
+  `NAME=value python x.py`. Quoted text is fine: `python -c "a; b"`.
+- A refused command is a `400` whose `detail` says what was wrong and which
+  programs the plan allows. Nothing is queued.
+
+This is a gate against typos and unsupported programs, not a security boundary: an
+allowed interpreter such as `python` can still run any code. Jobs run in a sandbox
+whatever the plan.
+
+A job that is still running when it reaches the plan's `max_runtime_seconds` is
+stopped by the worker and ends as failed with a timeout error. Submitting a job when
+you are at your concurrent-job limit returns `429` (see
 [Rate limiting](#rate-limiting)); retry once one of your jobs has finished.
 
 ---
