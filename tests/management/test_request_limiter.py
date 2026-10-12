@@ -10,10 +10,9 @@ import threading
 import pytest
 
 from gcon.management.request_limiter import (
-    DEFAULT_LIMIT_PER_MINUTE,
     ENV_VAR,
     RequestRateLimiter,
-    limit_from_env,
+    env_override,
 )
 
 
@@ -133,25 +132,62 @@ class TestThreadSafety:
         assert sum(allowed) == 100
 
 
-class TestLimitFromEnv:
-    def test_default_when_unset(self, monkeypatch):
-        monkeypatch.delenv(ENV_VAR, raising=False)
-        assert limit_from_env() == DEFAULT_LIMIT_PER_MINUTE == 600
+class TestPerCallLimit:
+    def test_each_call_can_use_its_own_limit(self):
+        limiter, _ = make(limit=1)
+        assert [limiter.hit("org:big", 3)[0] for _ in range(3)] == [True, True, True]
+        assert limiter.hit("org:big", 3)[0] is False
+        assert limiter.hit("org:small", 1)[0] is True
+        assert limiter.hit("org:small", 1)[0] is False
 
-    def test_default_when_blank(self, monkeypatch):
+    def test_raising_the_limit_takes_effect_on_the_next_call(self):
+        limiter, _ = make(limit=1)
+        assert limiter.hit("org:a", 1)[0] is True
+        assert limiter.hit("org:a", 1)[0] is False
+        assert limiter.hit("org:a", 2)[0] is True       # plan upgraded
+
+    def test_lowering_the_limit_waits_for_enough_old_requests_to_age_out(self):
+        limiter, clock = make(limit=5)
+        for _ in range(4):                               # t = 1000, 1010, 1020, 1030
+            limiter.hit("org:a", 5)
+            clock.advance(10)
+        # now = 1040. Downgraded to 2: a request only fits once at most ONE
+        # earlier request is left in the window, so the three oldest must age
+        # out; the third (t=1020) leaves at 1080, i.e. 40 seconds from now.
+        allowed, retry_after = limiter.hit("org:a", 2)
+        assert allowed is False
+        assert retry_after == pytest.approx(40.0)
+        clock.advance(39.9)
+        assert limiter.hit("org:a", 2)[0] is False
+        clock.advance(0.2)
+        assert limiter.hit("org:a", 2)[0] is True
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_a_non_positive_per_call_limit_is_a_programming_error(self, bad):
+        limiter, _ = make(limit=3)
+        with pytest.raises(ValueError):
+            limiter.hit("org:a", bad)
+
+
+class TestEnvOverride:
+    def test_none_when_unset(self, monkeypatch):
+        monkeypatch.delenv(ENV_VAR, raising=False)
+        assert env_override() is None
+
+    def test_none_when_blank(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "   ")
-        assert limit_from_env() == DEFAULT_LIMIT_PER_MINUTE
+        assert env_override() is None
 
     def test_explicit_value(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "25")
-        assert limit_from_env() == 25
+        assert env_override() == 25
 
-    def test_zero_turns_it_off(self, monkeypatch):
+    def test_zero_means_off_for_everyone(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "0")
-        assert limit_from_env() == 0
+        assert env_override() == 0
 
     @pytest.mark.parametrize("bad", ["abc", "-5", "1.5", "ten"])
-    def test_a_bad_value_falls_back_to_the_default_not_to_off(self, monkeypatch, bad, caplog):
+    def test_a_bad_value_is_ignored_so_plans_still_apply_not_switched_off(self, monkeypatch, bad, caplog):
         monkeypatch.setenv(ENV_VAR, bad)
-        assert limit_from_env() == DEFAULT_LIMIT_PER_MINUTE
+        assert env_override() is None
         assert ENV_VAR in caplog.text
