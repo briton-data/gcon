@@ -14,7 +14,7 @@ interactive docs at `/api/v1/docs` over this file.
 
 1. [REST API Overview](#rest-api-overview)
 2. [Authentication](#authentication)
-3. [Endpoints](#endpoints) (including [Billing](#billing))
+3. [Endpoints](#endpoints) (including [Account and plans](#account-and-plans) and [Billing](#billing))
 4. [Python SDK](#python-sdk)
 5. [Verification](#verification)
 6. [Error Handling](#error-handling)
@@ -401,6 +401,39 @@ same process.
 
 ---
 
+### Account and plans
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/account/plan` | `View monitoring` | Your plan, its limits, and your jobs in flight |
+
+Every organization is on one of three plans, set by GCON staff (a customer cannot
+choose or change their own): **Standard**, **Pro** or **Enterprise**. A plan
+controls exactly two things: how many API requests per minute the organization may
+make, and how many of its jobs may be pending or running at once. Staff can edit
+each plan's numbers at any time and the change applies on the customer's next
+request, so always read the current values from this route instead of hard-coding
+them.
+
+```json
+{
+  "plan": "Standard",
+  "requests_per_minute": 600,
+  "max_concurrent_jobs": 50,
+  "jobs_in_flight": 3
+}
+```
+
+`null` for a limit means that plan has no limit. Starting values: Standard 600
+requests/minute and 50 concurrent jobs, Pro 3000 and 200, Enterprise 12000 and
+1000. An organization still carrying an old label (such as "Free") is limited as
+Standard until staff pick a plan for it, and then `plan` shows that old label.
+
+Submitting a job when you are at your concurrent-job limit returns `429` (see
+[Rate limiting](#rate-limiting)); retry once one of your jobs has finished.
+
+---
+
 ### Billing
 
 Read-only. Invoices are generated and finalized by GCON staff; there is no
@@ -542,6 +575,9 @@ print(client.list_workflows())
 print(client.list_receipts())
 print(client.list_artifacts())
 
+# Your plan and its limits
+print(client.get_plan())
+
 # Billing (read-only)
 print(client.get_pricing())
 print(client.get_usage())                       # current month
@@ -559,8 +595,8 @@ print(client.whoami())
 > `list_workflows`, `list_receipts`, and `list_artifacts`. It does **not**
 > have a `submit_workflow`, `get_receipt`, or `verify_receipt` wrapper
 > yet — call `POST /workflows` directly (e.g. with `requests`) until the
-> SDK grows a helper for it. It also has the billing reads `get_pricing`,
-> `get_usage`, `list_invoices` and `get_invoice`.
+> SDK grows a helper for it. It also has `get_plan` and the billing reads
+> `get_pricing`, `get_usage`, `list_invoices` and `get_invoice`.
 
 Use it as a context manager to close the underlying session:
 
@@ -630,17 +666,23 @@ independent cross-node agreement evidence, Python API only today).
 
 ## Rate limiting
 
-Every route that needs an API key is limited to **600 requests per minute per
-organization** (a rolling 60 seconds) by default. The count is per organization,
-so extra API keys do not buy extra allowance. Over the limit you get `429 Too
+Every route that needs an API key is limited per organization to its **plan's
+requests per minute** (a rolling 60 seconds; see [Account and plans](#account-and-plans)).
+The count is per organization, so extra API keys do not buy extra allowance. Over the limit you get `429 Too
 Many Requests` with a `Retry-After` header (whole seconds) and the usual
 `{"detail": ...}` body. Requests that fail authentication are not counted. The
 sign-up and login routes have their own, stricter limits.
 
-The limit is held in memory by the coordinator process: restarting it resets the
-counts, and it limits request *rate* only (how many jobs one organization can
-have running is a separate setting, `GCON_MAX_CONCURRENT_JOBS_PER_ORG`). Operators
-change it with `GCON_API_RATE_LIMIT_PER_MINUTE` (`0` turns it off).
+The request counts are held in memory by the coordinator process: restarting it
+resets them. Separately, an organization may have at most its plan's
+`max_concurrent_jobs` jobs pending or running; submitting another returns `429`
+with a message naming the limit (no `Retry-After`, because it depends on when one
+of your jobs finishes).
+
+Staff set each plan's numbers in the control plane (Organizations, Plans). Two
+server settings override the plans for **every** organization when set:
+`GCON_API_RATE_LIMIT_PER_MINUTE` (a number for everyone; `0` turns request
+limiting off) and `GCON_MAX_CONCURRENT_JOBS_PER_ORG` (a number for everyone).
 
 Clients should wait `Retry-After` seconds and retry, rather than retrying
 immediately.
@@ -657,7 +699,7 @@ immediately.
 | `400 Bad Request` | Invalid input / `ValueError` from the coordinator (duplicate job/workflow id, bad DAG, job not cancellable, etc.) | `submit_job`, `cancel_job`, `submit_workflow` |
 | `401 Unauthorized` | Missing, invalid, expired, or under-scoped API key | `require_scope()` |
 | `404 Not Found` | Node, job or invoice id doesn't exist (or belongs to another organization) | `get_node`, `get_job`, `get_billing_invoice` |
-| `429 Too Many Requests` | Over the per-organization request limit; see `Retry-After` and [Rate limiting](#rate-limiting) | `require_scope()` |
+| `429 Too Many Requests` | Over the plan's request limit (see `Retry-After`), or at the plan's concurrent-job limit on `POST /jobs`; see [Rate limiting](#rate-limiting) | `require_scope()`, `submit_job` |
 | `422 Unprocessable Entity` | Request body fails Pydantic validation | FastAPI's default, before your handler runs |
 
 There is currently no `201 Created` or `409 Conflict` in this router —

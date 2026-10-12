@@ -176,9 +176,14 @@ GCON_FORCE_HTTPS=0                 # 1 to terminate TLS here too, enable
 GCON_API_CORS_ORIGINS=             # comma-separated origins allowed to
                                     # call /api/v1 from a browser; unset =
                                     # no CORS (API-key/SDK clients unaffected)
-GCON_API_RATE_LIMIT_PER_MINUTE=600 # requests per organization per rolling
-                                    # minute on /api/v1; 0 = off. In memory,
-                                    # per process, resets on restart.
+GCON_API_RATE_LIMIT_PER_MINUTE=    # unset = each organization gets its plan's
+                                    # requests/minute (staff set the plans in
+                                    # the dashboard: Organizations > Plans).
+                                    # N = N for every organization whatever its
+                                    # plan; 0 = request limiting off. Counts
+                                    # are in memory, reset on restart.
+GCON_MAX_CONCURRENT_JOBS_PER_ORG=  # unset = each organization gets its plan's
+                                    # concurrent-job cap. N = N for everyone.
 ```
 
 There is no `GCON_STORAGE_BACKEND`, `GCON_API_KEY_REQUIRED`, or
