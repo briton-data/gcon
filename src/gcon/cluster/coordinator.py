@@ -20,6 +20,7 @@ from gcon.transport.errors import NodeUnavailableError
 
 from gcon.execution.verifier import ExecutionVerifier
 from gcon.execution.artifact_registry import ArtifactRegistry
+from gcon.execution.command_check import check_command_shape, check_program_allowed
 from gcon.transport.url_safety import validate_outbound_url
 from gcon.execution.output_limits import cap_result
 from gcon.execution.policy_engine import PolicyEngine
@@ -258,6 +259,11 @@ class GCONCoordinator:
         # its plan (0 = none). Set by ManagementLayer, which knows the plans.
         # The environment value above, when set, wins over it for everyone.
         self.org_job_cap_resolver = None
+        # Optional callable(org_id) -> {"allowed_programs": [...] or None,
+        # "max_runtime_seconds": int} from the org's plan, also set by
+        # ManagementLayer. Programs are checked at submission; the runtime
+        # limit is handed to the worker when the job is dispatched.
+        self.org_job_rules_resolver = None
         # recover_jobs() (worker-loss reassignment) and retry_job/
         # retry_failed_jobs (manual retry) previously had no cap at
         # all -- a job that fails deterministically (bad command, a
@@ -777,6 +783,31 @@ class GCONCoordinator:
             )
             return 0
 
+    def _job_rules(self, org_id):
+        """The organization's plan rules for its jobs. No resolver, no
+        organization, or a failed lookup all mean no extra rules."""
+        none = {"allowed_programs": None, "max_runtime_seconds": 0}
+        resolver = self.org_job_rules_resolver
+        if resolver is None or org_id is None:
+            return none
+        try:
+            rules = resolver(org_id) or none
+            return {
+                "allowed_programs": rules.get("allowed_programs"),
+                "max_runtime_seconds": int(rules.get("max_runtime_seconds") or 0),
+            }
+        except Exception as exc:
+            self.telemetry.warning(
+                f"Could not resolve the job rules for org '{org_id}': {exc!r}"
+            )
+            return none
+
+    def _job_timeout_seconds(self, job):
+        """Seconds the worker may run this job before killing it (the plan's
+        max runtime), or None for no limit."""
+        seconds = self._job_rules(job.get("org_id"))["max_runtime_seconds"]
+        return seconds if seconds > 0 else None
+
     def submit_job(
         self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
         org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
@@ -874,6 +905,9 @@ class GCONCoordinator:
         if artifacts is None:
              artifacts = []
 
+        # Turn away a blank / oversized / binary command before it is queued.
+        check_command_shape(command)
+
         if kind not in ("command", "resourced", "staged"):
             raise ValueError(
                 f"Unknown job kind '{kind}' -- must be one of "
@@ -892,6 +926,12 @@ class GCONCoordinator:
         # `requires` is customer input read by the scheduler on every pass, so a
         # malformed value must be refused here, not discovered there.
         _validate_requires(requires)
+
+        # The organization's plan says which programs its jobs may start with
+        # (see gcon.execution.command_check). Organization-less submissions
+        # (staff, internal) are not restricted.
+        if org_id is not None:
+            check_program_allowed(command, self._job_rules(org_id)["allowed_programs"])
 
         # Real, pre-dispatch assurance gate (see policy_engine.py's
         # module docstring) -- checks only what's knowable right now
@@ -2030,6 +2070,7 @@ class GCONCoordinator:
                 node.node_id,
                 job_id,
                 job["command"],
+                timeout=self._job_timeout_seconds(job),
                 metadata=dispatch_metadata,
             )
 
@@ -2443,6 +2484,7 @@ class GCONCoordinator:
                     node.node_id,
                     job_id,
                     job["command"],
+                    timeout=self._job_timeout_seconds(job),
                     metadata=dispatch_metadata,
                 )
                 result = response["result"]

@@ -30,6 +30,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, UTC
 from gcon.monitoring.monitor import ResourceMonitor
 from gcon.execution import docker_executor
+from gcon.execution.command_check import missing_program
 from gcon.execution.output_limits import BoundedCapture, drain_stream
 
 logging.basicConfig(
@@ -585,6 +586,15 @@ class GCONAgent:
                 # through as inert extra arguments. Run the raw
                 # string through a real shell instead, so a job can
                 # actually use the shell syntax the API promises.
+                # Fail at once if the program simply is not here, instead of
+                # starting a shell only to be told the same (see
+                # command_check.missing_program for when this applies).
+                missing = missing_program(job_script, path=job_env.get("PATH"))
+                if missing:
+                    raise FileNotFoundError(
+                        f"command not found: '{missing}' is not on this worker's PATH "
+                        "(or is not executable)"
+                    )
                 command = job_script
                 use_shell = True
             logger.info(f"Executing command: {command if use_shell else ' '.join(command)}")

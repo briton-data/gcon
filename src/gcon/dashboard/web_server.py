@@ -688,6 +688,8 @@ class WebServer:
                     plan,
                     payload.get("requests_per_minute"),
                     payload.get("max_concurrent_jobs"),
+                    payload.get("allowed_programs"),
+                    payload.get("max_runtime_seconds"),
                     actor=user,
                 )
             except PermissionError as e:

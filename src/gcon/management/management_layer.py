@@ -93,6 +93,7 @@ class ManagementLayer:
 
         if coordinator is not None:
             coordinator.org_job_cap_resolver = self._plan_job_cap_for_org
+            coordinator.org_job_rules_resolver = self._plan_job_rules_for_org
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -1138,8 +1139,11 @@ class ManagementLayer:
         max_concurrent_jobs}}, 0 = no limit): defaults plus staff edits."""
         return plans_mod.load_plan_limits(self._plan_settings())
 
-    def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs, *, actor):
-        """Owner/Administrator only. Applies on the next request."""
+    def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs,
+                        allowed_programs=None, max_runtime_seconds=None, *, actor):
+        """Owner/Administrator only. Applies on the next request. Leaving
+        `allowed_programs` / `max_runtime_seconds` as None keeps the tier's
+        current value."""
         if actor is None or actor.role not in self._PLAN_ADMIN_ROLES:
             raise PermissionError("Only an Owner or Administrator can change plan limits.")
         settings = self._plan_settings()
@@ -1148,13 +1152,20 @@ class ManagementLayer:
         plan = plans_mod.canonical_plan(plan)
         previous = self.get_plan_limits()[plan]
         values = plans_mod.save_plan_limits(
-            settings, plan, requests_per_minute, max_concurrent_jobs, updated_by=actor.name)
-        self.audit_logger.log(
-            actor.name,
+            settings, plan, requests_per_minute, max_concurrent_jobs,
+            allowed_programs, max_runtime_seconds, updated_by=actor.name)
+        detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
-            f"{values['max_concurrent_jobs']} jobs",
-            plan)
+            f"{values['max_concurrent_jobs']} jobs"
+        )
+        if values["allowed_programs"] != previous["allowed_programs"]:
+            detail += (f"; allowed programs {', '.join(previous['allowed_programs'])} -> "
+                       f"{', '.join(values['allowed_programs'])}")
+        if values["max_runtime_seconds"] != previous["max_runtime_seconds"]:
+            detail += (f"; max runtime {previous['max_runtime_seconds']}s -> "
+                       f"{values['max_runtime_seconds']}s")
+        self.audit_logger.log(actor.name, detail, plan)
         return self.get_plans_overview()
 
     def _env_overrides(self):
@@ -1176,6 +1187,9 @@ class ManagementLayer:
                 table[tier]["requests_per_minute"], env["requests_per_minute"]),
             "max_concurrent_jobs": plans_mod.effective_max_concurrent_jobs(
                 table[tier]["max_concurrent_jobs"], env["max_concurrent_jobs"]),
+            # No environment override for these two: staff edit them per plan.
+            "allowed_programs": list(table[tier]["allowed_programs"]),
+            "max_runtime_seconds": table[tier]["max_runtime_seconds"],
         }
 
     def get_plans_overview(self):
@@ -1225,6 +1239,20 @@ class ManagementLayer:
         tier = plans_mod.plan_for_limits(label)
         return self.get_plan_limits()[tier]["max_concurrent_jobs"]
 
+    def _plan_job_rules_for_org(self, org_id):
+        """Resolver handed to the coordinator: what this org's plan lets its
+        jobs be (programs, max runtime seconds, 0 = none)."""
+        try:
+            label = self.org_registry.get_organization(org_id).plan
+        except ValueError:
+            label = None
+        tier = plans_mod.plan_for_limits(label)
+        limits = self.get_plan_limits()[tier]
+        return {
+            "allowed_programs": list(limits["allowed_programs"]),
+            "max_runtime_seconds": limits["max_runtime_seconds"],
+        }
+
     def get_customer_plan(self, org_id):
         """What a customer sees about their plan: its name, the limits
         (None = no limit) and how many jobs they have in flight."""
@@ -1236,10 +1264,13 @@ class ManagementLayer:
             if self.coordinator is not None and hasattr(self.coordinator, "count_inflight_jobs")
             else 0
         )
+        programs = limits["allowed_programs"]
         return {
             "plan": limits["plan"],
             "requests_per_minute": limits["requests_per_minute"] or None,
             "max_concurrent_jobs": limits["max_concurrent_jobs"] or None,
+            "allowed_programs": None if "*" in programs else programs,
+            "max_runtime_seconds": limits["max_runtime_seconds"] or None,
             "jobs_in_flight": in_flight,
         }
 

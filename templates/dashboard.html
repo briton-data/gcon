@@ -585,7 +585,7 @@
                         <h5 class="mb-0"><i class="bi bi-sliders me-2"></i>Plans</h5>
                     </div>
                     <div class="gcon-panel-body">
-                        <p class="text-secondary small mb-2">What each plan allows. 0 means no limit. A change applies on the customer's next request.</p>
+                        <p class="text-secondary small mb-2">What each plan allows. 0 means no limit. For allowed programs, list the program names separated by commas (for example python, python3, echo) or * for any. Restricted plans run one simple command per job: no ; && | or redirects. A change applies to the next request or job.</p>
                         <div class="alert alert-warning small d-none" id="plans-note"></div>
                         <div class="table-responsive">
                             <table class="table gcon-table align-middle">
@@ -594,12 +594,14 @@
                                         <th>Plan</th>
                                         <th>API requests / minute</th>
                                         <th>Concurrent jobs</th>
+                                        <th>Max runtime (seconds)</th>
+                                        <th>Allowed programs</th>
                                         <th>Organizations</th>
                                         <th></th>
                                     </tr>
                                 </thead>
                                 <tbody id="plans-body">
-                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                    <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>

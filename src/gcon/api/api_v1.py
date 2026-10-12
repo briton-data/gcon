@@ -356,6 +356,11 @@ class PlanOut(BaseModel):
         description="Requests allowed per rolling minute; null = no limit.")
     max_concurrent_jobs: Optional[int] = Field(
         description="Jobs allowed pending or running at once; null = no limit.")
+    allowed_programs: Optional[List[str]] = Field(
+        description="Programs a job's command may start with (one simple command, no shell "
+                    "operators); null = any program.")
+    max_runtime_seconds: Optional[int] = Field(
+        description="Seconds a job may run before it is stopped; null = no limit.")
     jobs_in_flight: int = Field(description="Your jobs pending or running right now.")
 
 

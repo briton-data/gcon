@@ -3,14 +3,20 @@ Customer plans: Standard, Pro and Enterprise.
 
 What a plan controls
 --------------------
-Exactly three things, no more:
+Exactly these, no more:
 
   * the plan's name, shown to staff and to the customer,
   * `requests_per_minute`  -- how fast the organization may call /api/v1
     (enforced by require_scope in gcon.api.api_v1),
   * `max_concurrent_jobs`  -- how many of its jobs may be pending or running at
     once (enforced by GCONCoordinator.submit_job, for every way a job can be
-    submitted, workflows included).
+    submitted, workflows included),
+  * `allowed_programs`     -- the programs its jobs may start with; "*" = any
+    (enforced by GCONCoordinator.submit_job, see gcon.execution.command_check
+    for exactly what that does and does not guarantee),
+  * `max_runtime_seconds`  -- how long one of its jobs may run before the worker
+    kills it (enforced by passing the limit to the worker when the job is
+    dispatched).
 
 Pricing is NOT part of a plan: rates stay in gcon.billing.pricing and are the
 same for every organization.
@@ -24,7 +30,8 @@ applies on the very next request and survives a restart. A stored value that
 cannot be read is ignored and that tier falls back to its default -- a damaged
 setting must never leave a customer without limits.
 
-A limit of 0 means "no limit".
+For the two numeric limits and the runtime, 0 means "no limit". For
+`allowed_programs` the way to say "no restriction" is the entry "*".
 
 Environment overrides
 ---------------------
@@ -45,22 +52,38 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
 PLAN_NAMES = ("Standard", "Pro", "Enterprise")
 DEFAULT_PLAN = "Standard"
-LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs")
+LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs", "allowed_programs", "max_runtime_seconds")
 MAX_LIMIT_VALUE = 1_000_000
+MAX_RUNTIME_SECONDS = 30 * 24 * 3600
+MAX_PROGRAMS = 100
 SETTINGS_KEY = "plans.limits"
+_PROGRAM_NAME = re.compile(r"^(\*|[A-Za-z0-9][A-Za-z0-9._+-]{0,63})$")
 
 # Starting values, to be tuned by staff in the control plane. Standard's request
 # rate equals the single limit the API had before plans existed (600/minute).
-DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, int]] = {
-    "Standard": {"requests_per_minute": 600, "max_concurrent_jobs": 50},
-    "Pro": {"requests_per_minute": 3000, "max_concurrent_jobs": 200},
-    "Enterprise": {"requests_per_minute": 12000, "max_concurrent_jobs": 1000},
+DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
+    "Standard": {
+        "requests_per_minute": 600, "max_concurrent_jobs": 50,
+        "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
+        "max_runtime_seconds": 3600,
+    },
+    "Pro": {
+        "requests_per_minute": 3000, "max_concurrent_jobs": 200,
+        "allowed_programs": ["python", "python3", "nvidia-smi", "echo", "bash", "sh", "pip", "pip3"],
+        "max_runtime_seconds": 14400,
+    },
+    "Enterprise": {
+        "requests_per_minute": 12000, "max_concurrent_jobs": 1000,
+        "allowed_programs": ["*"],
+        "max_runtime_seconds": 86400,
+    },
 }
 
 
@@ -83,26 +106,64 @@ def plan_for_limits(stored_label: Any) -> str:
         return DEFAULT_PLAN
 
 
-def validate_limits(requests_per_minute: Any, max_concurrent_jobs: Any) -> Dict[str, int]:
-    """Both limits as ints in 0..MAX_LIMIT_VALUE (0 = no limit). ValueError
-    otherwise. Booleans and fractions are rejected, not rounded."""
-    clean: Dict[str, int] = {}
-    for field, value in (
-        ("requests_per_minute", requests_per_minute),
-        ("max_concurrent_jobs", max_concurrent_jobs),
+def _copy_table(table: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return {
+        plan: {k: (list(v) if isinstance(v, list) else v) for k, v in limits.items()}
+        for plan, limits in table.items()
+    }
+
+
+def validate_programs(programs: Any) -> List[str]:
+    """A clean list of program names ("*" = any program). ValueError for
+    anything else, including an empty list: a plan that allows no program at all
+    is almost certainly a mistake, and "*" is the way to say "any"."""
+    if isinstance(programs, str) or not isinstance(programs, (list, tuple)):
+        raise ValueError("allowed_programs must be a list of program names, or [\"*\"] for any.")
+    clean: List[str] = []
+    for item in programs:
+        if not isinstance(item, str) or not _PROGRAM_NAME.match(item.strip()):
+            raise ValueError(
+                f"{item!r} is not a program name (letters, digits and . _ + - only; "
+                "write the name only, not a path)."
+            )
+        name = item.strip()
+        if name not in clean:
+            clean.append(name)
+    if not clean:
+        raise ValueError("allowed_programs cannot be empty: list the programs, or use * for any.")
+    if len(clean) > MAX_PROGRAMS:
+        raise ValueError(f"allowed_programs can hold at most {MAX_PROGRAMS} programs.")
+    return ["*"] if "*" in clean else clean
+
+
+def validate_limits(
+    requests_per_minute: Any,
+    max_concurrent_jobs: Any,
+    allowed_programs: Any,
+    max_runtime_seconds: Any,
+) -> Dict[str, Any]:
+    """All four limits, cleaned. The numbers must be ints (0 = no limit; the
+    request rate and job cap up to MAX_LIMIT_VALUE, the runtime up to 30 days);
+    booleans and fractions are rejected, not rounded. ValueError otherwise."""
+    clean: Dict[str, Any] = {}
+    for field, value, ceiling in (
+        ("requests_per_minute", requests_per_minute, MAX_LIMIT_VALUE),
+        ("max_concurrent_jobs", max_concurrent_jobs, MAX_LIMIT_VALUE),
+        ("max_runtime_seconds", max_runtime_seconds, MAX_RUNTIME_SECONDS),
     ):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{field} must be a whole number (0 means no limit).")
-        if not 0 <= value <= MAX_LIMIT_VALUE:
-            raise ValueError(f"{field} must be between 0 and {MAX_LIMIT_VALUE} (0 means no limit).")
+        if not 0 <= value <= ceiling:
+            raise ValueError(f"{field} must be between 0 and {ceiling} (0 means no limit).")
         clean[field] = value
-    return clean
+    clean["allowed_programs"] = validate_programs(allowed_programs)
+    return {field: clean[field] for field in LIMIT_FIELDS}
 
 
 def load_plan_limits(settings: Any) -> Dict[str, Dict[str, int]]:
     """All three tiers' limits: defaults, overlaid with whatever staff have
     stored. `settings` is control_plane.settings, or None (defaults only)."""
-    table = {plan: dict(limits) for plan, limits in DEFAULT_PLAN_LIMITS.items()}
+    table = _copy_table(DEFAULT_PLAN_LIMITS)
     if settings is None:
         return table
     try:
@@ -119,10 +180,14 @@ def load_plan_limits(settings: Any) -> Dict[str, Dict[str, int]]:
         if entry is None:
             continue
         try:
+            # Fields an older stored value does not have yet (added later)
+            # take the plan's default instead of discarding the whole entry.
+            merged = {**DEFAULT_PLAN_LIMITS[plan], **entry}
             table[plan] = validate_limits(
-                entry.get("requests_per_minute"), entry.get("max_concurrent_jobs")
+                merged.get("requests_per_minute"), merged.get("max_concurrent_jobs"),
+                merged.get("allowed_programs"), merged.get("max_runtime_seconds"),
             )
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, TypeError):
             log.error("Ignoring stored limits for plan %s (invalid); using its defaults.", plan)
     return table
 
@@ -132,13 +197,22 @@ def save_plan_limits(
     plan: str,
     requests_per_minute: Any,
     max_concurrent_jobs: Any,
+    allowed_programs: Any = None,
+    max_runtime_seconds: Any = None,
     updated_by: Optional[str] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """Validate and store one tier's limits; the other tiers are kept as they
-    are. Returns the stored values."""
+    are. `allowed_programs` / `max_runtime_seconds` left as None keep that
+    tier's current value. Returns the stored values."""
     plan = canonical_plan(plan)
-    values = validate_limits(requests_per_minute, max_concurrent_jobs)
     table = load_plan_limits(settings)
+    current = table[plan]
+    values = validate_limits(
+        requests_per_minute,
+        max_concurrent_jobs,
+        current["allowed_programs"] if allowed_programs is None else allowed_programs,
+        current["max_runtime_seconds"] if max_runtime_seconds is None else max_runtime_seconds,
+    )
     table[plan] = values
     settings.set(SETTINGS_KEY, json.dumps(table), updated_by=updated_by)
     return values

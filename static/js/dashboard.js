@@ -2923,9 +2923,16 @@ function formatPlanLimit(value) {
     return value ? Number(value).toLocaleString() : "no limit";
 }
 
+function formatPlanRuntime(seconds) {
+    if (!seconds) return "no limit";
+    if (seconds < 120) return `${seconds}s`;
+    if (seconds < 7200) return `${Math.round(seconds / 60)} min`;
+    return `${Math.round(seconds / 3600)} h`;
+}
+
 function formatOrgLimits(limits) {
     if (!limits) return "-";
-    return `${formatPlanLimit(limits.requests_per_minute)} req/min &middot; ${formatPlanLimit(limits.max_concurrent_jobs)} jobs`;
+    return `${formatPlanLimit(limits.requests_per_minute)} req/min &middot; ${formatPlanLimit(limits.max_concurrent_jobs)} jobs &middot; ${formatPlanRuntime(limits.max_runtime_seconds)} max run`;
 }
 
 async function loadPlansPanel() {
@@ -2938,6 +2945,8 @@ async function loadPlansPanel() {
                 <td><span class="badge bg-dark">${escapeHtml(p.plan)}</span></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-rpm" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.requests_per_minute)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-jobs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_concurrent_jobs)}" style="max-width: 9rem;"></td>
+                <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-runtime" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_runtime_seconds)}" style="max-width: 9rem;"></td>
+                <td><input type="text" class="form-control form-control-sm plan-programs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((p.allowed_programs || []).join(", "))}" style="min-width: 14rem;"></td>
                 <td>${escapeHtml(p.organizations)}</td>
                 <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
             </tr>
@@ -2948,8 +2957,15 @@ async function loadPlansPanel() {
                 const plan = btn.dataset.plan;
                 const rpm = body.querySelector(`.plan-rpm[data-plan="${plan}"]`).value.trim();
                 const jobs = body.querySelector(`.plan-jobs[data-plan="${plan}"]`).value.trim();
-                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs)) {
+                const runtime = body.querySelector(`.plan-runtime[data-plan="${plan}"]`).value.trim();
+                const programs = body.querySelector(`.plan-programs[data-plan="${plan}"]`).value
+                    .split(",").map(x => x.trim()).filter(x => x.length > 0);
+                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime)) {
                     showToast("Enter whole numbers (0 means no limit).", true);
+                    return;
+                }
+                if (programs.length === 0) {
+                    showToast("List at least one allowed program, or * for any.", true);
                     return;
                 }
                 try {
@@ -2959,6 +2975,8 @@ async function loadPlansPanel() {
                         body: JSON.stringify({
                             requests_per_minute: parseInt(rpm, 10),
                             max_concurrent_jobs: parseInt(jobs, 10),
+                            max_runtime_seconds: parseInt(runtime, 10),
+                            allowed_programs: programs,
                         }),
                     });
                     showToast(`${plan} plan limits saved.`);
@@ -2990,7 +3008,7 @@ async function loadPlansPanel() {
         }
     } catch (err) {
         console.error("Failed to load plans:", err);
-        body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">Could not load plans.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">Could not load plans.</td></tr>`;
     }
 }
 
