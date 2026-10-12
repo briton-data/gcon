@@ -64,6 +64,9 @@ print(client.list_workflows())
 print(client.list_receipts())
 print(client.list_artifacts())
 
+# Your plan (Standard/Pro/Enterprise), its limits, and jobs in flight
+print(client.get_plan())
+
 # Billing (read-only): price list, usage preview, issued invoices
 print(client.get_pricing())
 print(client.get_usage("2026-10-01", "2026-11-01"))   # or no arguments: this month

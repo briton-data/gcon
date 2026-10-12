@@ -340,6 +340,16 @@ class GconClient:
         return self._request("GET", "/telemetry/events", params=params)
 
     # ------------------------------------------------------------
+    # Plan
+    # ------------------------------------------------------------
+
+    def get_plan(self) -> Dict[str, Any]:
+        """Your organization's plan (Standard, Pro or Enterprise), its
+        limits (`requests_per_minute` and `max_concurrent_jobs`, None = no
+        limit) and how many of your jobs are in flight right now."""
+        return self._request("GET", "/account/plan")
+
+    # ------------------------------------------------------------
     # Billing (read-only)
     # ------------------------------------------------------------
 
