@@ -12,6 +12,8 @@ from gcon.management import plans
 from gcon.management.management_layer import ManagementLayer
 from gcon.persistence.control_plane import ControlPlane
 
+pytestmark = pytest.mark.real_plan_defaults
+
 
 def build(tmp_path, monkeypatch, name="a"):
     monkeypatch.delenv("GCON_API_RATE_LIMIT_PER_MINUTE", raising=False)
@@ -95,7 +97,8 @@ class TestEditingTheTiers:
         pro = next(p for p in overview["plans"] if p["plan"] == "Pro")
         assert (pro["requests_per_minute"], pro["max_concurrent_jobs"]) == (100, 7)
         management.set_plan_limits("pro", 0, 0, actor=ADMIN)            # 0 = no limit
-        assert management.get_plan_limits()["Pro"] == {"requests_per_minute": 0, "max_concurrent_jobs": 0}
+        pro_now = management.get_plan_limits()["Pro"]
+        assert (pro_now["requests_per_minute"], pro_now["max_concurrent_jobs"]) == (0, 0)
         entries = [e["action"] for e in management.audit_logger.list_entries()]
         assert any("changed Pro plan limits 3000/min, 200 jobs -> 100/min, 7 jobs" in a for a in entries)
 
@@ -120,7 +123,8 @@ class TestEditingTheTiers:
         coordinator2 = GCONCoordinator(control_plane=ControlPlane(path=str(tmp_path / "cp_restart.db")))
         try:
             management2 = ManagementLayer(coordinator=coordinator2, db_path=str(tmp_path / "m_restart.db"))
-            assert management2.get_plan_limits()["Standard"] == {"requests_per_minute": 11, "max_concurrent_jobs": 2}
+            standard = management2.get_plan_limits()["Standard"]
+            assert (standard["requests_per_minute"], standard["max_concurrent_jobs"]) == (11, 2)
         finally:
             coordinator2.shutdown()
 
@@ -137,8 +141,9 @@ class TestWhatReallyApplies:
         org = management.create_organization("Acme", "Pro")
         assert management.get_org_limits(org["org_id"]) == {"plan": "Pro", **plans.DEFAULT_PLAN_LIMITS["Pro"]}
         management.set_plan_limits("Pro", 5, 2, actor=OWNER)
-        assert management.get_org_limits(org["org_id"]) == {
-            "plan": "Pro", "requests_per_minute": 5, "max_concurrent_jobs": 2}
+        limits = management.get_org_limits(org["org_id"])
+        assert (limits["plan"], limits["requests_per_minute"], limits["max_concurrent_jobs"]) == ("Pro", 5, 2)
+        assert limits["allowed_programs"] == plans.DEFAULT_PLAN_LIMITS["Pro"]["allowed_programs"]
 
     def test_no_organization_or_an_unknown_one_gets_the_default_tier(self, env):
         _, management = env
@@ -154,8 +159,9 @@ class TestWhatReallyApplies:
         try:
             management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "m_env.db"))
             org = management.create_organization("Acme", "Enterprise")
-            assert management.get_org_limits(org["org_id"]) == {
-                "plan": "Enterprise", "requests_per_minute": 25, "max_concurrent_jobs": 4}
+            limits = management.get_org_limits(org["org_id"])
+            assert (limits["plan"], limits["requests_per_minute"], limits["max_concurrent_jobs"]) == (
+                "Enterprise", 25, 4)
             overview = management.get_plans_overview()
             assert overview["env_overrides"] == {"requests_per_minute": 25, "max_concurrent_jobs": 4}
         finally:
@@ -190,8 +196,19 @@ class TestCustomerView:
         org = management.create_organization("Acme", "Pro")
         management.set_plan_limits("Pro", 0, 7, actor=OWNER)
         view = management.get_customer_plan(org["org_id"])
-        assert view == {"plan": "Pro", "requests_per_minute": None,
-                        "max_concurrent_jobs": 7, "jobs_in_flight": 0}
+        assert view == {
+            "plan": "Pro", "requests_per_minute": None, "max_concurrent_jobs": 7,
+            "allowed_programs": plans.DEFAULT_PLAN_LIMITS["Pro"]["allowed_programs"],
+            "max_runtime_seconds": plans.DEFAULT_PLAN_LIMITS["Pro"]["max_runtime_seconds"],
+            "jobs_in_flight": 0,
+        }
+
+    def test_any_program_and_no_runtime_limit_show_as_null(self, env):
+        _, management = env
+        org = management.create_organization("Big", "Enterprise")
+        management.set_plan_limits("Enterprise", 100, 5, ["*"], 0, actor=OWNER)
+        view = management.get_customer_plan(org["org_id"])
+        assert view["allowed_programs"] is None and view["max_runtime_seconds"] is None
 
     def test_requires_an_organization(self, env):
         _, management = env

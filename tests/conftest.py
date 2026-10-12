@@ -30,6 +30,11 @@ def pytest_configure(config):
         "markers",
         "real_ssrf_guard: keep the outbound-URL safety check fully on (no loopback allowance)",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_plan_defaults: keep the real starting plan limits, including which programs "
+        "each plan allows (no test-wide 'any program' override)",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -58,3 +63,22 @@ def _in_process_agents_count_as_sandboxed(request, monkeypatch):
         return
     from gcon.execution.agent import GCONAgent
     monkeypatch.setattr(GCONAgent, "sandboxed", True)
+
+
+@pytest.fixture(autouse=True)
+def _plans_allow_any_program_in_unrelated_tests(request, monkeypatch):
+    """
+    The starting plans restrict which programs a customer's job may start with
+    (Standard: python, python3, nvidia-smi, echo -- see gcon.management.plans).
+    Tests of other features submit all sorts of commands as customers (sleep,
+    exit 1, ...) and are about orchestration, not about which program is
+    allowed, so they run with every plan allowing any program.
+
+    Tests of the plan rules themselves opt out with
+    @pytest.mark.real_plan_defaults and see the real starting values.
+    """
+    if request.node.get_closest_marker("real_plan_defaults"):
+        return
+    from gcon.management import plans
+    for limits in plans.DEFAULT_PLAN_LIMITS.values():
+        monkeypatch.setitem(limits, "allowed_programs", ["*"])

@@ -12,6 +12,8 @@ from gcon.dashboard.web_server import WebServer
 from gcon.management import plans
 from gcon.persistence import ControlPlane
 
+pytestmark = pytest.mark.real_plan_defaults
+
 OWNER_EMAIL = "owner@example.com"
 OWNER_PASSWORD = "owner-pw-123"
 
@@ -71,7 +73,7 @@ class TestPlansRoutes:
         assert r.status_code == 200, r.text
         assert r.json()["plans"][1]["requests_per_minute"] == 123
         listed = next(o for o in client.get("/management/organizations").json() if o["org_id"] == org["org_id"])
-        assert listed["limits"] == {"requests_per_minute": 123, "max_concurrent_jobs": 4}
+        assert (listed["limits"]["requests_per_minute"], listed["limits"]["max_concurrent_jobs"]) == (123, 4)
         assert server.management.get_customer_plan(org["org_id"])["max_concurrent_jobs"] == 4
 
     @pytest.mark.parametrize("payload", [
@@ -151,3 +153,64 @@ class TestDashboardPage:
         js = login(server).get("/static/js/dashboard.js").text
         assert '"/management/plans"' in js and "/management/plans/" in js
         assert "loadPlansPanel" in js
+
+
+class TestProgramsAndRuntimeFromTheDashboard:
+    def test_owner_sets_programs_and_runtime_and_the_plan_overview_shows_them(self, stack):
+        server, _ = stack
+        client = login(server)
+        r = client.put("/management/plans/Standard", json={
+            "requests_per_minute": 600, "max_concurrent_jobs": 50,
+            "allowed_programs": ["python", "make"], "max_runtime_seconds": 120,
+        })
+        assert r.status_code == 200, r.text
+        standard = r.json()["plans"][0]
+        assert standard["allowed_programs"] == ["python", "make"]
+        assert standard["max_runtime_seconds"] == 120
+        assert server.management.get_plan_limits()["Standard"]["allowed_programs"] == ["python", "make"]
+
+    def test_an_older_style_request_without_them_keeps_the_current_values(self, stack):
+        server, _ = stack
+        client = login(server)
+        client.put("/management/plans/Standard", json={
+            "requests_per_minute": 600, "max_concurrent_jobs": 50,
+            "allowed_programs": ["make"], "max_runtime_seconds": 77})
+        r = client.put("/management/plans/Standard", json={"requests_per_minute": 9, "max_concurrent_jobs": 3})
+        assert r.status_code == 200
+        standard = server.management.get_plan_limits()["Standard"]
+        assert (standard["allowed_programs"], standard["max_runtime_seconds"]) == (["make"], 77)
+
+    @pytest.mark.parametrize("payload", [
+        {"allowed_programs": []},
+        {"allowed_programs": "python"},
+        {"allowed_programs": ["/usr/bin/python"]},
+        {"allowed_programs": ["py thon"]},
+        {"allowed_programs": [1]},
+        {"max_runtime_seconds": -1},
+        {"max_runtime_seconds": "60"},
+        {"max_runtime_seconds": 1.5},
+    ])
+    def test_bad_values_are_a_400_and_change_nothing(self, stack, payload):
+        server, _ = stack
+        body = {"requests_per_minute": 600, "max_concurrent_jobs": 50, **payload}
+        r = login(server).put("/management/plans/Standard", json=body)
+        assert r.status_code == 400
+        assert server.management.get_plan_limits() == plans.DEFAULT_PLAN_LIMITS
+
+    def test_the_audit_log_records_the_programs_and_runtime_change(self, stack):
+        server, _ = stack
+        login(server).put("/management/plans/Standard", json={
+            "requests_per_minute": 600, "max_concurrent_jobs": 50,
+            "allowed_programs": ["python"], "max_runtime_seconds": 60})
+        actions = " | ".join(e["action"] for e in server.management.audit_logger.list_entries())
+        assert "allowed programs python, python3, nvidia-smi, echo -> python" in actions
+        assert "max runtime 3600s -> 60s" in actions
+
+    def test_the_page_and_script_have_the_new_columns(self, stack):
+        server, _ = stack
+        client = login(server)
+        html = client.get("/").text
+        assert "Max runtime (seconds)" in html and "Allowed programs" in html
+        js = client.get("/static/js/dashboard.js").text
+        assert "plan-programs" in js and "plan-runtime" in js
+        assert "allowed_programs: programs" in js

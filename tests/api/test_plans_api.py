@@ -16,6 +16,8 @@ from gcon.management import plans
 from gcon.management.management_layer import ManagementLayer
 from gcon.persistence.control_plane import ControlPlane
 
+pytestmark = pytest.mark.real_plan_defaults
+
 OWNER = SimpleNamespace(name="Olive", role="Owner")
 
 
@@ -61,10 +63,13 @@ class TestAccountPlan:
         client, _, _ = env
         _, h = signup(client)
         body = client.get("/account/plan", headers=h).json()
+        standard = plans.DEFAULT_PLAN_LIMITS["Standard"]
         assert body == {
             "plan": "Standard",
-            "requests_per_minute": plans.DEFAULT_PLAN_LIMITS["Standard"]["requests_per_minute"],
-            "max_concurrent_jobs": plans.DEFAULT_PLAN_LIMITS["Standard"]["max_concurrent_jobs"],
+            "requests_per_minute": standard["requests_per_minute"],
+            "max_concurrent_jobs": standard["max_concurrent_jobs"],
+            "allowed_programs": standard["allowed_programs"],
+            "max_runtime_seconds": standard["max_runtime_seconds"],
             "jobs_in_flight": 0,
         }
 

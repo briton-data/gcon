@@ -6,6 +6,8 @@ from tests.sdk.test_client_new_methods import (  # noqa: F401  (live_server is a
     live_server,
 )
 
+pytestmark = pytest.mark.real_plan_defaults
+
 
 @pytest.fixture(autouse=True)
 def plan_limits_apply(monkeypatch):
