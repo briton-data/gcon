@@ -580,6 +580,31 @@
 
             <!-- Organizations -->
             <div class="gcon-tab d-none" id="tab-organizations">
+                <div class="gcon-panel mb-3" id="plans-panel">
+                    <div class="gcon-panel-header">
+                        <h5 class="mb-0"><i class="bi bi-sliders me-2"></i>Plans</h5>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <p class="text-secondary small mb-2">What each plan allows. 0 means no limit. A change applies on the customer's next request.</p>
+                        <div class="alert alert-warning small d-none" id="plans-note"></div>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Plan</th>
+                                        <th>API requests / minute</th>
+                                        <th>Concurrent jobs</th>
+                                        <th>Organizations</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="plans-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="bi bi-building me-2"></i>Organizations</h5>
@@ -594,6 +619,7 @@
                                     <tr>
                                         <th>Name</th>
                                         <th>Plan</th>
+                                        <th>Limits</th>
                                         <th>Members</th>
                                         <th>Teams</th>
                                         <th>Storage Used</th>
@@ -601,7 +627,7 @@
                                     </tr>
                                 </thead>
                                 <tbody id="organizations-body">
-                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                    <tr><td colspan="7" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1026,8 +1052,8 @@
                 <div class="mb-3">
                     <label class="form-label">Plan</label>
                     <select class="form-select" id="create-org-plan">
-                        <option value="Free">Free</option>
-                        <option value="Pro" selected>Pro</option>
+                        <option value="Standard" selected>Standard</option>
+                        <option value="Pro">Pro</option>
                         <option value="Enterprise">Enterprise</option>
                     </select>
                 </div>
@@ -1057,7 +1083,6 @@
                 <div class="mb-3">
                     <label class="form-label">Plan</label>
                     <select class="form-select" id="edit-org-plan">
-                        <option value="Free">Free</option>
                         <option value="Standard">Standard</option>
                         <option value="Pro">Pro</option>
                         <option value="Enterprise">Enterprise</option>

@@ -2918,20 +2918,98 @@ async function openUserDrawer(userId) {
 
 let orgsData = [];
 
+// A plan limit of 0 means "no limit".
+function formatPlanLimit(value) {
+    return value ? Number(value).toLocaleString() : "no limit";
+}
+
+function formatOrgLimits(limits) {
+    if (!limits) return "-";
+    return `${formatPlanLimit(limits.requests_per_minute)} req/min &middot; ${formatPlanLimit(limits.max_concurrent_jobs)} jobs`;
+}
+
+async function loadPlansPanel() {
+    const body = document.getElementById("plans-body");
+    if (!body) return;
+    try {
+        const overview = await fetchJson("/management/plans");
+        body.innerHTML = overview.plans.map(p => `
+            <tr>
+                <td><span class="badge bg-dark">${escapeHtml(p.plan)}</span></td>
+                <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-rpm" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.requests_per_minute)}" style="max-width: 9rem;"></td>
+                <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-jobs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_concurrent_jobs)}" style="max-width: 9rem;"></td>
+                <td>${escapeHtml(p.organizations)}</td>
+                <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
+            </tr>
+        `).join("");
+
+        body.querySelectorAll(".plan-save-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const plan = btn.dataset.plan;
+                const rpm = body.querySelector(`.plan-rpm[data-plan="${plan}"]`).value.trim();
+                const jobs = body.querySelector(`.plan-jobs[data-plan="${plan}"]`).value.trim();
+                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs)) {
+                    showToast("Enter whole numbers (0 means no limit).", true);
+                    return;
+                }
+                try {
+                    await fetchJson(`/management/plans/${encodeURIComponent(plan)}`, {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            requests_per_minute: parseInt(rpm, 10),
+                            max_concurrent_jobs: parseInt(jobs, 10),
+                        }),
+                    });
+                    showToast(`${plan} plan limits saved.`);
+                    await loadOrganizationsTab();
+                } catch (err) {
+                    console.error("Failed to save plan limits:", err);
+                    showToast(err.message || "Failed to save plan limits.", true);
+                }
+            });
+        });
+
+        const notes = [];
+        const env = overview.env_overrides || {};
+        if (env.requests_per_minute !== null && env.requests_per_minute !== undefined) {
+            notes.push(env.requests_per_minute === 0
+                ? "API request limiting is switched off for every organization by the server setting GCON_API_RATE_LIMIT_PER_MINUTE=0."
+                : `Every organization is held to ${env.requests_per_minute} requests/minute by the server setting GCON_API_RATE_LIMIT_PER_MINUTE, whatever its plan.`);
+        }
+        if (env.max_concurrent_jobs) {
+            notes.push(`Every organization is held to ${env.max_concurrent_jobs} concurrent jobs by the server setting GCON_MAX_CONCURRENT_JOBS_PER_ORG, whatever its plan.`);
+        }
+        if (overview.organizations_on_other_labels) {
+            notes.push(`${overview.organizations_on_other_labels} organization(s) carry an old plan label and get the Standard limits until you pick a plan for them.`);
+        }
+        const note = document.getElementById("plans-note");
+        if (note) {
+            note.textContent = notes.join(" ");
+            note.classList.toggle("d-none", notes.length === 0);
+        }
+    } catch (err) {
+        console.error("Failed to load plans:", err);
+        body.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">Could not load plans.</td></tr>`;
+    }
+}
+
 async function loadOrganizationsTab() {
     const body = document.getElementById("organizations-body");
     if (!body) return;
+    loadPlansPanel();
     try {
         const orgs = await fetchJson("/management/organizations");
         orgsData = orgs;
         if (orgs.length === 0) {
-            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No organizations.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">No organizations.</td></tr>`;
             return;
         }
         body.innerHTML = orgs.map(o => `
             <tr>
                 <td>${escapeHtml(o.name)}</td>
                 <td><span class="badge bg-dark">${escapeHtml(o.plan)}</span></td>
+                <td class="text-secondary small">${formatOrgLimits(o.limits)}</td>
                 <td>${escapeHtml(o.member_count)}</td>
                 <td>${escapeHtml(o.team_count)}</td>
                 <td>${escapeHtml(o.storage_used_gb)} GB</td>
@@ -2968,7 +3046,19 @@ function openEditOrgModal(orgId) {
     if (!org) return;
     document.getElementById("edit-org-id").value = org.org_id;
     document.getElementById("edit-org-name").value = org.name;
-    document.getElementById("edit-org-plan").value = org.plan;
+    const planSelect = document.getElementById("edit-org-plan");
+    planSelect.querySelectorAll("option[data-legacy]").forEach(o => o.remove());
+    planSelect.value = org.plan;
+    if (planSelect.value !== org.plan) {
+        // A retired label (e.g. "Free"): show it, and leave the plan alone
+        // unless staff choose one of the real plans.
+        const legacy = document.createElement("option");
+        legacy.value = "";
+        legacy.textContent = `${org.plan} (old label - treated as Standard)`;
+        legacy.dataset.legacy = "1";
+        planSelect.prepend(legacy);
+        planSelect.value = "";
+    }
     new bootstrap.Modal(document.getElementById("editOrgModal")).show();
 }
 
@@ -3174,7 +3264,7 @@ function setupOrganizationsTab() {
                 await fetchJson(`/management/organizations/${orgId}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name, plan }),
+                    body: JSON.stringify(plan ? { name, plan } : { name }),
                 });
                 bootstrap.Modal.getInstance(document.getElementById("editOrgModal")).hide();
                 await loadOrganizationsTab();

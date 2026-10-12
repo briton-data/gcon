@@ -10,6 +10,12 @@ bound. This module is that missing limit -- a plain "at most N requests in
 any rolling 60 seconds" counter, applied once per request, after the API key
 has been authenticated (see `require_scope` in gcon.api.api_v1).
 
+How many
+--------
+The allowance is the organization's plan (gcon.management.plans): the limiter
+is told the number on every call, so a staff change to a plan applies on the
+next request. The environment variable below overrides every plan.
+
 Who is counted
 --------------
 The identity is the caller's *organization*, not the individual key. A
@@ -38,12 +44,14 @@ Limits (deliberate, so nobody assumes more than this does)
 
 Configuration
 -------------
-GCON_API_RATE_LIMIT_PER_MINUTE   requests per organization per rolling minute.
-                                 Default 600. 0 turns the limit off. A value
-                                 that is not a non-negative integer is
-                                 ignored (with a warning) and the default is
-                                 used -- a typo must not silently switch a
-                                 security control off.
+GCON_API_RATE_LIMIT_PER_MINUTE   unset: each organization gets its plan's
+                                 limit. N > 0: every organization gets N,
+                                 whatever its plan. 0: request limiting is off
+                                 for everyone. A value that is not a
+                                 non-negative integer is ignored (with a
+                                 warning) so the plans still apply -- a typo
+                                 must not silently switch a security control
+                                 off.
 """
 
 from __future__ import annotations
@@ -53,12 +61,11 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, Tuple
+from typing import Callable, Deque, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 ENV_VAR = "GCON_API_RATE_LIMIT_PER_MINUTE"
-DEFAULT_LIMIT_PER_MINUTE = 600
 WINDOW_SECONDS = 60.0
 
 # Identities that have gone quiet are dropped every this many requests, so the
@@ -66,26 +73,27 @@ WINDOW_SECONDS = 60.0
 _SWEEP_EVERY = 1024
 
 
-def limit_from_env() -> int:
-    """The configured per-minute limit (0 = off). See the module docstring."""
+def env_override() -> Optional[int]:
+    """What the environment says about the limit: None = nothing (plans
+    decide), 0 = off for everyone, N > 0 = N for everyone."""
     raw = os.environ.get(ENV_VAR)
     if raw is None or not raw.strip():
-        return DEFAULT_LIMIT_PER_MINUTE
+        return None
     try:
         value = int(raw.strip())
     except ValueError:
         value = -1
     if value < 0:
-        log.warning(
-            "%s=%r is not a non-negative integer; using the default of %d.",
-            ENV_VAR, raw, DEFAULT_LIMIT_PER_MINUTE,
-        )
-        return DEFAULT_LIMIT_PER_MINUTE
+        log.warning("%s=%r is not a non-negative integer; ignoring it (plan limits apply).", ENV_VAR, raw)
+        return None
     return value
 
 
 class RequestRateLimiter:
-    """At most `limit` allowed requests per identity in any `window_seconds`."""
+    """At most `limit` allowed requests per identity in any `window_seconds`.
+
+    `limit` given here is the default; `hit()` may be given a different one for
+    a particular call (each organization has its own plan)."""
 
     def __init__(
         self,
@@ -104,13 +112,17 @@ class RequestRateLimiter:
         self._windows: Dict[str, Deque[float]] = {}
         self._since_sweep = 0
 
-    def hit(self, identity: str) -> Tuple[bool, float]:
+    def hit(self, identity: str, limit: Optional[int] = None) -> Tuple[bool, float]:
         """
-        Count one request for `identity`.
+        Count one request for `identity` against `limit` (default: the limiter's
+        own).
 
         Returns (True, 0.0) if it is allowed, or (False, retry_after_seconds)
         if the identity is over its limit. A refused request is not recorded.
         """
+        limit = self.limit if limit is None else limit
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer.")
         now = self._clock()
         cutoff = now - self.window_seconds
         with self._lock:
@@ -125,8 +137,12 @@ class RequestRateLimiter:
             while window and window[0] <= cutoff:
                 window.popleft()
 
-            if len(window) >= self.limit:
-                return False, max(window[0] + self.window_seconds - now, 0.0)
+            if len(window) >= limit:
+                # The request that frees enough room is the (len - limit)th
+                # oldest: with the window exactly full that is the oldest one;
+                # if the limit was just lowered it is a later one.
+                freeing = window[len(window) - limit]
+                return False, max(freeing + self.window_seconds - now, 0.0)
             window.append(now)
             return True, 0.0
 

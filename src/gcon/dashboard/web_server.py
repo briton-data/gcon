@@ -671,6 +671,30 @@ class WebServer:
             except (KeyError, ValueError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        # Plans (Standard / Pro / Enterprise): each tier's request-rate and
+        # concurrent-job limits. Reading is open to any signed-in staff user;
+        # changing a tier is Owner/Administrator only (checked in the
+        # management layer too) and audit-logged.
+        @self.app.get("/management/plans")
+        def mgmt_get_plans(user=Depends(self.current_user)):
+            return self.management.get_plans_overview()
+
+        @self.app.put("/management/plans/{plan}")
+        def mgmt_set_plan_limits(
+            plan: str, payload: dict, user=Depends(self.require_permission("Manage cluster")),
+        ):
+            try:
+                return self.management.set_plan_limits(
+                    plan,
+                    payload.get("requests_per_minute"),
+                    payload.get("max_concurrent_jobs"),
+                    actor=user,
+                )
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         # Shared worker pool -- Owner/Administrator only, audit-logged. The
         # role is checked in the management layer itself (not just here).
         @self.app.put("/management/organizations/{org_id}/shared-pool")

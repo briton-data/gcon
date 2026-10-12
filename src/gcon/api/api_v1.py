@@ -28,9 +28,10 @@ from fastapi import FastAPI, Header, HTTPException, Depends, Query, Request, Res
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, model_validator
 
-from gcon.cluster.coordinator import NotLeaderError, PolicyRejectionError
+from gcon.cluster.coordinator import ConcurrentJobLimitError, NotLeaderError, PolicyRejectionError
 from gcon.management.rate_limit import LoginRateLimiter
-from gcon.management.request_limiter import RequestRateLimiter, limit_from_env
+from gcon.management import plans as plans_mod
+from gcon.management.request_limiter import RequestRateLimiter, env_override
 from gcon.management.auth import RESET_TOKEN_TTL_MINUTES
 from gcon.management.mailer import SmtpMailer, password_reset_message
 
@@ -349,6 +350,15 @@ class UsageTotalsOut(BaseModel):
     assurance_decision_count: int
 
 
+class PlanOut(BaseModel):
+    plan: str
+    requests_per_minute: Optional[int] = Field(
+        description="Requests allowed per rolling minute; null = no limit.")
+    max_concurrent_jobs: Optional[int] = Field(
+        description="Jobs allowed pending or running at once; null = no limit.")
+    jobs_in_flight: int = Field(description="Your jobs pending or running right now.")
+
+
 class UsagePreviewOut(BaseModel):
     period_start: str
     period_end: str = Field(description="Exclusive.")
@@ -536,16 +546,18 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         db=getattr(management, "db", None),
     )
 
-    # General request limit: at most GCON_API_RATE_LIMIT_PER_MINUTE requests
-    # per organization in any rolling minute (default 600, 0 = off), applied
-    # in require_scope after the key has authenticated. See
-    # gcon.management.request_limiter for what it does and does not cover.
-    request_limit = limit_from_env()
-    request_limiter = RequestRateLimiter(request_limit) if request_limit > 0 else None
-    if request_limiter is not None:
-        log.info("Public API request limit: %d per organization per minute", request_limit)
+    # General request limit, applied in require_scope after the key has
+    # authenticated: each organization gets its plan's requests_per_minute (see
+    # gcon.management.plans), unless GCON_API_RATE_LIMIT_PER_MINUTE overrides it
+    # for everyone (0 = off). See gcon.management.request_limiter.
+    request_limiter = RequestRateLimiter(plans_mod.DEFAULT_PLAN_LIMITS[plans_mod.DEFAULT_PLAN]["requests_per_minute"])
+    _rate_env = env_override()
+    if _rate_env is None:
+        log.info("Public API request limit: per organization, from its plan")
+    elif _rate_env == 0:
+        log.warning("Public API request limit is OFF for everyone (GCON_API_RATE_LIMIT_PER_MINUTE=0)")
     else:
-        log.warning("Public API request limit is OFF (%s=0)", "GCON_API_RATE_LIMIT_PER_MINUTE")
+        log.info("Public API request limit: %d per organization per minute for every plan (GCON_API_RATE_LIMIT_PER_MINUTE)", _rate_env)
 
     app = FastAPI(
         title="GCON Public API",
@@ -604,20 +616,23 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                            "cannot be used to read or change customer data.",
                 )
 
-            if request_limiter is not None:
-                # Count per organization so extra API keys do not buy extra
-                # allowance; org-less (staff) keys are counted per key.
-                org = getattr(owner, "organization_id", None) if owner is not None else None
+            # Count per organization so extra API keys do not buy extra
+            # allowance; org-less (staff) keys are counted per key. The number
+            # is the organization's plan, looked up on every request so a staff
+            # change applies immediately. 0 = no limit.
+            org = getattr(owner, "organization_id", None) if owner is not None else None
+            allowance = management.get_org_limits(org)["requests_per_minute"]
+            if allowance > 0:
                 allowed, retry_after = request_limiter.hit(
-                    f"org:{org}" if org else f"key:{key.key_id}"
+                    f"org:{org}" if org else f"key:{key.key_id}", allowance
                 )
                 if not allowed:
                     wait = max(1, math.ceil(retry_after))
                     raise HTTPException(
                         status_code=429,
                         detail=(
-                            f"Rate limit exceeded: at most {request_limit} requests per "
-                            f"minute. Retry in {wait} second(s)."
+                            f"Rate limit exceeded: at most {allowance} requests per "
+                            f"minute on your plan. Retry in {wait} second(s)."
                         ),
                         headers={"Retry-After": str(wait)},
                     )
@@ -1142,6 +1157,10 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                 # submission is a client-facing 400 (the request itself
                 # was fine, but policy says no), not a 500.
                 raise HTTPException(status_code=400, detail=str(e))
+            except ConcurrentJobLimitError as e:
+                # The organization is at its plan's concurrent-job limit: 429,
+                # not a 500 -- the request is fine, retry once a job finishes.
+                raise HTTPException(status_code=429, detail=str(e))
             except NotLeaderError as e:
                 # 503 (not 400/404): the request itself is fine, this
                 # coordinator process just isn't the one that should
@@ -1496,14 +1515,28 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         ))
 
     # ------------------------------------------------------------
-    # Billing (read-only). Invoices are generated and finalized by
-    # staff; customers can see the price list, a live preview of
-    # their own usage, and their own issued invoices.
+    # Plan: what the organization's plan allows and how much of it is in use
     # ------------------------------------------------------------
 
     def _org_of(auth):
         owner = auth["owner"]
         return getattr(owner, "organization_id", None) if owner else None
+
+    @app.get(
+        "/account/plan",
+        response_model=PlanOut,
+        tags=["Account"],
+        summary="Your plan, its limits, and your current job usage",
+        responses={401: {"model": ErrorOut}},
+    )
+    def get_account_plan(auth=Depends(require_scope("View monitoring"))):
+        return management.get_customer_plan(_org_of(auth))
+
+    # ------------------------------------------------------------
+    # Billing (read-only). Invoices are generated and finalized by
+    # staff; customers can see the price list, a live preview of
+    # their own usage, and their own issued invoices.
+    # ------------------------------------------------------------
 
     @app.get(
         "/billing/pricing",

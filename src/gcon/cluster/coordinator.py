@@ -44,6 +44,15 @@ class NotLeaderError(RuntimeError):
     pass
 
 
+class ConcurrentJobLimitError(RuntimeError):
+    """Raised by submit_job() when an organization already has as many jobs
+    pending/running as it may (its plan's `max_concurrent_jobs`, or the
+    GCON_MAX_CONCURRENT_JOBS_PER_ORG override). A RuntimeError, as it always
+    was, so existing `except RuntimeError` handlers still catch it; the public
+    API maps it to 429 rather than letting it surface as a 500."""
+    pass
+
+
 class PolicyRejectionError(RuntimeError):
     """Raised by submit_job() when PolicyEngine.check_submission()
     rejects the submission outright (see policy_engine.py's module
@@ -245,6 +254,10 @@ class GCONCoordinator:
         self._max_concurrent_jobs_per_org = int(
             os.environ.get("GCON_MAX_CONCURRENT_JOBS_PER_ORG", "0")
         )
+        # Optional callable(org_id) -> int giving an organization's own cap from
+        # its plan (0 = none). Set by ManagementLayer, which knows the plans.
+        # The environment value above, when set, wins over it for everyone.
+        self.org_job_cap_resolver = None
         # recover_jobs() (worker-loss reassignment) and retry_job/
         # retry_failed_jobs (manual retry) previously had no cap at
         # all -- a job that fails deterministically (bad command, a
@@ -739,6 +752,31 @@ class GCONCoordinator:
     )
 )
     
+    def count_inflight_jobs(self, org_id):
+        """How many of this organization's jobs are pending or running."""
+        with self.jobs_lock:
+            return sum(
+                1 for j in self.jobs.values()
+                if j.get("org_id") == org_id and j.get("status") in ("pending", "running")
+            )
+
+    def _concurrent_job_cap(self, org_id):
+        """The organization's concurrent-job cap, 0 = none. The environment
+        value wins when set (it applies to everyone); otherwise the plan's."""
+        if self._max_concurrent_jobs_per_org > 0:
+            return self._max_concurrent_jobs_per_org
+        resolver = self.org_job_cap_resolver
+        if resolver is None:
+            return 0
+        try:
+            return max(int(resolver(org_id) or 0), 0)
+        except Exception as exc:
+            # A lookup failure must not stop every customer from submitting.
+            self.telemetry.warning(
+                f"Could not resolve the concurrent-job cap for org '{org_id}': {exc!r}"
+            )
+            return 0
+
     def submit_job(
         self, job_id, command, artifacts=None, created_by=None, workflow_id=None,
         org_id=None, kind="command", requires=None, stages=None, dataset_artifacts=None,
@@ -802,10 +840,11 @@ class GCONCoordinator:
         agreement annotation on top, it never replaces or weakens the
         per-node signature.
 
-        Raises RuntimeError if `org_id` is given and that org already
-        has GCON_MAX_CONCURRENT_JOBS_PER_ORG jobs pending/running (see
-        __init__) -- a shared-coordinator fairness guard, off by
-        default (env unset = 0 = unlimited, today's behavior).
+        Raises ConcurrentJobLimitError (a RuntimeError) if `org_id` is given
+        and that org already has as many jobs pending/running as its plan
+        allows (or GCON_MAX_CONCURRENT_JOBS_PER_ORG, which wins when set) --
+        a shared-coordinator fairness guard. With no plan resolver attached and
+        the env var unset there is no cap, as before.
         org_id=None jobs are never capped by this (nothing to
         attribute a flood to), only by the coordinator-wide
         _max_jobs_in_memory bound.
@@ -886,19 +925,16 @@ class GCONCoordinator:
                     f"'{artifact_id}' -- register it first."
                 )
 
-        if org_id is not None and self._max_concurrent_jobs_per_org > 0:
-            with self.jobs_lock:
-                in_flight = sum(
-                    1 for j in self.jobs.values()
-                    if j.get("org_id") == org_id and j.get("status") in ("pending", "running")
-                )
-            if in_flight >= self._max_concurrent_jobs_per_org:
-                raise RuntimeError(
-                    f"org '{org_id}' already has {in_flight} job(s) pending/running, "
-                    f"at its concurrent-job limit of {self._max_concurrent_jobs_per_org} "
-                    "(GCON_MAX_CONCURRENT_JOBS_PER_ORG) -- wait for one to finish or "
-                    "raise the limit before submitting more."
-                )
+        if org_id is not None:
+            cap = self._concurrent_job_cap(org_id)
+            if cap > 0:
+                in_flight = self.count_inflight_jobs(org_id)
+                if in_flight >= cap:
+                    raise ConcurrentJobLimitError(
+                        f"org '{org_id}' already has {in_flight} job(s) pending/running, "
+                        f"at its concurrent-job limit of {cap} -- wait for one to "
+                        "finish before submitting more."
+                    )
 
         with self.jobs_lock:
             if job_id in self.jobs:

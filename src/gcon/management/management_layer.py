@@ -21,7 +21,9 @@ import os
 import secrets
 from datetime import datetime, UTC
 
+from . import plans as plans_mod
 from . import rbac
+from . import request_limiter
 from .auth import SessionManager, ResetTokenManager, CustomerSessionManager, CustomerResetTokenManager
 from .users import UserRegistry, bootstrap_owner_account, mask_email
 from .organizations import OrganizationRegistry
@@ -88,6 +90,9 @@ class ManagementLayer:
         self.customer_registry = CustomerUserRegistry(db=self.db)
         self.customer_session_manager = CustomerSessionManager(db=self.db)
         self.customer_reset_token_manager = CustomerResetTokenManager(db=self.db)
+
+        if coordinator is not None:
+            coordinator.org_job_cap_resolver = self._plan_job_cap_for_org
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -218,11 +223,13 @@ class ManagementLayer:
     }
 
     def create_organization(self, name, plan="Standard"):
+        plan = plans_mod.canonical_plan(plan)
         org = self.org_registry.add_organization(name, plan)
         self.audit_logger.log("Admin", "created organization", org.name)
         data = org.to_dict()
         data["member_count"] = 0
         data["team_count"] = 0
+        data["limits"] = self._limits_for_plan(org.plan, self.get_plan_limits())
         return data
     
     def create_team(self, org_id, name, admin_user_id=None):
@@ -712,12 +719,14 @@ class ManagementLayer:
 
     def get_organizations(self):
         orgs = []
+        table = self.get_plan_limits()
         for org in self.org_registry.list_organizations():
             data = org.to_dict()
             members = [u for u in self.user_registry.list_users()
                        if u.organization_id == org.org_id]
             data["member_count"] = len(members)
             data["team_count"] = len(self.org_registry.list_teams(org.org_id))
+            data["limits"] = self._limits_for_plan(org.plan, table)
             orgs.append(data)
         return orgs
 
@@ -728,6 +737,7 @@ class ManagementLayer:
                    if u.organization_id == org.org_id]
         data["member_count"] = len(members)
         data["team_count"] = len(self.org_registry.list_teams(org.org_id))
+        data["limits"] = self._limits_for_plan(org.plan, self.get_plan_limits())
         return data
 
     def get_client_recent_jobs(self, org_id, limit=10):
@@ -1113,6 +1123,126 @@ class ManagementLayer:
         self.audit_logger.log("Admin", f"finalized invoice '{invoice_id}'", invoice.get("status", ""))
         return invoice
 
+    # ------------------------------------------------------------
+    # Plans (Standard / Pro / Enterprise): see gcon.management.plans
+    # ------------------------------------------------------------
+
+    _PLAN_ADMIN_ROLES = ("Owner", "Administrator")
+
+    def _plan_settings(self):
+        plane = getattr(self.coordinator, "control_plane", None)
+        return plane.settings if plane is not None else None
+
+    def get_plan_limits(self):
+        """All three tiers' limits ({plan: {requests_per_minute,
+        max_concurrent_jobs}}, 0 = no limit): defaults plus staff edits."""
+        return plans_mod.load_plan_limits(self._plan_settings())
+
+    def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs, *, actor):
+        """Owner/Administrator only. Applies on the next request."""
+        if actor is None or actor.role not in self._PLAN_ADMIN_ROLES:
+            raise PermissionError("Only an Owner or Administrator can change plan limits.")
+        settings = self._plan_settings()
+        if settings is None:
+            raise ValueError("Plan limits need a coordinator with a control plane.")
+        plan = plans_mod.canonical_plan(plan)
+        previous = self.get_plan_limits()[plan]
+        values = plans_mod.save_plan_limits(
+            settings, plan, requests_per_minute, max_concurrent_jobs, updated_by=actor.name)
+        self.audit_logger.log(
+            actor.name,
+            f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
+            f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
+            f"{values['max_concurrent_jobs']} jobs",
+            plan)
+        return self.get_plans_overview()
+
+    def _env_overrides(self):
+        """What the environment forces on every organization (None / 0 = nothing)."""
+        coordinator_cap = getattr(self.coordinator, "_max_concurrent_jobs_per_org", 0) or 0
+        return {
+            "requests_per_minute": request_limiter.env_override(),
+            "max_concurrent_jobs": int(coordinator_cap),
+        }
+
+    def _limits_for_plan(self, stored_label, table):
+        """The limits that really apply to an organization whose plan label is
+        `stored_label`: its tier's numbers, unless the environment overrides
+        them for everyone. 0 = no limit."""
+        tier = plans_mod.plan_for_limits(stored_label)
+        env = self._env_overrides()
+        return {
+            "requests_per_minute": plans_mod.effective_requests_per_minute(
+                table[tier]["requests_per_minute"], env["requests_per_minute"]),
+            "max_concurrent_jobs": plans_mod.effective_max_concurrent_jobs(
+                table[tier]["max_concurrent_jobs"], env["max_concurrent_jobs"]),
+        }
+
+    def get_plans_overview(self):
+        """For the staff Plans screen: each tier's limits, how many
+        organizations are on it, and any environment override that makes
+        the tier numbers moot."""
+        table = self.get_plan_limits()
+        counts = {name: 0 for name in plans_mod.PLAN_NAMES}
+        other = 0
+        for org in self.org_registry.list_organizations():
+            try:
+                counts[plans_mod.canonical_plan(org.plan)] += 1
+            except ValueError:
+                other += 1
+        env = self._env_overrides()
+        return {
+            "plans": [
+                {"plan": name, **table[name], "organizations": counts[name]}
+                for name in plans_mod.PLAN_NAMES
+            ],
+            "organizations_on_other_labels": other,
+            "env_overrides": {
+                "requests_per_minute": env["requests_per_minute"],
+                "max_concurrent_jobs": env["max_concurrent_jobs"] or None,
+            },
+        }
+
+    def get_org_limits(self, org_id):
+        """The limits that apply to this organization right now, with its
+        plan label. 0 = no limit. No organization (or one that does not
+        exist) gets the default tier's."""
+        try:
+            label = self.org_registry.get_organization(org_id).plan if org_id else None
+        except ValueError:
+            label = None
+        return {
+            "plan": label or plans_mod.DEFAULT_PLAN,
+            **self._limits_for_plan(label, self.get_plan_limits()),
+        }
+
+    def _plan_job_cap_for_org(self, org_id):
+        """Resolver handed to the coordinator: this org's plan cap (0 = none)."""
+        try:
+            label = self.org_registry.get_organization(org_id).plan
+        except ValueError:
+            label = None
+        tier = plans_mod.plan_for_limits(label)
+        return self.get_plan_limits()[tier]["max_concurrent_jobs"]
+
+    def get_customer_plan(self, org_id):
+        """What a customer sees about their plan: its name, the limits
+        (None = no limit) and how many jobs they have in flight."""
+        if not org_id:
+            raise ValueError("An organization is required.")
+        limits = self.get_org_limits(org_id)
+        in_flight = (
+            self.coordinator.count_inflight_jobs(org_id)
+            if self.coordinator is not None and hasattr(self.coordinator, "count_inflight_jobs")
+            else 0
+        )
+        return {
+            "plan": limits["plan"],
+            "requests_per_minute": limits["requests_per_minute"] or None,
+            "max_concurrent_jobs": limits["max_concurrent_jobs"] or None,
+            "jobs_in_flight": in_flight,
+        }
+
     # Customer-facing billing reads (GET /api/v1/billing/...). Every method
     # takes the caller's org_id and refuses to run without one: unlike
     # get_invoices() above, which returns EVERY org's invoices when org_id is
@@ -1302,8 +1432,16 @@ class ManagementLayer:
         }
 
     def update_organization(self, org_id, **fields):
+        previous_plan = self.org_registry.get_organization(org_id).plan
+        if "plan" in fields:
+            # A blank plan means "leave it as it is" (the edit form sends none
+            # for an organization still carrying a retired label such as Free).
+            fields["plan"] = plans_mod.canonical_plan(fields["plan"]) if fields["plan"] else None
         org = self.org_registry.update_organization(org_id, **fields)
         self.audit_logger.log("Admin", "updated organization", org.name)
+        if org.plan != previous_plan:
+            self.audit_logger.log(
+                "Admin", f"changed plan {previous_plan} -> {org.plan} for organization", org.name)
         return self.get_organization(org.org_id)
 
     def delete_organization(self, org_id):
@@ -1432,7 +1570,7 @@ class ManagementLayer:
         # less organization behind on every attempt.
         if self.customer_registry.get_user_by_email(email) is not None:
             raise ValueError(f"An account with email '{email}' already exists.")
-        org = self.org_registry.add_organization(org_name, plan=plan)
+        org = self.org_registry.add_organization(org_name, plan=plans_mod.canonical_plan(plan))
         customer = self.customer_registry.add_user(name, email, org.org_id, password)
         key = self.api_key_manager.create_key(
             f"{org_name} - default", customer.customer_user_id,
