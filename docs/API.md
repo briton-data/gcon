@@ -516,6 +516,8 @@ error text) are not part of the customer view.
 | Method | Path | Scope | Summary |
 |---|---|---|---|
 | `GET` | `/whoami` | *(any valid key)* | Identify the calling API key |
+| `POST` | `/auth/change-password` | *(any valid key)* | Change your password (`current_password`, `new_password`) |
+| `POST` | `/auth/delete-account` | *(any valid key)* | Delete your account and workspace (`password`, `org_name`) |
 
 ```json
 {
@@ -526,6 +528,23 @@ error text) are not part of the customer view.
   "owner_name": "Jane Doe"
 }
 ```
+
+#### `POST /auth/change-password`
+
+Body: `{"current_password": "...", "new_password": "..."}`. Returns `{"changed": true}`.
+A wrong current password, a new password that is too short, or one equal to the current
+one is a `400` with the reason. Wrong attempts are rate-limited (`429`). On success every
+outstanding reset link is cancelled and every *other* browser-session key is revoked; the
+key making the request, and keys you created yourself for your own code, stay valid.
+
+#### `POST /auth/delete-account`
+
+Body: `{"password": "...", "org_name": "<your workspace name>"}`. Returns `{"deleted": true}`.
+Removes every account, API key and worker enroll token of your organization, and the
+organization itself. Refused with a `400` (and nothing deleted) when the password or
+workspace name is wrong, while any job is queued or running, or while one of your own
+workers is online. Job records, receipts and invoices are kept by GCON as its evidence and
+billing record, but nothing can sign in to reach them afterwards.
 
 ---
 
