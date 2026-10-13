@@ -1681,6 +1681,92 @@ class ManagementLayer:
         for old in sessions[:max(0, len(sessions) - keep)]:
             self.api_key_manager.revoke_key(old.key_id)
 
+    def _revoke_customer_credentials(self, customer_user_id, keep_key_id=None, only_web_sessions=False):
+        """Revoke this customer's active API keys (all of them, or just the
+        browser-session ones), except `keep_key_id`. Returns how many."""
+        revoked = 0
+        for key in self.api_key_manager.list_keys():
+            if key.owner_user_id != customer_user_id or key.status != "Active":
+                continue
+            if key.key_id == keep_key_id:
+                continue
+            if only_web_sessions and not key.name.startswith("Web session"):
+                continue
+            self.api_key_manager.revoke_key(key.key_id)
+            revoked += 1
+        return revoked
+
+    def change_customer_password(self, customer_user_id, current_password, new_password,
+                                 keep_key_id=None):
+        """A signed-in customer changes their own password.
+
+        Raises ValueError("Current password is incorrect.") if the current
+        password is wrong. On success every outstanding reset link and cookie
+        session is invalidated and every OTHER browser-session API key is
+        revoked, so a password change really does sign out whoever else had
+        the old one. `keep_key_id` (the key making this request) stays valid so
+        the person changing it is not logged out of the tab they are using;
+        keys the customer created by hand for their own code are left alone.
+        """
+        user = self.customer_registry.get_user(customer_user_id)
+        if not user.check_password(current_password):
+            raise ValueError("Current password is incorrect.")
+        if current_password == new_password:
+            raise ValueError("Choose a password that is different from your current one.")
+        self.customer_registry.set_password(customer_user_id, new_password)
+        self.customer_reset_token_manager.invalidate_all_for_user(customer_user_id)
+        self.customer_session_manager.destroy_all_for_user(customer_user_id)
+        self._revoke_customer_credentials(
+            customer_user_id, keep_key_id=keep_key_id, only_web_sessions=True)
+        self.audit_logger.log(f"Customer:{user.org_id}", "changed password", user.name)
+
+    def delete_customer_account(self, customer_user_id, password, org_name):
+        """A signed-in customer deletes their whole workspace.
+
+        Checked before anything is touched: the password, the workspace name
+        typed to confirm, no job still queued or running, and none of the
+        organization's own workers still online. Then every customer account
+        of the organization, all of their API keys, sessions and reset links,
+        the organization's worker enroll tokens and the organization itself
+        are removed.
+
+        NOT removed: job records, receipts and invoices. They are GCON's
+        evidence and billing record; they stay, but nothing can sign in to
+        reach them any more.
+        """
+        user = self.customer_registry.get_user(customer_user_id)
+        org_id = user.org_id
+        org = self.org_registry.get_organization(org_id)
+        if not user.check_password(password):
+            raise ValueError("Password is incorrect.")
+        if (org_name or "").strip() != (org.name or "").strip():
+            raise ValueError("The workspace name you typed doesn't match.")
+        coordinator = self.coordinator
+        if coordinator is not None:
+            in_flight = coordinator.count_inflight_jobs(org_id)
+            if in_flight:
+                raise ValueError(
+                    f"{in_flight} job(s) are still queued or running. Cancel them or wait "
+                    "for them to finish, then delete the account.")
+            online = [n for n in coordinator.get_nodes(org_id=org_id) if n.get("status") != "offline"]
+            if online:
+                raise ValueError(
+                    f"{len(online)} of your workers are still online. Stop them first, "
+                    "then delete the account.")
+        members = self.customer_registry.list_for_org(org_id)
+        for member in members:
+            self._revoke_customer_credentials(member.customer_user_id)
+            self.customer_session_manager.destroy_all_for_user(member.customer_user_id)
+            self.customer_reset_token_manager.invalidate_all_for_user(member.customer_user_id)
+            self.customer_registry.delete_user(member.customer_user_id)
+        plane = getattr(coordinator, "control_plane", None) if coordinator is not None else None
+        if plane is not None:
+            for token in plane.enroll_tokens.list_for_org(org_id):
+                if not token.get("revoked_at"):
+                    plane.enroll_tokens.revoke(token["token_id"])
+        self.org_registry.delete_organization(org_id, user_registry=self.user_registry)
+        self.audit_logger.log("System", "customer deleted their account", org.name)
+
     def set_organization_customer_status(self, org_id, status):
         """Staff action: disable (or re-enable) every customer user of an
         organization. A Disabled customer can't log in and none of their API

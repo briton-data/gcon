@@ -150,6 +150,13 @@ class CustomerUserRegistry:
         self._persist(user)
         return user
 
+    def delete_user(self, customer_user_id):
+        """Remove a customer account for good (row and in-memory entry)."""
+        self.get_user(customer_user_id)
+        del self.users[customer_user_id]
+        self.db.execute(
+            "DELETE FROM customer_users WHERE customer_user_id = ?", (customer_user_id,))
+
     def update_status(self, customer_user_id, status):
         if status not in VALID_CUSTOMER_STATUSES:
             raise ValueError(f"Invalid status '{status}'.")

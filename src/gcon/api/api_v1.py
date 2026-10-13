@@ -440,6 +440,16 @@ class ApiKeyCreateIn(BaseModel):
     name: str
 
 
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+    org_name: str = Field(description="The workspace name, typed to confirm.")
+
+
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 256
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -822,6 +832,79 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # done and forgotten.
         management.customer_reset_token_manager.invalidate_all_for_user(customer_user_id)
         return {"reset": True}
+
+    # ------------------------------------------------------------
+    # Account: change password, delete account (signed-in customer)
+    # ------------------------------------------------------------
+
+    def _customer_id_of(auth):
+        owner = auth["owner"]
+        customer_id = getattr(owner, "user_id", None) if owner else None
+        try:
+            management.customer_registry.get_user(customer_id)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Only a customer account can do this.")
+        return customer_id
+
+    @app.post(
+        "/auth/change-password",
+        tags=["Auth"],
+        summary="Change your password",
+        description=(
+            "Needs your current password. Other browser sessions are signed out; "
+            "the key making this request and keys you created for your own code stay valid."
+        ),
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
+    )
+    def auth_change_password(payload: ChangePasswordIn, request: Request, auth=Depends(require_scope())):
+        customer_id = _customer_id_of(auth)
+        limiter_key = f"customer-password:{customer_id}"
+        ip = client_ip(request)
+        try:
+            rate_limiter.check(limiter_key, ip)
+        except ValueError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        try:
+            _validate_password(payload.new_password)
+            management.change_customer_password(
+                customer_id, payload.current_password, payload.new_password,
+                keep_key_id=auth["key"].key_id,
+            )
+        except ValueError as e:
+            if str(e) == "Current password is incorrect.":
+                rate_limiter.record_failure(limiter_key, ip)
+            raise HTTPException(status_code=400, detail=str(e))
+        rate_limiter.record_success(limiter_key, ip)
+        return {"changed": True}
+
+    @app.post(
+        "/auth/delete-account",
+        tags=["Auth"],
+        summary="Delete your account and workspace",
+        description=(
+            "Permanently removes every account, API key and worker enroll token of your "
+            "organization, and the organization. Needs your password and the workspace name. "
+            "Refused while a job is queued or running or one of your workers is online. "
+            "Job records, receipts and invoices are kept by GCON but can no longer be reached."
+        ),
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
+    )
+    def auth_delete_account(payload: DeleteAccountIn, request: Request, auth=Depends(require_scope())):
+        customer_id = _customer_id_of(auth)
+        limiter_key = f"customer-delete:{customer_id}"
+        ip = client_ip(request)
+        try:
+            rate_limiter.check(limiter_key, ip)
+        except ValueError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        try:
+            management.delete_customer_account(customer_id, payload.password, payload.org_name)
+        except ValueError as e:
+            if str(e) == "Password is incorrect.":
+                rate_limiter.record_failure(limiter_key, ip)
+            raise HTTPException(status_code=400, detail=str(e))
+        rate_limiter.record_success(limiter_key, ip)
+        return {"deleted": True}
 
     # ------------------------------------------------------------
     # API keys (customer self-service)
