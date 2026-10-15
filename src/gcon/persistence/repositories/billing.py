@@ -8,6 +8,17 @@ from typing import Any, Dict, List, Optional
 from gcon.persistence.db import ControlPlaneDatabase
 
 
+def _instant(value: str) -> datetime:
+    """A stored period boundary as an aware UTC datetime (no zone means UTC), so periods written with
+    different spellings of the same instant ('...Z', '...+00:00', a bare date) still compare as equal."""
+    parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+class InvoiceOverlapError(ValueError):
+    """The requested period overlaps an invoice this organization already has."""
+
+
 class InvoiceRepository:
     """
     Durable store for invoices generated from usage-metering data
@@ -37,6 +48,18 @@ class InvoiceRepository:
         now = datetime.now(UTC).isoformat()
         try:
             with self.db.transaction() as conn:
+                # Checked inside the transaction (which holds the database lock), so two callers racing for the
+                # same organization cannot both pass it.
+                found = self._find_same_or_overlapping(org_id, period_start, period_end)
+                if found is not None and found[1] == "same":
+                    return self.get(found[0]["invoice_id"])
+                if found is not None:
+                    clash = found[0]
+                    raise InvoiceOverlapError(
+                        f"This period overlaps invoice {clash['invoice_id'][:12]} for the same organization "
+                        f"({clash['period_start']} to {clash['period_end']}, {clash['status']}). "
+                        "An organization can't be billed twice for the same time."
+                    )
                 conn.execute(
                     """
                     INSERT INTO invoices (invoice_id, org_id, period_start, period_end,
@@ -65,6 +88,24 @@ class InvoiceRepository:
                 return existing
             raise
         return self.get(invoice_id)
+
+    def _find_same_or_overlapping(self, org_id, period_start, period_end):
+        """(invoice_row, 'same' | 'overlap') for the first invoice of this organization that covers exactly the
+        same instants, or part of them, else None. Compared as instants rather than strings."""
+        start, end = _instant(period_start), _instant(period_end)
+        overlap = None
+        for row in self.db.query(
+            "SELECT invoice_id, period_start, period_end, status FROM invoices WHERE org_id = ?", (org_id,)
+        ):
+            try:
+                other_start, other_end = _instant(row["period_start"]), _instant(row["period_end"])
+            except ValueError:
+                continue
+            if other_start == start and other_end == end:
+                return dict(row), "same"
+            if other_start < end and other_end > start and overlap is None:
+                overlap = (dict(row), "overlap")
+        return overlap
 
     def get(self, invoice_id: str) -> Optional[Dict[str, Any]]:
         row = self.db.query_one("SELECT * FROM invoices WHERE invoice_id = ?", (invoice_id,))

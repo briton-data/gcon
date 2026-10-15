@@ -1111,10 +1111,98 @@ class ManagementLayer:
         if self.coordinator is None or self.coordinator.control_plane is None:
             raise ValueError("No control plane available to generate an invoice from.")
         from gcon.billing.invoicing import generate_invoice
-        invoice = generate_invoice(self.coordinator.control_plane, org_id, period_start, period_end)
+        invoice = generate_invoice(
+            self.coordinator.control_plane, org_id, period_start, period_end,
+            receipt_validator=self._receipt_validator(),
+        )
         self.audit_logger.log("Admin", f"generated invoice for org '{org_id}'",
                                f"{period_start} to {period_end}")
         return invoice
+
+    def _receipt_validator(self):
+        """Only receipts whose signed proof checks out are billable (see invoicing.make_receipt_validator)."""
+        verifier = getattr(self.coordinator, "verifier", None)
+        if verifier is None:
+            return None
+        from gcon.billing.invoicing import make_receipt_validator
+        return make_receipt_validator(verifier)
+
+    def get_billing_status(self):
+        """Automatic invoicing state, last run, and which payment provider is in use, for the dashboard."""
+        automation = getattr(self.coordinator, "billing_automation", None)
+        if automation is None:
+            return {"available": False}
+        return {"available": True, **automation.status()}
+
+    def run_billing_now(self, months=None):
+        """Invoice every complete month in the catch-up window for every organization with usage, right now."""
+        automation = getattr(self.coordinator, "billing_automation", None)
+        if automation is None:
+            raise ValueError("Invoicing automation is not available on this coordinator.")
+        if months is not None:
+            if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 24:
+                raise ValueError("months must be a whole number from 1 to 24.")
+        summary = automation.run_once(trigger="manual", months=months)
+        self.audit_logger.log(
+            "Admin", "ran invoicing for all organizations",
+            f"{summary['generated']} generated, {summary['already_invoiced']} already invoiced, "
+            f"{summary['overlap_skipped']} skipped for overlap, {summary['failed']} failed")
+        return summary
+
+    def finalize_draft_invoices(self, org_id=None):
+        """Charge every draft invoice (optionally one organization's). Each is finalized on its own, so one
+        failure doesn't stop the rest; the counts say what happened."""
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        from gcon.billing.invoicing import finalize_invoice
+        drafts = [i for i in self.get_invoices(org_id=org_id, limit=1000) if i["status"] == "draft"]
+        counts = {"drafts": len(drafts), "paid": 0, "failed": 0, "errors": []}
+        for invoice in drafts:
+            try:
+                result = finalize_invoice(self.coordinator.control_plane, invoice["invoice_id"])
+                counts["paid" if result["status"] == "paid" else "failed"] += 1
+            except Exception as e:
+                counts["failed"] += 1
+                counts["errors"].append(f"{invoice['invoice_id'][:12]}: {e}")
+        self.audit_logger.log("Admin", "finalized draft invoices",
+                               f"{counts['paid']} paid, {counts['failed']} failed of {counts['drafts']}")
+        return counts
+
+    def set_pricing(self, updates):
+        """Change prices (any subset). Whole-number-or-fractional cents, never negative; own_worker_gpu_second_cents
+        may be null to mean 'same as the standard GPU rate'. A price an environment variable sets can't be
+        changed here, because the environment would silently win, so that is refused instead."""
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        import math
+        import os
+        from gcon.billing.pricing import PRICE_ENV_VARS, PricingConfig, load_pricing, save_pricing
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("Give at least one price to change.")
+        plane = self.coordinator.control_plane
+        current = load_pricing(plane).to_dict()
+        clean = {}
+        for key, value in updates.items():
+            if key not in current:
+                raise ValueError(f"'{key}' is not a price.")
+            if key == "currency":
+                if not isinstance(value, str) or len(value.strip()) != 3 or not value.strip().isalpha():
+                    raise ValueError("currency must be a 3-letter code such as usd.")
+                clean[key] = value.strip().lower()
+                continue
+            if value is None and key == "own_worker_gpu_second_cents":
+                clean[key] = None
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be a number of cents, zero or more.")
+            clean[key] = float(value)
+            env_var = PRICE_ENV_VARS.get(key)
+            if env_var and os.environ.get(env_var) is not None:
+                raise ValueError(f"{key} is set by the {env_var} environment variable, which takes priority. "
+                                 "Change it there.")
+        save_pricing(plane, PricingConfig(**{**current, **clean}), updated_by="Admin")
+        self.audit_logger.log("Admin", "changed pricing", ", ".join(f"{k}={v}" for k, v in clean.items()))
+        return load_pricing(plane).to_dict()
 
     def finalize_invoice_now(self, invoice_id):
         if self.coordinator is None or self.coordinator.control_plane is None:
@@ -1307,6 +1395,7 @@ class ManagementLayer:
         return preview_usage(
             self.coordinator.control_plane, org_id,
             period_start=period_start, period_end=period_end,
+            receipt_validator=self._receipt_validator(),
         )
 
     # ------------------------------------------------------------------

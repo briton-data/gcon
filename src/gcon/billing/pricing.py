@@ -34,7 +34,24 @@ _DEFAULTS = {
     "verification_check_cents": 0.02,   # per replicated-execution comparison actually run
     "assurance_decision_cents": 0.01,   # per PolicyEngine.evaluate() actually run
     "receipt_cents": 0.005,             # per signed receipt issued (the proof deliverable itself)
+    # Compute that ran on the customer's OWN workers (nodes enrolled to their organization) is not GCON
+    # hardware, so it can carry its own rate. None means "same as gpu_second_cents": until an operator sets
+    # this, invoices are exactly what they were before the split existed.
+    "own_worker_gpu_second_cents": None,
     "currency": "usd",
+}
+
+
+# Which environment variable overrides which price. An environment value always wins over the stored schedule.
+PRICE_ENV_VARS = {
+    "gpu_second_cents": "GCON_PRICE_GPU_SECOND_CENTS",
+    "llm_input_token_cents": "GCON_PRICE_LLM_INPUT_TOKEN_CENTS",
+    "llm_output_token_cents": "GCON_PRICE_LLM_OUTPUT_TOKEN_CENTS",
+    "flat_fee_per_job_cents": "GCON_PRICE_FLAT_FEE_PER_JOB_CENTS",
+    "verification_check_cents": "GCON_PRICE_VERIFICATION_CHECK_CENTS",
+    "assurance_decision_cents": "GCON_PRICE_ASSURANCE_DECISION_CENTS",
+    "receipt_cents": "GCON_PRICE_RECEIPT_CENTS",
+    "own_worker_gpu_second_cents": "GCON_PRICE_OWN_WORKER_GPU_SECOND_CENTS",
 }
 
 
@@ -48,6 +65,7 @@ class PricingConfig:
     assurance_decision_cents: float
     receipt_cents: float
     currency: str
+    own_worker_gpu_second_cents: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,16 +82,7 @@ def load_pricing(control_plane: Optional[ControlPlane] = None) -> PricingConfig:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    env_map = {
-        "gpu_second_cents": "GCON_PRICE_GPU_SECOND_CENTS",
-        "llm_input_token_cents": "GCON_PRICE_LLM_INPUT_TOKEN_CENTS",
-        "llm_output_token_cents": "GCON_PRICE_LLM_OUTPUT_TOKEN_CENTS",
-        "flat_fee_per_job_cents": "GCON_PRICE_FLAT_FEE_PER_JOB_CENTS",
-        "verification_check_cents": "GCON_PRICE_VERIFICATION_CHECK_CENTS",
-        "assurance_decision_cents": "GCON_PRICE_ASSURANCE_DECISION_CENTS",
-        "receipt_cents": "GCON_PRICE_RECEIPT_CENTS",
-    }
-    for field, env_var in env_map.items():
+    for field, env_var in PRICE_ENV_VARS.items():
         raw = os.environ.get(env_var)
         if raw is not None:
             try:

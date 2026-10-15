@@ -37,6 +37,7 @@ from gcon.monitoring.metrics import MetricsCollector
 from gcon.dashboard.dashboard import Dashboard
 from gcon.transport.config import TransportConfig
 from gcon.billing.pricing import load_pricing, estimate_job_cost
+from gcon.billing.automation import BillingAutomation
 from gcon import telemetry as telemetry_module
 
 class NotLeaderError(RuntimeError):
@@ -356,6 +357,9 @@ class GCONCoordinator:
         # Sampled metric history + incidents (see monitoring/observability.py).
         # Never on the dispatch path; sampled from health_check_loop below.
         self.observability = ObservabilityService(self)
+        # Monthly invoice drafts for every organization with usage (see billing/automation.py). Leader only,
+        # ticked from health_check_loop below, and it does its work in its own thread.
+        self.billing_automation = BillingAutomation(self)
         if self._sandbox_policy == "trusted":
             self.telemetry.warning(
                 "GCON_SANDBOX_POLICY=trusted: jobs may run on unsandboxed workers "
@@ -3281,6 +3285,11 @@ class GCONCoordinator:
             except Exception as e:
                 # Observability must never affect scheduling or health.
                 _log_line(f"[OBSERVABILITY] sample failed: {e!r}")
+            try:
+                self.billing_automation.maybe_tick()
+            except Exception as e:
+                # Billing must never affect scheduling or health either.
+                _log_line(f"[BILLING] automatic invoicing tick failed: {e!r}")
 
     def autoscale_loop(self):
         """

@@ -946,6 +946,34 @@ class WebServer:
             except (ValueError, KeyError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        @self.app.get("/management/billing/status")
+        def mgmt_billing_status(user=Depends(self.require_permission("Access analytics"))):
+            return self.management.get_billing_status()
+
+        @self.app.post("/management/billing/run")
+        def mgmt_billing_run(payload: dict = None,
+                              user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.run_billing_now((payload or {}).get("months"))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/billing/pricing")
+        def mgmt_set_pricing(payload: dict,
+                              user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.set_pricing(payload)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/billing/invoices/finalize-drafts")
+        def mgmt_finalize_drafts(payload: dict = None,
+                                  user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.finalize_draft_invoices((payload or {}).get("org_id"))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         @self.app.post("/management/billing/invoices/{invoice_id}/finalize")
         def mgmt_finalize_invoice(invoice_id: str,
                                    user=Depends(self.require_permission("Manage cluster"))):

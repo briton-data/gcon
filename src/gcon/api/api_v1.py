@@ -317,6 +317,7 @@ class PricingOut(BaseModel):
     verification_check_cents: float
     assurance_decision_cents: float
     receipt_cents: float
+    own_worker_gpu_second_cents: Optional[float] = None
 
 
 class InvoiceLineItemOut(BaseModel):

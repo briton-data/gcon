@@ -54,11 +54,21 @@ counter.
 from __future__ import annotations
 
 import json as _json
+import logging
+import math
+import os
 from datetime import datetime, timedelta, UTC
-from typing import Any, Dict, List, Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from gcon.billing.pricing import PricingConfig, load_pricing
 from gcon.persistence.control_plane import ControlPlane
+
+_log = logging.getLogger("gcon.billing")
+
+# A job's measured runtime can never be billed beyond what the customer allowed it (its own timeout_seconds),
+# and a job with no timeout is held to this sanity ceiling so a corrupt value can't produce a huge charge.
+_DEFAULT_MAX_JOB_SECONDS = 7 * 24 * 3600
 
 
 def _jobs_for_period(
@@ -86,25 +96,105 @@ def _jobs_for_period(
     return out
 
 
-def compute_usage_totals(jobs: List[Dict[str, Any]]) -> Dict[str, float]:
-    compute_seconds = 0.0
-    llm_input_tokens = 0
-    llm_output_tokens = 0
+def _max_job_seconds() -> float:
+    try:
+        value = float(os.environ.get("GCON_BILLING_MAX_JOB_SECONDS", _DEFAULT_MAX_JOB_SECONDS))
+    except ValueError:
+        return float(_DEFAULT_MAX_JOB_SECONDS)
+    return value if value > 0 else float(_DEFAULT_MAX_JOB_SECONDS)
+
+
+def _clean_runtime(value: Any, job: Dict[str, Any], max_job_seconds: float, excluded: Dict[str, int]) -> float:
+    """Billable seconds for one job: 0 if the runtime is missing or not a usable number, never more than the
+    job's own timeout (or the sanity ceiling when it has none). Counts what it set aside in `excluded`."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        excluded["invalid_runtime"] += 1
+        return 0.0
+    timeout = job.get("timeout_seconds")
+    cap = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0 else max_job_seconds
+    if value > cap:
+        excluded["clamped_runtime"] += 1
+        return float(cap)
+    return float(value)
+
+
+def _clean_tokens(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
+
+
+def measure_jobs(
+    jobs: List[Dict[str, Any]],
+    org_id: Optional[str] = None,
+    job_nodes: Optional[Dict[str, str]] = None,
+    node_orgs: Optional[Dict[str, Optional[str]]] = None,
+    max_job_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Usage of completed jobs, with bad values set aside instead of billed (or crashing the run).
+
+    `compute_seconds` is all billable runtime; `own_worker_compute_seconds` is the part of it that ran on a node
+    enrolled to this same organization (job_nodes: job_id -> node_id, node_orgs: node_id -> org_id). A job whose
+    node is unknown counts as GCON-provided compute, i.e. at the standard rate.
+    """
+    ceiling = max_job_seconds if max_job_seconds is not None else _max_job_seconds()
+    excluded = {"invalid_runtime": 0, "clamped_runtime": 0, "invalid_token_usage": 0}
+    compute_seconds = own_seconds = 0.0
+    llm_input_tokens = llm_output_tokens = 0
     for job in jobs:
-        result = job.get("result") or {}
-        compute_seconds += float(result.get("runtime_seconds") or 0)
+        result = job.get("result")
+        result = result if isinstance(result, dict) else {}
+        seconds = _clean_runtime(result.get("runtime_seconds"), job, ceiling, excluded)
+        compute_seconds += seconds
+        node_id = (job_nodes or {}).get(job.get("job_id"))
+        if org_id and node_id and (node_orgs or {}).get(node_id) == org_id:
+            own_seconds += seconds
         usage = result.get("usage")
-        if isinstance(usage, dict):
-            tokens = usage.get("llm_tokens")
-            if isinstance(tokens, dict):
-                llm_input_tokens += int(tokens.get("input", 0) or 0)
-                llm_output_tokens += int(tokens.get("output", 0) or 0)
+        tokens = usage.get("llm_tokens") if isinstance(usage, dict) else None
+        if isinstance(tokens, dict):
+            tin, tout = _clean_tokens(tokens.get("input", 0) or 0), _clean_tokens(tokens.get("output", 0) or 0)
+            if tin is None or tout is None:
+                excluded["invalid_token_usage"] += 1
+            else:
+                llm_input_tokens += tin
+                llm_output_tokens += tout
     return {
         "job_count": len(jobs),
         "compute_seconds": compute_seconds,
+        "own_worker_compute_seconds": own_seconds,
         "llm_input_tokens": llm_input_tokens,
         "llm_output_tokens": llm_output_tokens,
+        "excluded": excluded,
     }
+
+
+def compute_usage_totals(jobs: List[Dict[str, Any]]) -> Dict[str, float]:
+    measured = measure_jobs(jobs)
+    return {k: measured[k] for k in ("job_count", "compute_seconds", "llm_input_tokens", "llm_output_tokens")}
+
+
+def _job_nodes(control_plane: ControlPlane, job_ids: List[str]) -> Dict[str, str]:
+    """job_id -> the node that ran it: the completed attempt when attempts are recorded, else the node that
+    issued the job's receipt."""
+    found: Dict[str, str] = {}
+    for i in range(0, len(job_ids), 400):
+        chunk = job_ids[i:i + 400]
+        marks = ",".join("?" for _ in chunk)
+        for row in control_plane.db.query(
+            f"SELECT job_id, node_id FROM receipts WHERE job_id IN ({marks}) AND node_id IS NOT NULL "
+            "ORDER BY uploaded_at", tuple(chunk)):
+            found[row["job_id"]] = row["node_id"]
+        for row in control_plane.db.query(
+            f"SELECT job_id, node_id FROM job_attempts WHERE job_id IN ({marks}) AND node_id IS NOT NULL "
+            "AND status = 'completed' ORDER BY attempt_number", tuple(chunk)):
+            found[row["job_id"]] = row["node_id"]
+    return found
+
+
+def _node_orgs(control_plane: ControlPlane) -> Dict[str, Optional[str]]:
+    return {row["node_id"]: row["org_id"] for row in control_plane.db.query("SELECT node_id, org_id FROM nodes")}
 
 
 def _receipts_for_period(
@@ -119,7 +209,8 @@ def _receipts_for_period(
         """
         SELECT r.* FROM receipts r
         JOIN jobs j ON j.job_id = r.job_id
-        WHERE j.org_id = ? AND r.uploaded_at >= ? AND r.uploaded_at < ?
+        WHERE j.org_id = ? AND j.status = 'completed'
+          AND r.uploaded_at >= ? AND r.uploaded_at < ?
         """,
         (org_id, period_start, period_end),
     )
@@ -129,6 +220,52 @@ def _receipts_for_period(
         d["payload"] = _json.loads(d["payload_json"]) if d.get("payload_json") else {}
         out.append(d)
     return out
+
+
+def make_receipt_validator(verifier) -> Callable[[Dict[str, Any]], bool]:
+    """A check that a stored receipt is the genuine, unaltered one: the signed proof verifies and the fields beside
+    it match what was signed. This is the same check the coordinator runs on every receipt."""
+    from gcon.execution.verifier import ExecutionVerifier
+
+    def check(receipt: Dict[str, Any]) -> bool:
+        try:
+            proof_ok, _ = verifier.validate_proof(receipt.get("proof") or {})
+            if not proof_ok:
+                return False
+            fields_ok, _ = ExecutionVerifier.validate_receipt_fields(receipt)
+            return bool(fields_ok)
+        except Exception:
+            return False
+    return check
+
+
+def validate_receipts(
+    receipts: List[Dict[str, Any]],
+    validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """The receipts that may be billed, and how many were set aside and why.
+
+    A receipt is billed only if its payload is a real record for the same job, it is not a duplicate of one
+    already counted, and (when a `validator` is given) its signature checks out. Without a validator only the
+    structural checks apply; an unsigned receipt is rejected only when a validator is in play.
+    """
+    valid: List[Dict[str, Any]] = []
+    rejected = {"malformed_receipt": 0, "job_mismatch_receipt": 0, "duplicate_receipt": 0, "bad_signature_receipt": 0}
+    seen = set()
+    for receipt in receipts:
+        payload = receipt.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            rejected["malformed_receipt"] += 1
+        elif payload.get("job_id") not in (None, receipt.get("job_id")):
+            rejected["job_mismatch_receipt"] += 1
+        elif receipt.get("receipt_id") in seen:
+            rejected["duplicate_receipt"] += 1
+        elif validator is not None and (not receipt.get("signature") or not validator(payload)):
+            rejected["bad_signature_receipt"] += 1
+        else:
+            seen.add(receipt.get("receipt_id"))
+            valid.append(receipt)
+    return valid, rejected
 
 
 def compute_receipt_usage_totals(receipts: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -160,72 +297,106 @@ def compute_receipt_usage_totals(receipts: List[Dict[str, Any]]) -> Dict[str, in
     }
 
 
+def _cents(value: float) -> int:
+    """Whole cents, halves rounded up (Python's round() sends 0.5 to 0, which silently drops small charges)."""
+    return int(Decimal(repr(float(value))).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def _line(description: str, quantity: float, unit: str, unit_price: float) -> Dict[str, Any]:
+    exact = quantity * unit_price
+    return {
+        "description": description, "quantity": quantity, "unit": unit, "unit_price_cents": unit_price,
+        "amount_cents": _cents(exact), "exact_cents": exact,
+    }
+
+
 def build_line_items(usage: Dict[str, float], pricing: PricingConfig) -> List[Dict[str, Any]]:
     items = []
-    if usage["compute_seconds"] > 0:
-        amount = round(usage["compute_seconds"] * pricing.gpu_second_cents)
-        items.append({
-            "description": "Compute (measured job runtime)",
-            "quantity": round(usage["compute_seconds"], 2),
-            "unit": "gpu_second",
-            "unit_price_cents": pricing.gpu_second_cents,
-            "amount_cents": int(amount),
-        })
+    compute = usage["compute_seconds"]
+    own = min(max(float(usage.get("own_worker_compute_seconds", 0.0) or 0.0), 0.0), compute)
+    own_rate = pricing.own_worker_gpu_second_cents
+    if compute > 0 and own > 0 and own_rate is not None and own_rate != pricing.gpu_second_cents:
+        # Compute is priced by where it ran: GCON's workers at the standard rate, the customer's own at theirs.
+        if compute - own > 0:
+            items.append(_line("Compute (shared pool)", round(compute - own, 2), "gpu_second", pricing.gpu_second_cents))
+        items.append(_line("Compute (your own workers)", round(own, 2), "gpu_second", own_rate))
+    elif compute > 0:
+        items.append(_line("Compute (measured job runtime)", round(compute, 2), "gpu_second", pricing.gpu_second_cents))
     if usage["llm_input_tokens"] > 0:
-        amount = round(usage["llm_input_tokens"] * pricing.llm_input_token_cents)
-        items.append({
-            "description": "LLM input tokens",
-            "quantity": usage["llm_input_tokens"],
-            "unit": "token",
-            "unit_price_cents": pricing.llm_input_token_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("LLM input tokens", usage["llm_input_tokens"], "token", pricing.llm_input_token_cents))
     if usage["llm_output_tokens"] > 0:
-        amount = round(usage["llm_output_tokens"] * pricing.llm_output_token_cents)
-        items.append({
-            "description": "LLM output tokens",
-            "quantity": usage["llm_output_tokens"],
-            "unit": "token",
-            "unit_price_cents": pricing.llm_output_token_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("LLM output tokens", usage["llm_output_tokens"], "token", pricing.llm_output_token_cents))
     if usage.get("verification_count", 0) > 0:
-        amount = round(usage["verification_count"] * pricing.verification_check_cents)
-        items.append({
-            "description": "Verification (replicated-execution checks run)",
-            "quantity": usage["verification_count"],
-            "unit": "verification",
-            "unit_price_cents": pricing.verification_check_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("Verification (replicated-execution checks run)", usage["verification_count"],
+                           "verification", pricing.verification_check_cents))
     if usage.get("assurance_decision_count", 0) > 0:
-        amount = round(usage["assurance_decision_count"] * pricing.assurance_decision_cents)
-        items.append({
-            "description": "Assurance decisions (policy evaluations run)",
-            "quantity": usage["assurance_decision_count"],
-            "unit": "decision",
-            "unit_price_cents": pricing.assurance_decision_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("Assurance decisions (policy evaluations run)", usage["assurance_decision_count"],
+                           "decision", pricing.assurance_decision_cents))
     if usage.get("receipt_count", 0) > 0:
-        amount = round(usage["receipt_count"] * pricing.receipt_cents)
-        items.append({
-            "description": "Receipts issued (signed proof of execution)",
-            "quantity": usage["receipt_count"],
-            "unit": "receipt",
-            "unit_price_cents": pricing.receipt_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("Receipts issued (signed proof of execution)", usage["receipt_count"],
+                           "receipt", pricing.receipt_cents))
     if pricing.flat_fee_per_job_cents > 0 and usage["job_count"] > 0:
-        amount = round(usage["job_count"] * pricing.flat_fee_per_job_cents)
-        items.append({
-            "description": "Per-job platform fee",
-            "quantity": usage["job_count"],
-            "unit": "job",
-            "unit_price_cents": pricing.flat_fee_per_job_cents,
-            "amount_cents": int(amount),
-        })
+        items.append(_line("Per-job platform fee", usage["job_count"], "job", pricing.flat_fee_per_job_cents))
     return items
+
+
+def with_rounding_adjustment(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Make the invoice total the exact usage rounded ONCE, not the sum of separately rounded lines.
+
+    Rounding every line on its own can lose (or invent) several cents, and at GCON's per-second and per-token
+    rates it can turn a small but real bill into $0.00. Any difference between the two is shown as its own
+    'Rounding adjustment' line, so the lines always add up to the total and nothing is hidden."""
+    if not items:
+        return items
+    target = _cents(sum(item.get("exact_cents", item["amount_cents"]) for item in items))
+    diff = target - sum(item["amount_cents"] for item in items)
+    if diff == 0:
+        return items
+    return items + [{"description": "Rounding adjustment", "quantity": 1, "unit": "adjustment",
+                     "unit_price_cents": 0, "amount_cents": diff, "exact_cents": float(diff)}]
+
+
+# ---------------------------------------------------------------
+# Billing periods
+# ---------------------------------------------------------------
+
+def normalize_period(
+    period_start: Any, period_end: Any, now: Optional[datetime] = None, require_ended: bool = True
+) -> Tuple[str, str]:
+    """A billing period as canonical UTC ISO strings (so '2026-09-01', '2026-09-01T00:00:00Z' and
+    '2026-09-01T00:00:00+00:00' are the one period), or ValueError if it can't be invoiced.
+
+    It must run forwards, span at most MAX_PREVIEW_DAYS, and have ENDED: invoicing a period that is still running
+    would leave out everything that happens before it closes."""
+    start = _parse_instant(period_start, "period_start")
+    end = _parse_instant(period_end, "period_end")
+    if end <= start:
+        raise ValueError("period_end must be after period_start.")
+    if end - start > timedelta(days=MAX_PREVIEW_DAYS):
+        raise ValueError(f"A billing period can span at most {MAX_PREVIEW_DAYS} days.")
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    if require_ended and end > now:
+        raise ValueError(
+            f"This billing period has not ended yet (it ends {end.isoformat()}). Invoice it once it has ended, "
+            "so no usage is left out."
+        )
+    return start.isoformat(), end.isoformat()
+
+
+def _period_content(
+    control_plane: ControlPlane, org_id: str, start_iso: str, end_iso: str, pricing: PricingConfig,
+    receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Usage and line items for one org and period. The ONE place that computes them, used by both the
+    preview and the invoice, so the two can never disagree."""
+    jobs = _jobs_for_period(control_plane, org_id, start_iso, end_iso)
+    receipts = _receipts_for_period(control_plane, org_id, start_iso, end_iso)
+    valid_receipts, rejected = validate_receipts(receipts, receipt_validator)
+    measured = measure_jobs(jobs, org_id, _job_nodes(control_plane, [j["job_id"] for j in jobs]) if jobs else {},
+                            _node_orgs(control_plane) if jobs else {})
+    excluded = {**measured.pop("excluded"), **rejected}
+    usage = {**measured, **compute_receipt_usage_totals(valid_receipts), "excluded": excluded}
+    return usage, with_rounding_adjustment(build_line_items(usage, pricing))
 
 
 def generate_invoice(
@@ -234,25 +405,33 @@ def generate_invoice(
     period_start: str,
     period_end: str,
     pricing: Optional[PricingConfig] = None,
-) -> Dict[str, Any]:
+    *,
+    receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    now: Optional[datetime] = None,
+    skip_empty: bool = False,
+) -> Optional[Dict[str, Any]]:
     """
-    Idempotent: re-calling this for a period that already has an
-    invoice (see `InvoiceRepository.create`'s UNIQUE constraint)
-    returns the existing invoice unchanged rather than double-billing
-    -- generating a draft invoice never itself attempts a charge (see
-    `gcon.billing.providers` for that step), so this is safe to run
-    speculatively/repeatedly (e.g. from a scheduled job) without
-    financial consequences.
+    Idempotent: re-calling this for a period that already has an invoice returns the existing invoice
+    unchanged rather than double-billing, however the period was spelled. Generating a draft never attempts a
+    charge (see `gcon.billing.providers`), so it is safe to run speculatively or from a scheduled job.
+
+    The period must have ended and must not overlap any invoice the organization already has (ValueError, or
+    InvoiceOverlapError, otherwise). `skip_empty=True` creates nothing and returns None when the period has no
+    billable usage. Pass `receipt_validator` (see make_receipt_validator) so only receipts whose signatures check
+    out are billed.
     """
+    start_iso, end_iso = normalize_period(period_start, period_end, now=now)
     pricing = pricing or load_pricing(control_plane)
-    jobs = _jobs_for_period(control_plane, org_id, period_start, period_end)
-    receipts = _receipts_for_period(control_plane, org_id, period_start, period_end)
-    usage = {**compute_usage_totals(jobs), **compute_receipt_usage_totals(receipts)}
-    line_items = build_line_items(usage, pricing)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator)
+    if skip_empty and not line_items:
+        return None
+    if any(usage["excluded"].values()):
+        _log.warning("invoice for %s %s..%s set aside invalid usage: %s", org_id, start_iso, end_iso,
+                     {k: v for k, v in usage["excluded"].items() if v})
     return control_plane.invoices.create(
         org_id=org_id,
-        period_start=period_start,
-        period_end=period_end,
+        period_start=start_iso,
+        period_end=end_iso,
         currency=pricing.currency,
         line_items=line_items,
     )
@@ -264,10 +443,11 @@ def generate_invoices_for_all_orgs(
     period_start: str,
     period_end: str,
     pricing: Optional[PricingConfig] = None,
+    **kwargs: Any,
 ) -> List[Dict[str, Any]]:
     pricing = pricing or load_pricing(control_plane)
     return [
-        generate_invoice(control_plane, org_id, period_start, period_end, pricing=pricing)
+        generate_invoice(control_plane, org_id, period_start, period_end, pricing=pricing, **kwargs)
         for org_id in org_ids
     ]
 
@@ -354,6 +534,7 @@ def preview_usage(
     period_end: Optional[str] = None,
     pricing: Optional[PricingConfig] = None,
     now: Optional[datetime] = None,
+    receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> Dict[str, Any]:
     """
     What an invoice for this org and period would contain right now, computed
@@ -384,10 +565,7 @@ def preview_usage(
 
     pricing = pricing or load_pricing(control_plane)
     start_iso, end_iso = start.isoformat(), end.isoformat()
-    jobs = _jobs_for_period(control_plane, org_id, start_iso, end_iso)
-    receipts = _receipts_for_period(control_plane, org_id, start_iso, end_iso)
-    usage = {**compute_usage_totals(jobs), **compute_receipt_usage_totals(receipts)}
-    line_items = build_line_items(usage, pricing)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator)
     return {
         "period_start": start_iso,
         "period_end": end_iso,
