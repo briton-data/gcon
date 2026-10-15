@@ -3757,14 +3757,59 @@ async function setupStakingTab() {
 }
 
 // ---------------------------------------------------------------
-// Billing — usage-based invoices (see gcon.billing.invoicing).
+// Billing — usage-based invoices (see gcon.billing.invoicing), the monthly
+// automatic run (gcon.billing.automation) and the price list.
 // ---------------------------------------------------------------
-async function loadBillingOrgOptions() {
-    const select = document.getElementById("billing-gen-org");
+// Labels for the price fields the API returns. A field the API adds later still shows (under its own name).
+const BILLING_PRICE_LABELS = {
+    gpu_second_cents: "GPU-second",
+    own_worker_gpu_second_cents: "GPU-second on customer's own workers",
+    llm_input_token_cents: "LLM input token",
+    llm_output_token_cents: "LLM output token",
+    flat_fee_per_job_cents: "Per job",
+    verification_check_cents: "Verification check",
+    assurance_decision_cents: "Assurance decision",
+    receipt_cents: "Receipt",
+};
+let billingOrgNames = {};
+let billingInvoices = [];
+let billingPricing = null;
+let billingStatus = null;
+
+function billingFmtDate(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? "--" : d.toLocaleString();
+}
+
+function billingPeriodLabel(inv) {
+    const start = new Date(inv.period_start), end = new Date(inv.period_end);
+    if (isNaN(start) || isNaN(end)) return `${inv.period_start} → ${inv.period_end}`;
+    const wholeMonth = start.getUTCDate() === 1 && end.getUTCDate() === 1 && start.getUTCHours() === 0 && end.getUTCHours() === 0
+        && ((end.getUTCFullYear() * 12 + end.getUTCMonth()) - (start.getUTCFullYear() * 12 + start.getUTCMonth())) === 1;
+    if (wholeMonth) return start.toLocaleString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+    return `${inv.period_start.slice(0, 10)} → ${inv.period_end.slice(0, 10)}`;
+}
+
+function billingMoney(cents, currency) {
+    return `${(Number(cents) / 100).toFixed(2)} ${(currency || "").toUpperCase()}`;
+}
+
+// Fill a <select> without losing what the person had picked while the tab refreshes.
+function billingFillSelect(select, optionsHtml) {
     if (!select) return;
+    const keep = select.value;
+    select.innerHTML = optionsHtml;
+    if (keep && Array.from(select.options).some(o => o.value === keep)) select.value = keep;
+}
+
+async function loadBillingOrgOptions() {
     try {
         const orgs = await fetchJson("/management/organizations");
-        select.innerHTML = orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+        billingOrgNames = {};
+        orgs.forEach(o => { billingOrgNames[o.org_id] = o.name; });
+        const options = orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+        billingFillSelect(document.getElementById("billing-gen-org"), options);
+        billingFillSelect(document.getElementById("billing-filter-org"), `<option value="">All organizations</option>${options}`);
     } catch (err) { /* non-fatal */ }
 }
 
@@ -3773,51 +3818,147 @@ function invoiceStatusBadge(status) {
     return `<span class="badge bg-${map[status] || "secondary"}">${escapeHtml(status)}</span>`;
 }
 
+function renderBillingStatus() {
+    const st = billingStatus;
+    if (!st || !st.available) {
+        setText("billing-auto-enabled", "not available");
+        return;
+    }
+    const badge = (on, yes, no, yesCls, noCls) => `<span class="badge bg-${on ? yesCls : noCls}">${escapeHtml(on ? yes : no)}</span>`;
+    document.getElementById("billing-auto-enabled").innerHTML = badge(st.enabled, "On", "Off", "success", "secondary") +
+        (st.running ? ` <span class="badge bg-info">running now</span>` : "");
+    document.getElementById("billing-auto-finalize").innerHTML = st.auto_finalize
+        ? badge(true, "On", "", "warning", "")
+        : `<span class="badge bg-secondary">Off</span> <span class="text-secondary small">drafts wait for review</span>`;
+    document.getElementById("billing-provider").innerHTML = st.payment_provider
+        ? `<span class="badge bg-${st.moves_real_money ? "success" : "warning"}">${escapeHtml(st.payment_provider)}</span>` : "--";
+    setText("billing-next-run", st.enabled && st.next_run_at ? billingFmtDate(st.next_run_at) : (st.enabled ? "soon" : "--"));
+
+    const last = st.last_run;
+    const lastEl = document.getElementById("billing-last-run");
+    if (!last) {
+        lastEl.textContent = "never";
+    } else {
+        const parts = [`${last.generated} created`, `${last.already_invoiced} already invoiced`];
+        if (last.finalized) parts.push(`${last.finalized} charged`);
+        if (last.overlap_skipped) parts.push(`${last.overlap_skipped} skipped (overlap)`);
+        if (last.failed) parts.push(`${last.failed} failed`);
+        lastEl.innerHTML = `${escapeHtml(billingFmtDate(last.finished_at || last.started_at))} <span class="text-secondary small">(${escapeHtml(last.trigger)}; ${escapeHtml((last.months || []).join(", "))}) — ${escapeHtml(parts.join(", "))}</span>`;
+    }
+
+    const warn = document.getElementById("billing-provider-warn");
+    if (!st.payment_provider_ready) {
+        warn.textContent = `The "${st.payment_provider}" payment provider is selected but not configured, so charging an invoice will fail until it is.`;
+        warn.classList.remove("d-none");
+    } else if (!st.moves_real_money) {
+        warn.textContent = "The mock payment provider is in use: an invoice marked paid here has not moved any money. Configure a real provider before relying on paid status.";
+        warn.classList.remove("d-none");
+    } else {
+        warn.classList.add("d-none");
+    }
+    const errs = document.getElementById("billing-last-errors");
+    if (last && last.errors && last.errors.length) {
+        errs.innerHTML = `<strong>The last run skipped some invoices:</strong><ul class="mb-0">${last.errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
+        errs.classList.remove("d-none");
+    } else {
+        errs.classList.add("d-none");
+    }
+}
+
+function renderBillingPricing() {
+    const grid = document.getElementById("billing-pricing-grid");
+    if (!grid || !billingPricing) return;
+    const fields = Object.keys(billingPricing).filter(k => k !== "currency");
+    grid.innerHTML = fields.map(k => {
+        const v = billingPricing[k];
+        const label = escapeHtml(BILLING_PRICE_LABELS[k] || k);
+        return `<div class="col-auto"><span class="text-secondary small">${label}:</span> <span>${v === null ? "same as GPU-second" : `${escapeHtml(String(v))}¢`}</span></div>`;
+    }).join("") + `<div class="col-auto"><span class="text-secondary small">Currency:</span> <span>${escapeHtml((billingPricing.currency || "").toUpperCase())}</span></div>`;
+}
+
+function renderBillingPricingEditor() {
+    const grid = document.getElementById("billing-pricing-grid");
+    const fields = Object.keys(billingPricing).filter(k => k !== "currency");
+    grid.innerHTML = fields.map(k => {
+        const v = billingPricing[k];
+        const ownRate = k === "own_worker_gpu_second_cents";
+        return `<div class="col-12 col-md-4">
+            <label class="form-label small mb-1" for="billing-price-${k}">${escapeHtml(BILLING_PRICE_LABELS[k] || k)} (¢)</label>
+            <input type="number" min="0" step="any" class="form-control form-control-sm billing-price-input" id="billing-price-${k}" data-field="${k}"
+                   value="${v === null ? "" : escapeHtml(String(v))}" ${ownRate ? 'placeholder="blank = same as GPU-second"' : ""}>
+        </div>`;
+    }).join("");
+}
+
+function billingSetEditing(on) {
+    document.getElementById("billing-edit-prices-btn").classList.toggle("d-none", on);
+    document.getElementById("billing-save-prices-btn").classList.toggle("d-none", !on);
+    document.getElementById("billing-cancel-prices-btn").classList.toggle("d-none", !on);
+    setText("billing-pricing-hint", on ? "Changes apply to invoices generated from now on; existing invoices are not changed. A price set by an environment variable can't be changed here." : "");
+    if (on) renderBillingPricingEditor(); else renderBillingPricing();
+}
+
+function renderBillingInvoices() {
+    const body = document.getElementById("billing-invoices-body");
+    if (!body) return;
+    const orgFilter = document.getElementById("billing-filter-org").value;
+    const statusFilter = document.getElementById("billing-filter-status").value;
+    const rows = billingInvoices.filter(i => (!orgFilter || i.org_id === orgFilter) && (!statusFilter || i.status === statusFilter));
+    document.getElementById("billing-finalize-all-btn").disabled = !billingInvoices.some(i => i.status === "draft");
+    if (rows.length === 0) {
+        body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">${billingInvoices.length ? "No invoices match this filter." : "No invoices yet."}</td></tr>`;
+        return;
+    }
+    body.innerHTML = rows.map(inv => {
+        const lines = (inv.line_items || []).map(li => `<tr>
+                <td>${escapeHtml(li.description)}</td>
+                <td class="text-end">${escapeHtml(String(li.quantity))} ${escapeHtml(li.unit)}</td>
+                <td class="text-end">${escapeHtml(String(li.unit_price_cents))}¢</td>
+                <td class="text-end">${escapeHtml(billingMoney(li.amount_cents, inv.currency))}</td></tr>`).join("");
+        const detail = `<tr class="d-none billing-detail-row" data-detail-for="${escapeHtml(inv.invoice_id)}"><td colspan="6">
+                ${lines ? `<table class="table table-sm mb-2"><thead><tr><th>Charge</th><th class="text-end">Quantity</th><th class="text-end">Unit price</th><th class="text-end">Amount</th></tr></thead><tbody>${lines}</tbody></table>`
+                        : `<div class="text-secondary">No billable usage in this period.</div>`}
+                <div class="text-secondary small">Created ${escapeHtml(billingFmtDate(inv.created_at))}${inv.finalized_at ? ` · finalized ${escapeHtml(billingFmtDate(inv.finalized_at))}` : ""}${inv.provider ? ` · provider ${escapeHtml(inv.provider)}` : ""}${inv.provider_error ? ` · ${escapeHtml(inv.provider_error)}` : ""}</div>
+            </td></tr>`;
+        return `<tr>
+                <td><code>${escapeHtml(inv.invoice_id.slice(0, 12))}</code></td>
+                <td>${escapeHtml(billingOrgNames[inv.org_id] || inv.org_id)}</td>
+                <td>${escapeHtml(billingPeriodLabel(inv))}</td>
+                <td>${escapeHtml(billingMoney(inv.amount_cents, inv.currency))}</td>
+                <td>${invoiceStatusBadge(inv.status)}</td>
+                <td class="text-nowrap">
+                    <button class="btn btn-sm btn-outline-secondary invoice-view-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Details</button>
+                    ${inv.status === "draft" ? `<button class="btn btn-sm btn-outline-primary invoice-finalize-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Finalize</button>` : ""}
+                </td>
+            </tr>${detail}`;
+    }).join("");
+}
+
 async function loadBillingTab() {
     try {
-        const [pricing, invoices] = await Promise.all([
+        const [pricing, invoices, status] = await Promise.all([
             fetchJson("/management/billing/pricing"),
             fetchJson("/management/billing/invoices"),
+            fetchJson("/management/billing/status"),
         ]);
-
-        setText("billing-price-gpu", `${pricing.gpu_second_cents}¢`);
-        setText("billing-price-in", `${pricing.llm_input_token_cents}¢`);
-        setText("billing-price-out", `${pricing.llm_output_token_cents}¢`);
-        setText("billing-price-currency", (pricing.currency || "").toUpperCase());
-
+        billingPricing = pricing;
+        billingInvoices = invoices;
+        billingStatus = status;
         await loadBillingOrgOptions();
-
-        const body = document.getElementById("billing-invoices-body");
-        if (body) {
-            body.innerHTML = invoices.length === 0
-                ? `<tr><td colspan="6" class="text-center text-secondary">No invoices yet.</td></tr>`
-                : invoices.map(inv => `
-                    <tr>
-                        <td><code>${escapeHtml(inv.invoice_id.slice(0, 12))}</code></td>
-                        <td>${escapeHtml(inv.org_id)}</td>
-                        <td>${inv.period_start} &rarr; ${inv.period_end}</td>
-                        <td>${(inv.amount_cents / 100).toFixed(2)} ${(inv.currency || "").toUpperCase()}</td>
-                        <td>${invoiceStatusBadge(inv.status)}</td>
-                        <td>
-                            ${inv.status === "draft"
-                                ? `<button class="btn btn-sm btn-outline-primary invoice-finalize-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Finalize</button>`
-                                : ""}
-                        </td>
-                    </tr>
-                `).join("");
-
-            document.querySelectorAll(".invoice-finalize-btn").forEach(btn => {
-                btn.addEventListener("click", async () => {
-                    try {
-                        await fetchJson(`/management/billing/invoices/${btn.dataset.invoiceId}/finalize`, { method: "POST" });
-                        showToast("Invoice finalized.");
-                        await loadBillingTab();
-                    } catch (err) {
-                        console.error("Failed to finalize invoice:", err);
-                        showToast(err.message || "Failed to finalize invoice.", true);
-                    }
-                });
-            });
+        renderBillingStatus();
+        if (!document.getElementById("billing-save-prices-btn").classList.contains("d-none")) {
+            /* the person is editing prices: leave their inputs alone */
+        } else {
+            renderBillingPricing();
+        }
+        renderBillingInvoices();
+        // Only whole months that have ended can be invoiced: offer up to last month.
+        const monthInput = document.getElementById("billing-gen-month");
+        if (monthInput && !monthInput.max) {
+            const now = new Date();
+            const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+            monthInput.max = `${last.getUTCFullYear()}-${String(last.getUTCMonth() + 1).padStart(2, "0")}`;
+            monthInput.value = monthInput.max;
         }
     } catch (err) {
         console.error("Failed to load billing data:", err);
@@ -3825,31 +3966,115 @@ async function loadBillingTab() {
     }
 }
 
+async function billingPost(path, body) {
+    return fetchJson(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+    });
+}
+
 async function setupBillingTab() {
-    const generateBtn = document.getElementById("billing-generate-btn");
-    if (generateBtn) {
-        generateBtn.addEventListener("click", async () => {
-            const orgId = document.getElementById("billing-gen-org").value;
-            const start = document.getElementById("billing-gen-start").value;
-            const end = document.getElementById("billing-gen-end").value;
-            if (!orgId || !start || !end) {
-                showToast("Pick an org and a start/end date.", true);
-                return;
-            }
-            try {
-                await fetchJson("/management/billing/invoices/generate", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ org_id: orgId, period_start: start, period_end: end }),
-                });
-                showToast("Invoice generated.");
-                await loadBillingTab();
-            } catch (err) {
-                console.error("Failed to generate invoice:", err);
-                showToast(err.message || "Failed to generate invoice.", true);
-            }
+    const byId = id => document.getElementById(id);
+
+    byId("billing-generate-btn")?.addEventListener("click", async () => {
+        const orgId = byId("billing-gen-org").value;
+        const month = byId("billing-gen-month").value;           // YYYY-MM
+        if (!orgId || !month) { showToast("Pick an organization and a month.", true); return; }
+        const [y, m] = month.split("-").map(Number);
+        const iso = (yy, mm) => `${yy}-${String(mm).padStart(2, "0")}-01`;
+        const next = m === 12 ? [y + 1, 1] : [y, m + 1];
+        try {
+            await billingPost("/management/billing/invoices/generate", {
+                org_id: orgId, period_start: iso(y, m), period_end: iso(next[0], next[1]),
+            });
+            showToast("Invoice generated.");
+            await loadBillingTab();
+        } catch (err) {
+            console.error("Failed to generate invoice:", err);
+            showToast(err.message || "Failed to generate invoice.", true);
+        }
+    });
+
+    byId("billing-run-btn")?.addEventListener("click", async () => {
+        const btn = byId("billing-run-btn");
+        btn.disabled = true;
+        try {
+            const out = await billingPost("/management/billing/run", {});
+            showToast(`Invoicing done: ${out.generated} created, ${out.already_invoiced} already invoiced`
+                + (out.overlap_skipped ? `, ${out.overlap_skipped} skipped for overlap` : "")
+                + (out.failed ? `, ${out.failed} failed` : "") + ".", out.failed > 0);
+            await loadBillingTab();
+        } catch (err) {
+            console.error("Invoicing run failed:", err);
+            showToast(err.message || "Invoicing run failed.", true);
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    byId("billing-finalize-all-btn")?.addEventListener("click", async () => {
+        const orgFilter = byId("billing-filter-org").value;
+        const drafts = billingInvoices.filter(i => i.status === "draft" && (!orgFilter || i.org_id === orgFilter)).length;
+        if (drafts === 0) { showToast("There are no draft invoices to finalize.", true); return; }
+        const real = billingStatus && billingStatus.moves_real_money;
+        const scope = orgFilter ? `${drafts} draft invoice(s) for ${billingOrgNames[orgFilter] || orgFilter}` : `all ${drafts} draft invoice(s)`;
+        if (!window.confirm(`Finalize ${scope}?` + (real ? " Customers will be charged." : " (Mock payment provider: no money moves.)"))) return;
+        try {
+            const out = await billingPost("/management/billing/invoices/finalize-drafts", orgFilter ? { org_id: orgFilter } : {});
+            showToast(`${out.paid} paid, ${out.failed} failed (of ${out.drafts} drafts).`, out.failed > 0);
+            await loadBillingTab();
+        } catch (err) {
+            console.error("Failed to finalize drafts:", err);
+            showToast(err.message || "Failed to finalize drafts.", true);
+        }
+    });
+
+    byId("billing-invoices-body")?.addEventListener("click", async (event) => {
+        const view = event.target.closest(".invoice-view-btn");
+        if (view) {
+            document.querySelector(`.billing-detail-row[data-detail-for="${CSS.escape(view.dataset.invoiceId)}"]`)?.classList.toggle("d-none");
+            return;
+        }
+        const fin = event.target.closest(".invoice-finalize-btn");
+        if (!fin) return;
+        fin.disabled = true;
+        try {
+            const out = await fetchJson(`/management/billing/invoices/${fin.dataset.invoiceId}/finalize`, { method: "POST" });
+            showToast(out.status === "paid" ? "Invoice finalized." : `Invoice ${out.status}${out.provider_error ? `: ${out.provider_error}` : "."}`, out.status !== "paid");
+            await loadBillingTab();
+        } catch (err) {
+            console.error("Failed to finalize invoice:", err);
+            showToast(err.message || "Failed to finalize invoice.", true);
+            fin.disabled = false;
+        }
+    });
+
+    byId("billing-filter-org")?.addEventListener("change", renderBillingInvoices);
+    byId("billing-filter-status")?.addEventListener("change", renderBillingInvoices);
+
+    byId("billing-edit-prices-btn")?.addEventListener("click", () => { if (billingPricing) billingSetEditing(true); });
+    byId("billing-cancel-prices-btn")?.addEventListener("click", () => billingSetEditing(false));
+    byId("billing-save-prices-btn")?.addEventListener("click", async () => {
+        const updates = {};
+        document.querySelectorAll(".billing-price-input").forEach(input => {
+            const field = input.dataset.field;
+            const raw = input.value.trim();
+            const current = billingPricing[field];
+            if (raw === "") { if (current !== null) updates[field] = null; return; }
+            const num = Number(raw);
+            if (current !== num) updates[field] = num;
         });
-    }
+        if (Object.keys(updates).length === 0) { billingSetEditing(false); return; }
+        try {
+            billingPricing = await billingPost("/management/billing/pricing", updates);
+            showToast("Prices saved.");
+            billingSetEditing(false);
+        } catch (err) {
+            console.error("Failed to save prices:", err);
+            showToast(err.message || "Failed to save prices.", true);
+        }
+    });
 }
 
 // ---------------------------------------------------------------

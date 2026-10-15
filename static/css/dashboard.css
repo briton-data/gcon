@@ -132,6 +132,9 @@
 
 :root .btn-primary {
     background: var(--gradient-brand);
+    /* The light theme sets --gradient-brand to "none", which used to leave primary buttons with no background at
+       all (white text on white). The solid colour sits under the gradient, so the dark theme looks as before. */
+    background-color: var(--primary);
     border: none;
 }
 

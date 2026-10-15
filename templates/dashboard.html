@@ -834,33 +834,71 @@
 
             <!-- Billing -->
             <div class="gcon-tab d-none" id="tab-billing">
+                <!-- Automatic invoicing -->
                 <div class="gcon-panel mb-3">
-                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-tags me-2"></i>Current Pricing</h5></div>
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-calendar-check me-2"></i>Automatic Invoicing</h5>
+                        <button class="btn btn-sm btn-primary" id="billing-run-btn" title="Create a draft invoice for every organization with usage in the last complete months">
+                            <i class="bi bi-play-fill me-1"></i>Run invoicing now
+                        </button>
+                    </div>
                     <div class="gcon-panel-body">
-                        <div class="row g-3" id="billing-pricing-row">
-                            <div class="col-auto"><span class="text-secondary small">GPU-second:</span> <span id="billing-price-gpu">--</span></div>
-                            <div class="col-auto"><span class="text-secondary small">LLM input token:</span> <span id="billing-price-in">--</span></div>
-                            <div class="col-auto"><span class="text-secondary small">LLM output token:</span> <span id="billing-price-out">--</span></div>
-                            <div class="col-auto"><span class="text-secondary small">Currency:</span> <span id="billing-price-currency">--</span></div>
+                        <div class="row g-3" id="billing-auto-row">
+                            <div class="col-auto"><span class="text-secondary small">Monthly run:</span> <span id="billing-auto-enabled">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Charge drafts automatically:</span> <span id="billing-auto-finalize">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Payment provider:</span> <span id="billing-provider">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Next run:</span> <span id="billing-next-run">--</span></div>
+                            <div class="col-auto"><span class="text-secondary small">Last run:</span> <span id="billing-last-run">--</span></div>
                         </div>
+                        <div id="billing-provider-warn" class="alert alert-warning mt-3 mb-0 d-none"></div>
+                        <div id="billing-last-errors" class="alert alert-warning mt-3 mb-0 d-none"></div>
                     </div>
                 </div>
 
+                <!-- Pricing -->
+                <div class="gcon-panel mb-3">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h5 class="mb-0"><i class="bi bi-tags me-2"></i>Pricing</h5>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-primary" id="billing-edit-prices-btn">Edit prices</button>
+                            <button class="btn btn-sm btn-primary d-none" id="billing-save-prices-btn">Save prices</button>
+                            <button class="btn btn-sm btn-outline-secondary d-none" id="billing-cancel-prices-btn">Cancel</button>
+                        </div>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="row g-3" id="billing-pricing-grid"><div class="col-12 text-secondary">Loading...</div></div>
+                        <div class="text-secondary small mt-2" id="billing-pricing-hint"></div>
+                    </div>
+                </div>
+
+                <!-- Invoices -->
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h5 class="mb-0"><i class="bi bi-receipt me-2"></i>Invoices</h5>
                         <div class="d-flex gap-2 flex-wrap">
-                            <select class="form-select form-select-sm" id="billing-gen-org" style="width:160px;"></select>
-                            <input type="date" class="form-control form-control-sm" id="billing-gen-start" style="width:150px;">
-                            <input type="date" class="form-control form-control-sm" id="billing-gen-end" style="width:150px;">
-                            <button class="btn btn-sm btn-primary" id="billing-generate-btn">Generate Invoice</button>
+                            <select class="form-select form-select-sm" id="billing-filter-org" style="width:160px;" aria-label="Filter by organization"></select>
+                            <select class="form-select form-select-sm" id="billing-filter-status" style="width:130px;" aria-label="Filter by status">
+                                <option value="">All statuses</option>
+                                <option value="draft">Draft</option>
+                                <option value="paid">Paid</option>
+                                <option value="failed">Failed</option>
+                                <option value="void">Void</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-primary" id="billing-finalize-all-btn">Finalize all drafts</button>
                         </div>
                     </div>
                     <div class="gcon-panel-body">
+                        <div class="d-flex gap-2 flex-wrap align-items-center mb-3">
+                            <span class="text-secondary small">Generate one:</span>
+                            <select class="form-select form-select-sm" id="billing-gen-org" style="width:160px;" aria-label="Organization"></select>
+                            <input type="month" class="form-control form-control-sm" id="billing-gen-month" style="width:150px;" aria-label="Billing month">
+                            <button class="btn btn-sm btn-primary" id="billing-generate-btn">Generate invoice</button>
+                            <span class="text-secondary small">Only months that have ended can be invoiced, and a month can't be invoiced twice.</span>
+                        </div>
                         <div class="table-responsive">
                             <table class="table gcon-table align-middle">
                                 <thead>
-                                    <tr><th>Invoice</th><th>Org</th><th>Period</th><th>Amount</th><th>Status</th><th>Action</th></tr>
+                                    <tr><th>Invoice</th><th>Organization</th><th>Period</th><th>Amount</th><th>Status</th><th>Action</th></tr>
                                 </thead>
                                 <tbody id="billing-invoices-body">
                                     <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
