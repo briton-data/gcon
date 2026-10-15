@@ -437,3 +437,21 @@ class TestStaffBillingRoutes:
         out = client.post("/management/billing/invoices/finalize-drafts", json={}).json()
         assert out["drafts"] == 2 and out["paid"] == 2 and out["failed"] == 0
         assert client.post("/management/billing/invoices/finalize-drafts", json={}).json()["drafts"] == 0
+
+
+# ------------------------------------------------------------------ the dashboard can't run a stale script
+class TestStaticAssetVersion:
+    def test_pages_reference_static_files_with_a_version(self, staff):
+        import re
+        client, _ = staff
+        html = client.get("/login").text
+        assert re.search(r"/static/css/dashboard\.css\?v=[0-9a-f]{10}\b", html)
+
+    def test_the_version_changes_when_a_static_file_changes(self, tmp_path):
+        from gcon.dashboard.web_server import WebServer
+        (tmp_path / "dashboard.js").write_text("one")
+        first = WebServer._asset_version(str(tmp_path))
+        assert first == WebServer._asset_version(str(tmp_path))          # stable while nothing changes
+        (tmp_path / "dashboard.js").write_text("two")
+        assert WebServer._asset_version(str(tmp_path)) != first
+        assert WebServer._asset_version(str(tmp_path / "missing")) == "0"
