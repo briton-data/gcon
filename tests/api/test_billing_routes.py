@@ -82,7 +82,7 @@ class TestPricing:
         assert set(body) == {
             "currency", "gpu_second_cents", "llm_input_token_cents", "llm_output_token_cents",
             "flat_fee_per_job_cents", "verification_check_cents", "assurance_decision_cents",
-            "receipt_cents",
+            "receipt_cents", "own_worker_gpu_second_cents",
         }
 
 

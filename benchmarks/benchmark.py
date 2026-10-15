@@ -247,6 +247,7 @@ def serve(args):
     # make a big run lose records (same for receipts). Lift both for the measurement and say so in the report.
     os.environ.setdefault("GCON_MAX_JOBS_IN_MEMORY", str(args.max_jobs_in_memory))
     os.environ.setdefault("GCON_MAX_RECEIPTS_IN_MEMORY", str(args.max_jobs_in_memory))
+    os.environ.setdefault("GCON_BILLING_AUTO_INVOICE", "0")       # the monthly invoicing thread is not part of what is being measured
 
     from gcon.cluster.coordinator import GCONCoordinator
     from gcon.dashboard.presentation import PresentationLayer
@@ -264,6 +265,8 @@ def serve(args):
     co = GCONCoordinator(control_plane=cp)
     mgmt = ManagementLayer(coordinator=co, db_path=os.path.join(args.workdir, "mgmt.db"))
     pres = PresentationLayer(co)
+    if args.sync != "full":                      # the management DB (keys, users, audit) has its own connection and its own sync mode
+        mgmt.db._conn.execute(f"PRAGMA synchronous={args.sync.upper()}")
 
     rng = random.Random(args.seed)
     job_times = {}            # job_id -> (node_id, start_wall, end_wall)
@@ -1121,7 +1124,8 @@ def parser():
     b.add_argument("--login-rps", type=float, default=2.0, help="logins per second (slow password hashing: CPU load) (default 2)")
     s = p.add_argument_group("server")
     s.add_argument("--api-threads", type=int, default=40, help="threads the API may use for requests (the framework default is 40)")
-    s.add_argument("--sync", default="full", choices=["full", "normal"], help="SQLite synchronous mode; 'full' is what ships (default)")
+    s.add_argument("--sync", default="full", choices=["full", "normal"], help="SQLite synchronous mode for BOTH databases (control plane and management); 'full' is what ships (default). "
+                                                                   "'normal' skips most fsyncs: use it to see how much of the time is disk syncs")
     s.add_argument("--hb-interval", type=float, default=2.0, help="seconds between each node's heartbeat (default 2)")
     r = p.add_argument_group("run control")
     r.add_argument("--drain-timeout", type=float, default=180.0, help="seconds to wait for the queue to drain after the last submit")
