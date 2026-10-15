@@ -3775,6 +3775,7 @@ let billingOrgNames = {};
 let billingInvoices = [];
 let billingPricing = null;
 let billingStatus = null;
+let billingInvoicesFailed = false;
 
 function billingFmtDate(iso) {
     const d = new Date(iso);
@@ -3821,7 +3822,8 @@ function invoiceStatusBadge(status) {
 function renderBillingStatus() {
     const st = billingStatus;
     if (!st || !st.available) {
-        setText("billing-auto-enabled", "not available");
+        setText("billing-auto-enabled", "unavailable");
+        ["billing-auto-finalize", "billing-provider", "billing-next-run", "billing-last-run"].forEach(id => setText(id, "--"));
         return;
     }
     const badge = (on, yes, no, yesCls, noCls) => `<span class="badge bg-${on ? yesCls : noCls}">${escapeHtml(on ? yes : no)}</span>`;
@@ -3906,7 +3908,8 @@ function renderBillingInvoices() {
     const rows = billingInvoices.filter(i => (!orgFilter || i.org_id === orgFilter) && (!statusFilter || i.status === statusFilter));
     document.getElementById("billing-finalize-all-btn").disabled = !billingInvoices.some(i => i.status === "draft");
     if (rows.length === 0) {
-        body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">${billingInvoices.length ? "No invoices match this filter." : "No invoices yet."}</td></tr>`;
+        const msg = billingInvoicesFailed ? "Invoices couldn't be loaded." : (billingInvoices.length ? "No invoices match this filter." : "No invoices yet.");
+        body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">${msg}</td></tr>`;
         return;
     }
     body.innerHTML = rows.map(inv => {
@@ -3935,34 +3938,49 @@ function renderBillingInvoices() {
 }
 
 async function loadBillingTab() {
-    try {
-        const [pricing, invoices, status] = await Promise.all([
-            fetchJson("/management/billing/pricing"),
-            fetchJson("/management/billing/invoices"),
-            fetchJson("/management/billing/status"),
-        ]);
-        billingPricing = pricing;
-        billingInvoices = invoices;
-        billingStatus = status;
-        await loadBillingOrgOptions();
-        renderBillingStatus();
-        if (!document.getElementById("billing-save-prices-btn").classList.contains("d-none")) {
-            /* the person is editing prices: leave their inputs alone */
+    // Each part loads on its own: if one request fails (say the coordinator is older than this page and has no
+    // /management/billing/status yet) the others still show, and the failure is named instead of leaving the tab blank.
+    const parts = [
+        ["prices", "/management/billing/pricing"],
+        ["invoices", "/management/billing/invoices"],
+        ["invoicing status", "/management/billing/status"],
+    ];
+    const settled = await Promise.allSettled(parts.map(([, url]) => fetchJson(url)));
+    const failed = [];
+    settled.forEach((res, i) => { if (res.status === "rejected") failed.push(`${parts[i][0]} (${res.reason && res.reason.message ? res.reason.message : "request failed"})`); });
+    const [pricingRes, invoicesRes, statusRes] = settled;
+
+    billingPricing = pricingRes.status === "fulfilled" ? pricingRes.value : null;
+    billingInvoices = invoicesRes.status === "fulfilled" ? invoicesRes.value : [];
+    billingInvoicesFailed = invoicesRes.status === "rejected";
+    billingStatus = statusRes.status === "fulfilled" ? statusRes.value : null;
+
+    const banner = document.getElementById("billing-load-error");
+    if (banner) {
+        if (failed.length) {
+            banner.innerHTML = `<strong>Couldn't load: ${escapeHtml(failed.join("; "))}.</strong> ` +
+                `If this says "Not Found", the coordinator is running an older version than this page: deploy the updated backend, then reload.`;
+            banner.classList.remove("d-none");
         } else {
-            renderBillingPricing();
+            banner.classList.add("d-none");
         }
-        renderBillingInvoices();
-        // Only whole months that have ended can be invoiced: offer up to last month.
-        const monthInput = document.getElementById("billing-gen-month");
-        if (monthInput && !monthInput.max) {
-            const now = new Date();
-            const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-            monthInput.max = `${last.getUTCFullYear()}-${String(last.getUTCMonth() + 1).padStart(2, "0")}`;
-            monthInput.value = monthInput.max;
-        }
-    } catch (err) {
-        console.error("Failed to load billing data:", err);
-        setConnectionStatus(false);
+    }
+
+    await loadBillingOrgOptions();
+    renderBillingStatus();
+    const editing = !document.getElementById("billing-save-prices-btn").classList.contains("d-none");
+    if (!editing) {
+        if (billingPricing) renderBillingPricing();
+        else document.getElementById("billing-pricing-grid").innerHTML = `<div class="col-12 text-secondary">Prices couldn't be loaded.</div>`;
+    }
+    renderBillingInvoices();
+    // Only whole months that have ended can be invoiced: offer up to last month.
+    const monthInput = document.getElementById("billing-gen-month");
+    if (monthInput && !monthInput.max) {
+        const now = new Date();
+        const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+        monthInput.max = `${last.getUTCFullYear()}-${String(last.getUTCMonth() + 1).padStart(2, "0")}`;
+        monthInput.value = monthInput.max;
     }
 }
 
