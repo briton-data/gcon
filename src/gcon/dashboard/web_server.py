@@ -59,6 +59,9 @@ class WebServer:
         self.app.add_middleware(SecurityHeadersMiddleware)
 
         self.templates = Jinja2Templates(directory="templates")
+        # Pages reference /static/... with ?v=<this>. It changes whenever a static file does, so after a deploy a
+        # browser (or an edge cache) can't keep running an old dashboard.js against the new page markup.
+        self.templates.env.globals["asset_version"] = self._asset_version("static")
         self.app.mount(
             "/static",
             StaticFiles(directory="static"),
@@ -105,6 +108,23 @@ class WebServer:
                 # seen by the nearest trusted hop.
                 return value.split(",")[0].strip()
         return request.client.host if request.client else None
+
+    @staticmethod
+    def _asset_version(directory):
+        import hashlib
+        if not os.path.isdir(directory):
+            return "0"
+        digest = hashlib.sha1()
+        try:
+            for root, _dirs, files in sorted(os.walk(directory)):
+                for name in sorted(files):
+                    path = os.path.join(root, name)
+                    digest.update(os.path.relpath(path, directory).encode("utf-8"))
+                    with open(path, "rb") as fh:
+                        digest.update(fh.read())
+        except OSError:
+            return "0"
+        return digest.hexdigest()[:10]
 
     def _register_routes(self):
         """
