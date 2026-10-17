@@ -482,14 +482,29 @@ version of this. For a production deployment today, that still means:
 
 ## Persistent Storage & Worker Enrollment
 
-**The coordinator needs persistent storage for two directories.** On a platform
+**The coordinator needs persistent storage for four locations.** On a platform
 whose filesystem is wiped on every deploy (Railway without a volume, a plain
 container), anything not on a volume is lost:
 
 | Directory | Setting | Holds |
 |---|---|---|
 | Certificate directory | `GCON_TLS_CERT_DIR` (default `keys/grpc`) | the certificate authority that every worker certificate is signed by, and the revocation list |
-| Data directory | `GCON_DATA_DIR` (default `data`) | the database: enrolled workers, enroll tokens, users, API keys, receipts |
+| Data directory | `GCON_DATA_DIR` (default `data`) | the databases: organizations, users, API keys and sessions (`gcon.db`), and enrolled workers, enroll tokens, jobs, receipts (`gcon_control_plane.db`) |
+| Receipt-signing key | `GCON_HMAC_KEY_PATH` (default `./keys/hmac_secret.key`) | the key that signs receipts; without it receipts already issued no longer verify |
+| Webhook-secret key | `GCON_SECRETS_KEY_PATH` (default `./keys/secrets.key`), or set `GCON_SECRETS_KEY` instead | encrypts stored webhook secrets; without it they cannot be read |
+
+**The identity database is always a local SQLite file, even when the control plane
+uses Postgres** (`GCON_CONTROL_PLANE_DATABASE_URL`). Postgres does not carry
+organizations, users or API keys: they stay under `GCON_DATA_DIR`, so that
+directory needs a volume either way. The key and certificate defaults sit under
+`./keys`, not under `GCON_DATA_DIR`, so mounting a volume at the data directory
+does not cover them; mount one at `./keys` as well, or point the settings above
+into the volume.
+
+At startup the coordinator logs where each of these lives and, inside a
+container, logs `DATA WILL NOT SURVIVE A REDEPLOY` for every one that is not on a
+mounted volume. It only reports; nothing is refused. A quiet start is not proof:
+the check cannot tell a durable volume from a mounted but throwaway one.
 
 If the certificate directory is lost, the coordinator creates a **new**
 certificate authority on the next start and every enrolled worker is rejected

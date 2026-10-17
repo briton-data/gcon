@@ -32,12 +32,12 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 Freeze means: v1 only gets additive changes; anything breaking goes to `/api/v2`.
 
 **Fix before freezing**
-- [ ] 16 routes declare no response schema and the spec declares no bearer security scheme **(verified)**
-- [ ] `command` is described as "Shell command" but the filter allows one allowed program plus arguments, and `python <anything>` passes **(verified)**; decide and document the meaning
+- [x] 16 routes declare no response schema and the spec declares no bearer security scheme **(verified)**. Done 2026-10-17: all 36 routes document a 200 schema (via `responses=`, so runtime output is unchanged), `BearerAuth` and `ApiKeyAuth` are declared, the 5 public routes are `security: []`. Pinned by `tests/api/test_openapi_contract.py`.
+- [x] `command` is described as "Shell command" but the filter allows one allowed program plus arguments, and `python <anything>` passes **(verified)**; decide and document the meaning. Done 2026-10-17: meaning kept as it behaves today (one allowed program plus unchecked arguments; a plan with no program list accepts any command line; the sandbox, not the filter, is the boundary) and the spec now says so. No behavior change. Restricting arguments would be a breaking change, so it belongs in `/api/v2` if wanted. Pinned by `tests/api/test_command_meaning.py`.
 - [ ] `docs/API.md` omits 11 existing routes (`/auth/*`, `/jobs/clear`, attempts, retry, enrollment-history, telemetry) **(verified)**
 - [ ] `docs/DEPLOYMENT.md` says Postgres is not wired; it is (`GCON_CONTROL_PLANE_DATABASE_URL`)
 - [ ] Postgres: `GET /billing/invoices*` fails (`ORDER BY rowid`, SQLite-only) and fractional `unit_price_cents` is stored as 0 because the column is INTEGER **(verified on PostgreSQL 16)**; SQLite is unaffected
-- [ ] Production persistence: identity DB (orgs, users, API keys) is always SQLite under `GCON_DATA_DIR`; on an ephemeral container disk it is lost on every redeploy. Confirm a volume is mounted
+- [ ] Production persistence: identity DB (orgs, users, API keys) is always SQLite under `GCON_DATA_DIR`; on an ephemeral container disk it is lost on every redeploy. Confirm a volume is mounted. 2026-10-17: the coordinator now logs where each of the five state locations lives and warns `DATA WILL NOT SURVIVE A REDEPLOY` for any not on a mounted volume (`src/gcon/persistence/durability.py`). The signing key, webhook key and CA default to `./keys`, not `GCON_DATA_DIR`, so they need a volume too. **Still open: mounting the volume on the host.**
 
 **Decide now (cheap while additive, costly later)**
 - [ ] List routes return bare arrays with no paging beyond `limit`
