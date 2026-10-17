@@ -38,6 +38,7 @@ from datetime import datetime, UTC
 sys.path.insert(0, "src")
 
 from gcon.persistence.control_plane import ControlPlane
+from gcon.persistence.durability import log_durable_storage_report
 from gcon.transport.config import TransportConfig
 from gcon.transport.grpc_transport import GrpcTransport
 from gcon.transport.remote_node import RemoteNodeProxy
@@ -89,6 +90,7 @@ def main():
 
     control_plane = ControlPlane(path=args.db)
     config = TransportConfig.load(control_plane)
+    log_durable_storage_report(logger, args.db, config.tls_cert_dir)
 
     leader_elector = None
     if args.ha:
