@@ -174,7 +174,23 @@ class JobSubmitRequest(BaseModel):
             "Not unique and never used to look a job up or authorise anything."
         ),
     )
-    command: str = Field(..., description="Shell command the job will run")
+    command: str = Field(
+        ...,
+        description=(
+            "The command line the job runs: one line of text, at most 10,000 characters, "
+            "no control characters. What is accepted depends on your plan "
+            "(`allowed_programs` in GET /account/plan). When the plan lists programs, the "
+            "command must be ONE simple command whose first word is a listed program, "
+            "written as listed (`python`, not `/usr/bin/python`); shell operators "
+            "(`;` `&&` `||` `|` `&`, redirects, command substitution, several lines) and a "
+            "`NAME=value` prefix are refused. The arguments are passed to that program "
+            "unchecked, so `python <anything>` is accepted whenever `python` is allowed. "
+            "This is a gate against typos and unsupported programs, not a security "
+            "boundary: jobs run in a sandbox whatever the plan. When `allowed_programs` "
+            "is null, any command line is accepted. A refused command returns 400 and "
+            "creates no job."
+        ),
+    )
     artifacts: Optional[List[str]] = Field(
         default=None, description="Not supported through the API: a non-empty list is refused (400). Use dataset_artifacts."
     )
@@ -306,6 +322,132 @@ class HealthOut(BaseModel):
 
 class ErrorOut(BaseModel):
     detail: str
+
+
+class ResetPasswordOut(BaseModel):
+    reset: bool
+
+
+class ChangePasswordOut(BaseModel):
+    changed: bool
+
+
+class DeleteAccountOut(BaseModel):
+    deleted: bool
+
+
+class SharedPoolOut(BaseModel):
+    mode: str = Field(description="'off', 'basic' or 'full'.")
+    description: str = Field(description="What the current mode means.")
+    modes: Dict[str, str] = Field(description="Every mode and what it means.")
+
+
+class EnrollCaOut(BaseModel):
+    ca_cert_pem: str
+    ca_cert_b64: str = Field(description="The same certificate, base64-encoded (for a worker's join command).")
+    sha256_fingerprint: str
+
+
+class ApiKeyOut(BaseModel):
+    key_id: str
+    name: str
+    owner_user_id: Optional[str] = None
+    scopes: List[str]
+    status: str = Field(description="'Active' or 'Revoked'.")
+    secret: str = Field(
+        description="The full key, revealed only in the response that creates it. "
+                    "Every other response carries it masked.")
+    created_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    usage_count: int = 0
+
+
+class MetricsOut(BaseModel):
+    avg_cpu: float
+    avg_memory: float
+    queued_jobs: int
+    running_jobs: int
+    completed_jobs: int
+    failed_jobs: int
+
+    class Config:
+        extra = "allow"   # keys with no organization (staff) also get platform-wide fields
+
+
+class EnrollmentAttemptOut(BaseModel):
+    id: int
+    node_id: str
+    org_id: Optional[str] = None
+    enroll_token_id: Optional[str] = None
+    source_ip: Optional[str] = None
+    accepted: int = Field(description="1 if the enrollment was accepted, 0 if it was rejected.")
+    reason: Optional[str] = None
+    created_at: str
+
+
+class JobAttemptOut(BaseModel):
+    attempt_id: str
+    job_id: str
+    node_id: Optional[str] = None
+    attempt_number: int
+    status: str
+    request_message_id: Optional[str] = None
+    dispatched_at: str
+    completed_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class JobRetryOut(BaseModel):
+    retried_job_id: str
+
+
+class ReceiptDetailOut(BaseModel):
+    receipt_id: str
+    status: str
+    verified: bool = Field(description="Result of re-checking the receipt's signature right now.")
+    verification_message: Optional[str] = None
+    job_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    issued_at: Optional[str] = None
+    input_hash: Optional[str] = None
+    output_hash: Optional[str] = None
+    output: Optional[str] = None
+    kind: Optional[str] = None
+    stages_expected: Optional[int] = None
+    policy: Optional[Dict[str, Any]] = None
+    execution_proof: Optional[Dict[str, Any]] = None
+    replicas: Optional[List[Dict[str, Any]]] = None
+    usage: Optional[Dict[str, Any]] = None
+    cost_estimate: Optional[Dict[str, Any]] = None
+    proof: Optional[Dict[str, Any]] = None
+    worker_attestation: Optional[Dict[str, Any]] = None
+    execution: Optional[Dict[str, Any]] = None
+    artifacts: Optional[List[Any]] = None
+    assurance: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "allow"
+
+
+class TelemetryEventOut(BaseModel):
+    id: int
+    event_id: str
+    event_type: str
+    level: str
+    job_id: Optional[str] = None
+    node_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    created_at: str
+
+
+class WhoamiOut(BaseModel):
+    key_id: str
+    key_name: str
+    scopes: List[str]
+    owner_user_id: Optional[str] = None
+    owner_name: Optional[str] = None
 
 
 class PricingOut(BaseModel):
@@ -530,6 +672,62 @@ def _idempotency_lock(org_id, key):
     return _IDEMPOTENCY_LOCKS[digest[0] % len(_IDEMPOTENCY_LOCKS)]
 
 
+def _route_requires_api_key(route) -> bool:
+    """True if any dependency of this route is a require_scope() check."""
+    stack = list(getattr(getattr(route, "dependant", None), "dependencies", []) or [])
+    while stack:
+        dep = stack.pop()
+        if getattr(dep.call, "requires_api_key", False):
+            return True
+        stack.extend(dep.dependencies)
+    return False
+
+
+def _declare_api_key_security(app: FastAPI) -> None:
+    """
+    Put the authentication scheme in the OpenAPI spec. The routes read the key
+    from `Authorization: Bearer <key>` or `X-API-Key: <key>` by hand, so FastAPI
+    cannot see it; without this a generated client has no way to authenticate.
+    Either header works (that is OR, so two separate requirements, not one with both).
+    Routes that need no key (signup, login, password reset, the public CA) say so
+    with `security: []`.
+    """
+    build_openapi = app.openapi
+    done = {"value": False}
+
+    def openapi():
+        schema = build_openapi()
+        if done["value"]:
+            return schema
+        components = schema.setdefault("components", {})
+        components.setdefault("securitySchemes", {}).update({
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "An API key, sent as `Authorization: Bearer <key>`.",
+            },
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "An API key, sent as `X-API-Key: <key>`. Same keys as BearerAuth.",
+            },
+        })
+        schema["security"] = [{"BearerAuth": []}, {"ApiKeyAuth": []}]
+        public = set()
+        for route in app.routes:
+            if getattr(route, "include_in_schema", False) and not _route_requires_api_key(route):
+                public.update((route.path, method.lower()) for method in route.methods)
+        for path, operations in schema.get("paths", {}).items():
+            for method, operation in operations.items():
+                if (path, method) in public:
+                    operation["security"] = []
+        done["value"] = True
+        return schema
+
+    app.openapi = openapi
+
+
 def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None, mailer=None):
     """
     Build the /api/v1 sub-application. `management` is the shared
@@ -602,8 +800,10 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # so it is refused here, once, before any route body runs. Cluster-wide
         # routes that never filter by organization opt out with tenant=False.
         def dependency(
-            authorization: str = Header(default=None),
-            x_api_key: str = Header(default=None, alias="X-API-Key"),
+            # include_in_schema=False: the spec declares these as security schemes
+            # (see _declare_api_key_security), not as a per-route header argument.
+            authorization: str = Header(default=None, include_in_schema=False),
+            x_api_key: str = Header(default=None, alias="X-API-Key", include_in_schema=False),
         ):
             secret = x_api_key
             if not secret and authorization:
@@ -655,6 +855,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
 
             return {"key": key, "owner": owner}
 
+        dependency.requires_api_key = True   # read by _declare_api_key_security
         return dependency
 
     # ------------------------------------------------------------
@@ -814,7 +1015,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/auth/reset-password",
         tags=["Auth"],
         summary="Set a new password using a reset token",
-        responses={400: {"model": ErrorOut}},
+        responses={200: {"model": ResetPasswordOut}, 400: {"model": ErrorOut}},
     )
     def auth_reset_password(payload: ResetPasswordIn):
         try:
@@ -855,7 +1056,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             "Needs your current password. Other browser sessions are signed out; "
             "the key making this request and keys you created for your own code stay valid."
         ),
-        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
+        responses={200: {"model": ChangePasswordOut}, 400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
     )
     def auth_change_password(payload: ChangePasswordIn, request: Request, auth=Depends(require_scope())):
         customer_id = _customer_id_of(auth)
@@ -888,7 +1089,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             "Refused while a job is queued or running or one of your workers is online. "
             "Job records, receipts and invoices are kept by GCON but can no longer be reached."
         ),
-        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
+        responses={200: {"model": DeleteAccountOut}, 400: {"model": ErrorOut}, 401: {"model": ErrorOut}, 429: {"model": ErrorOut}},
     )
     def auth_delete_account(payload: DeleteAccountIn, request: Request, auth=Depends(require_scope())):
         customer_id = _customer_id_of(auth)
@@ -929,7 +1130,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         tags=["Organization"],
         summary="Whether this organization's jobs may run on GCON's shared worker pool "
                 "(read-only: GCON changes it on request, an API key cannot)",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": SharedPoolOut}, 401: {"model": ErrorOut}},
     )
     def get_shared_pool(auth=Depends(require_scope())):
         owner = auth["owner"]
@@ -943,7 +1144,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/enroll/ca",
         tags=["Workers"],
         summary="The coordinator's CA certificate and its fingerprint (public)",
-        responses={503: {"model": ErrorOut}},
+        responses={200: {"model": EnrollCaOut}, 503: {"model": ErrorOut}},
     )
     def get_enroll_ca():
         """
@@ -968,7 +1169,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/auth/api-keys",
         tags=["Auth"],
         summary="List this organization's API keys",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": List[ApiKeyOut]}, 401: {"model": ErrorOut}},
     )
     def list_api_keys(auth=Depends(require_scope())):
         owner = auth["owner"]
@@ -981,7 +1182,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/auth/api-keys",
         tags=["Auth"],
         summary="Create a new API key for this organization",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": ApiKeyOut}, 401: {"model": ErrorOut}},
     )
     def create_api_key(payload: ApiKeyCreateIn, auth=Depends(require_scope())):
         owner = auth["owner"]
@@ -1001,7 +1202,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/auth/api-keys/{key_id}",
         tags=["Auth"],
         summary="Revoke an API key",
-        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+        responses={200: {"model": ApiKeyOut}, 401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def revoke_api_key(key_id: str, auth=Depends(require_scope())):
         owner = auth["owner"]
@@ -1050,7 +1251,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/metrics",
         tags=["Cluster"],
         summary="Get aggregate node and job metrics",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": MetricsOut}, 401: {"model": ErrorOut}},
     )
     def get_metrics(auth=Depends(require_scope("View monitoring", tenant=False))):
         owner = auth["owner"]
@@ -1106,7 +1307,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/nodes/{node_id}/enrollment-history",
         tags=["Nodes"],
         summary="Durable audit trail of Enroll RPC attempts for this node_id",
-        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+        responses={200: {"model": List[EnrollmentAttemptOut]}, 401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def get_node_enrollment_history(node_id: str, auth=Depends(require_scope("View monitoring"))):
         # Same org-scoping + same-404-either-way pattern as get_node()
@@ -1358,7 +1559,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/jobs/{job_id}/attempts",
         tags=["Jobs"],
         summary="Durable dispatch-attempt history for a job",
-        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+        responses={200: {"model": List[JobAttemptOut]}, 401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def get_job_attempts(job_id: str, auth=Depends(require_scope("View monitoring"))):
         # Same org-scoping + same-404-either-way pattern as
@@ -1377,7 +1578,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/jobs/{job_id}/retry",
         tags=["Jobs"],
         summary="Retry a failed or stuck-pending job",
-        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+        responses={200: {"model": JobRetryOut}, 401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def retry_job(job_id: str, auth=Depends(require_scope("Submit workflows"))):
         # Backend (coordinator.retry_job/presentation.retry_job) was
@@ -1403,7 +1604,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # `depends_on` refers to). GCON mints the real job ids and returns the
         # label -> id mapping; the label is stored as the job's client_reference.
         job_id: str
-        command: str
+        command: str = Field(description="Same rules as `command` on POST /jobs.")
         depends_on: List[str] = Field(default_factory=list)
 
     class WorkflowSubmitRequest(BaseModel):
@@ -1484,7 +1685,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/workflows",
         tags=["Workflows"],
         summary="List all workflows",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": List[WorkflowOut]}, 401: {"model": ErrorOut}},
     )
     def list_workflows(auth=Depends(require_scope("View monitoring"))):
         # Org-scoped keys only ever see their own company's workflows.
@@ -1540,7 +1741,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/receipts/{receipt_id}",
         tags=["Receipts"],
         summary="Get full evidence detail for a single receipt",
-        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+        responses={200: {"model": ReceiptDetailOut}, 401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
     )
     def get_receipt(receipt_id: str, auth=Depends(require_scope("View monitoring"))):
         # Same org-check pattern as get_job: confirm this receipt_id
@@ -1582,7 +1783,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/telemetry/events",
         tags=["Telemetry"],
         summary="List job-lifecycle telemetry events",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": List[TelemetryEventOut]}, 401: {"model": ErrorOut}},
     )
     def list_telemetry_events(
         job_id: Optional[str] = None,
@@ -1702,7 +1903,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         "/whoami",
         tags=["Auth"],
         summary="Identify the API key making this request",
-        responses={401: {"model": ErrorOut}},
+        responses={200: {"model": WhoamiOut}, 401: {"model": ErrorOut}},
     )
     def whoami(auth=Depends(require_scope(tenant=False))):
         key = auth["key"]
@@ -1715,4 +1916,5 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             "owner_name": owner.name if owner else None,
         }
 
+    _declare_api_key_security(app)
     return app
