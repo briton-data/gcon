@@ -16,6 +16,7 @@ from gcon.management.auth import SESSION_COOKIE_NAME
 from gcon.management import rbac
 from gcon.management.rate_limit import LoginRateLimiter
 from gcon.api.api_v1 import create_api_v1_app
+from gcon.config import describe_persistence, resolve_tls_cert_dir
 from gcon.dashboard.security_headers import SecurityHeadersMiddleware, env_flag
 
 
@@ -966,6 +967,11 @@ class WebServer:
             except (ValueError, KeyError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        @self.app.get("/management/persistence")
+        def mgmt_persistence(user=Depends(self.require_permission("Access analytics"))):
+            """Where state lives and whether it survives a redeploy (the dashboard warns when it doesn't)."""
+            return describe_persistence()
+
         @self.app.get("/management/billing/status")
         def mgmt_billing_status(user=Depends(self.require_permission("Access analytics"))):
             return self.management.get_billing_status()
@@ -1354,7 +1360,7 @@ class WebServer:
         if env_flag("GCON_FORCE_HTTPS"):
             from gcon.transport.tls import issue_dashboard_cert
 
-            cert_dir = os.environ.get("GCON_TLS_CERT_DIR", "keys/grpc")
+            cert_dir = resolve_tls_cert_dir()
             cert_hostname = host if host not in ("0.0.0.0", "") else "localhost"
             cert_paths = issue_dashboard_cert(cert_dir, hostname=cert_hostname)
             ssl_certfile = cert_paths.cert_path

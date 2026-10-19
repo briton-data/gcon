@@ -40,8 +40,67 @@ CONTROL_PLANE_DB_FILENAME = "gcon_control_plane.db"
 LEGACY_DB_FILENAME = "gcon.db"
 
 
+def persistent_volume_dir() -> "str | None":
+    """The directory of a persistent volume attached to this service, if the platform says there is one.
+
+    Railway sets RAILWAY_VOLUME_MOUNT_PATH when a volume is attached. Everything that must survive a redeploy
+    (the databases, the worker certificate authority, the receipt signing key) follows it by default, so
+    attaching a volume is all the setup needed. Not on Railway, this is None and nothing changes."""
+    path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    return path or None
+
+
 def resolve_data_dir() -> str:
-    return os.environ.get("GCON_DATA_DIR", "data")
+    return os.environ.get("GCON_DATA_DIR") or persistent_volume_dir() or "data"
+
+
+def resolve_tls_cert_dir() -> str:
+    """The worker certificate authority and issued certificates. GCON_TLS_CERT_DIR wins; else the volume; else keys/grpc."""
+    explicit = os.environ.get("GCON_TLS_CERT_DIR")
+    if explicit:
+        return explicit
+    volume = persistent_volume_dir()
+    return os.path.join(volume, "keys", "grpc") if volume else "keys/grpc"
+
+
+def resolve_hmac_key_path() -> str:
+    """The receipt signing key (also the root of the key that encrypts stored webhook secrets)."""
+    explicit = os.environ.get("GCON_HMAC_KEY_PATH")
+    if explicit:
+        return explicit
+    volume = persistent_volume_dir()
+    return os.path.join(volume, "keys", "hmac_secret.key") if volume else "./keys/hmac_secret.key"
+
+
+def describe_persistence() -> dict:
+    """Where state lives and whether that place survives a redeploy, for the startup log and the dashboard."""
+    on_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
+    volume = persistent_volume_dir()
+    paths = {
+        "data_dir": resolve_data_dir(),
+        # The database files themselves: GCON_CONTROL_PLANE_DB_PATH / GCON_DB_PATH override the data directory, so
+        # check where they actually point. A control plane on PostgreSQL has no local file to lose.
+        "identity_db": resolve_legacy_db_path(),
+        "tls_cert_dir": resolve_tls_cert_dir(),
+        "hmac_key_path": resolve_hmac_key_path(),
+    }
+    if not resolve_control_plane_postgres_dsn():
+        paths["control_plane_db"] = resolve_control_plane_db_path()
+    durable = True
+    reason = "not on Railway; state is on this machine's disk"
+    if on_railway:
+        def under(p):
+            if volume is None:
+                return False
+            path, root = os.path.abspath(p), os.path.abspath(volume)
+            return path == root or path.startswith(root + os.sep)
+        missing = [name for name, p in paths.items() if not under(p)]
+        durable = not missing
+        reason = ("all state is on the attached volume" if durable else
+                  "NOT durable: " + ", ".join(missing) + (" is not on a persistent volume" if volume else
+                  ": no volume is attached to this service") + ". Organizations, API keys, invoices and the worker "
+                  "certificate authority are lost on every redeploy.")
+    return {"on_railway": on_railway, "volume": volume, "durable": durable, "reason": reason, **paths}
 
 
 def resolve_control_plane_db_path(explicit: "str | None" = None) -> str:

@@ -20,6 +20,7 @@ import logging
 
 from gcon.execution.worker_identity import verify_attestation as _verify_worker_attestation
 
+from gcon.config import resolve_hmac_key_path
 from gcon.execution.hmac_keyring import HmacKeyring
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ class ExecutionVerifier:
             self._explicit_key = secret_key
         else:
             self._keyring = HmacKeyring.load_or_create(
-                os.environ.get("GCON_HMAC_KEY_PATH", "./keys/hmac_secret.key")
+                resolve_hmac_key_path()
             )
             self._explicit_key = None
         logger.info("ExecutionVerifier initialized")

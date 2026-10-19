@@ -38,7 +38,6 @@ from datetime import datetime, UTC
 sys.path.insert(0, "src")
 
 from gcon.persistence.control_plane import ControlPlane
-from gcon.persistence.durability import log_durable_storage_report
 from gcon.transport.config import TransportConfig
 from gcon.transport.grpc_transport import GrpcTransport
 from gcon.transport.remote_node import RemoteNodeProxy
@@ -88,9 +87,14 @@ def main():
     apply_log_format_from_env()
     logger = logging.getLogger("gcon.run_coordinator")
 
+    from gcon.config import describe_persistence
+    persistence = describe_persistence()
+    (logger.info if persistence["durable"] else logger.warning)(
+        "Persistence: %s (data=%s, certs=%s, signing key=%s)", persistence["reason"],
+        persistence["data_dir"], persistence["tls_cert_dir"], persistence["hmac_key_path"])
+
     control_plane = ControlPlane(path=args.db)
     config = TransportConfig.load(control_plane)
-    log_durable_storage_report(logger, args.db, config.tls_cert_dir)
 
     leader_elector = None
     if args.ha:

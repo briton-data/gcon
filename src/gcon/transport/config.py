@@ -23,6 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from gcon.config import resolve_tls_cert_dir
 from gcon.persistence.control_plane import ControlPlane
 
 # Hardcoded defaults -- the last-resort fallback only. Every one of
@@ -84,6 +85,8 @@ class ConfigResolver:
         if key not in _DEFAULTS:
             raise KeyError(f"Unknown config key: {key!r}")
 
+        if key == "tls_cert_dir":
+            return self._get_cert_dir()
         env_name = _ENV_NAMES[key]
         env_value = os.environ.get(env_name)
         if env_value is not None and env_value != "":
@@ -95,6 +98,17 @@ class ConfigResolver:
                 return db_value
 
         return _DEFAULTS[key]
+
+    def _get_cert_dir(self) -> str:
+        # env -> database setting -> the persistent volume if there is one -> keys/grpc
+        env_value = os.environ.get(_ENV_NAMES["tls_cert_dir"])
+        if env_value:
+            return env_value
+        if self.control_plane is not None:
+            db_value = self.control_plane.settings.get("tls_cert_dir")
+            if db_value:
+                return db_value
+        return resolve_tls_cert_dir()
 
     def get_int(self, key: str) -> int:
         return int(self.get(key))
