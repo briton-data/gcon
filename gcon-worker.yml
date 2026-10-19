@@ -1,0 +1,48 @@
+name: GCON worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "How long to keep the worker online (max 5, runner limit is 6)"
+        default: "5"
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # Unique per run: the runner's disk is wiped afterwards, so each run enrolls as a new node.
+      GCON_NODE_ID: gh-worker-${{ github.run_id }}
+      GCON_COORDINATOR_ADDRESS: iriguchi.proxy.rlwy.net:31837
+      GCON_ENROLL_ADDRESS: yamabiko.proxy.rlwy.net:36236
+      # The coordinator's certificate is issued for "localhost", not the Railway proxy host.
+      GCON_TLS_SNI_OVERRIDE: localhost
+      # Secrets: Settings > Secrets and variables > Actions
+      GCON_ENROLL_TOKEN: ${{ secrets.GCON_ENROLL_TOKEN }}
+      GCON_CA_CERT_B64: ${{ secrets.GCON_CA_CERT_B64 }}
+      GCON_CA_FINGERPRINT: ${{ secrets.GCON_CA_FINGERPRINT }}
+      # Optional: GCON_ORG_ID: ${{ vars.GCON_ORG_ID }}
+      # Sandbox: jobs run in containers on the runner's Docker daemon.
+      GCON_EXECUTION_BACKEND: docker
+      GCON_JOB_IO_ROOT: /tmp/gcon/jobio
+      GCON_JOB_DOCKER_NETWORK: none
+      GCON_JOB_DOCKER_MEMORY_LIMIT: 2g
+      GCON_TLS_CERT_DIR: /tmp/gcon/certs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+          mkdir -p "$GCON_JOB_IO_ROOT" "$GCON_TLS_CERT_DIR"
+
+      - name: Run worker
+        run: |
+          timeout "$(( ${{ inputs.hours }} * 3600 ))" python scripts/run_worker.py || [ $? -eq 124 ]
