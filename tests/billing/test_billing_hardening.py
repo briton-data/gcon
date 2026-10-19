@@ -455,3 +455,28 @@ class TestStaticAssetVersion:
         (tmp_path / "dashboard.js").write_text("two")
         assert WebServer._asset_version(str(tmp_path)) != first
         assert WebServer._asset_version(str(tmp_path / "missing")) == "0"
+
+
+# ------------------------------------------------------------------ line items are stored portably
+class TestLineItemStorage:
+    PRICES = (0.05, 0.005, 0.0001, 12.0, 0.3)
+
+    def test_exact_prices_and_order_survive(self, cp):
+        inv = cp.invoices.create("acme", *JAN, "usd", [
+            {"description": f"line {i}", "quantity": 1, "unit": "u", "unit_price_cents": p, "amount_cents": i}
+            for i, p in enumerate(self.PRICES)])
+        got = cp.invoices.get(inv["invoice_id"])
+        assert [li["description"] for li in got["line_items"]] == [f"line {i}" for i in range(5)]
+        assert [li["unit_price_cents"] for li in got["line_items"]] == list(self.PRICES)
+        assert set(got["line_items"][0]) == {"line_item_id", "invoice_id", "description", "quantity", "unit",
+                                              "unit_price_cents", "amount_cents"}
+
+    def test_an_invoice_written_before_the_new_columns_still_reads_the_same(self, cp):
+        cp.db.execute("INSERT INTO invoices (invoice_id, org_id, period_start, period_end, currency, amount_cents, status, created_at) "
+                      "VALUES ('legacy', 'acme', '2025-01-01', '2025-02-01', 'usd', 3, 'draft', '2025-02-01')")
+        for i, price in enumerate((0.05, 2.0, 0.5)):
+            cp.db.execute("INSERT INTO invoice_line_items (line_item_id, invoice_id, description, quantity, unit, unit_price_cents, amount_cents) "
+                          "VALUES (?, 'legacy', ?, 1, 'u', ?, 1)", (f"l{i}", f"old {i}", price))
+        items = cp.invoices.get("legacy")["line_items"]
+        assert [li["description"] for li in items] == ["old 0", "old 1", "old 2"]          # storage order, as before
+        assert [li["unit_price_cents"] for li in items] == [0.05, 2.0, 0.5]                 # the legacy column is used

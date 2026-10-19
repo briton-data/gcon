@@ -135,3 +135,20 @@ def test_a_real_job_dispatches_and_completes_end_to_end(control_plane):
         assert control_plane.jobs.get(job_id)["status"] == "completed"
     finally:
         coordinator.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Billing on PostgreSQL. Two things used to break here that SQLite hid: reading an invoice sorted its line items
+# by SQLite's rowid (a SQL error on Postgres), and fractional unit prices (0.05 cents per GPU-second) went into an
+# INTEGER column and came back as 0.
+# ---------------------------------------------------------------------------
+def test_an_invoice_can_be_read_back_with_exact_prices_and_in_order():
+    cp = ControlPlane(dialect=PostgresDialect(), path=POSTGRES_DSN)
+    org = _uid("org")
+    created = cp.invoices.create(org, "2026-01-01T00:00:00+00:00", "2026-02-01T00:00:00+00:00", "usd", [
+        {"description": f"line {i}", "quantity": 1.5, "unit": "u", "unit_price_cents": price, "amount_cents": i}
+        for i, price in enumerate((0.05, 0.005, 0.0001, 12.0, 0.3))])
+    for invoice in (cp.invoices.get(created["invoice_id"]), cp.invoices.list_for_org(org)[0]):
+        assert [li["description"] for li in invoice["line_items"]] == [f"line {i}" for i in range(5)]
+        assert [li["unit_price_cents"] for li in invoice["line_items"]] == [0.05, 0.005, 0.0001, 12.0, 0.3]
+        assert "position" not in invoice["line_items"][0] and "unit_price" not in invoice["line_items"][0]
