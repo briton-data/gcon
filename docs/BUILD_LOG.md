@@ -18,6 +18,7 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 
 | Item | Why |
 |---|---|
+| VIP / load balancer in front of coordinators | deployment work, outside the code; see "Running two coordinators" |
 | Password-reset email | no SMTP provider yet (`GCON_SMTP_*` unset), so reset links are not delivered |
 | Persisting the coordinator CA | needs a volume; workers re-enroll after every redeploy |
 | Real payment provider | Stripe is a stub; the mock provider marks invoices paid without moving money |
@@ -32,12 +33,12 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 Freeze means: v1 only gets additive changes; anything breaking goes to `/api/v2`.
 
 **Fix before freezing**
-- [x] 16 routes declare no response schema and the spec declares no bearer security scheme **(verified)**. Done 2026-10-17: all 36 routes document a 200 schema (via `responses=`, so runtime output is unchanged), `BearerAuth` and `ApiKeyAuth` are declared, the 5 public routes are `security: []`. Pinned by `tests/api/test_openapi_contract.py`.
-- [x] `command` is described as "Shell command" but the filter allows one allowed program plus arguments, and `python <anything>` passes **(verified)**; decide and document the meaning. Done 2026-10-17: meaning kept as it behaves today (one allowed program plus unchecked arguments; a plan with no program list accepts any command line; the sandbox, not the filter, is the boundary) and the spec now says so. No behavior change. Restricting arguments would be a breaking change, so it belongs in `/api/v2` if wanted. Pinned by `tests/api/test_command_meaning.py`.
+- [ ] 16 routes declare no response schema and the spec declares no bearer security scheme **(verified)**
+- [ ] `command` is described as "Shell command" but the filter allows one allowed program plus arguments, and `python <anything>` passes **(verified)**; decide and document the meaning
 - [ ] `docs/API.md` omits 11 existing routes (`/auth/*`, `/jobs/clear`, attempts, retry, enrollment-history, telemetry) **(verified)**
-- [ ] `docs/DEPLOYMENT.md` says Postgres is not wired; it is (`GCON_CONTROL_PLANE_DATABASE_URL`)
-- [ ] Postgres: `GET /billing/invoices*` fails (`ORDER BY rowid`, SQLite-only) and fractional `unit_price_cents` is stored as 0 because the column is INTEGER **(verified on PostgreSQL 16)**; SQLite is unaffected
-- [ ] Production persistence: identity DB (orgs, users, API keys) is always SQLite under `GCON_DATA_DIR`; on an ephemeral container disk it is lost on every redeploy. Confirm a volume is mounted. 2026-10-17: the coordinator now logs where each of the five state locations lives and warns `DATA WILL NOT SURVIVE A REDEPLOY` for any not on a mounted volume (`src/gcon/persistence/durability.py`). The signing key, webhook key and CA default to `./keys`, not `GCON_DATA_DIR`, so they need a volume too. **Still open: mounting the volume on the host.**
+- [x] `docs/DEPLOYMENT.md` said Postgres is not wired; corrected (2026-10-16)
+- [x] Postgres billing: `GET /billing/invoices*` failed (`ORDER BY rowid`) and fractional `unit_price_cents` was stored as 0. Fixed by migration 16 (exact `unit_price`, `position`); tested on PostgreSQL 16 (2026-10-16)
+- [x] Production persistence: databases, certificate authority and signing key now follow an attached Railway volume automatically; startup warning and a dashboard banner when they don't (2026-10-16). **Still to do by you: attach the volume**
 
 **Decide now (cheap while additive, costly later)**
 - [ ] List routes return bare arrays with no paging beyond `limit`
@@ -48,6 +49,31 @@ Freeze means: v1 only gets additive changes; anything breaking goes to `/api/v2`
 
 **Then freeze**
 - [ ] Commit `openapi-v1.json` and a contract test that fails on removed fields, renamed fields or changed types
+
+**Also open from earlier rounds (found by re-reading this log against the code, 2026-10-16)**
+- [ ] Plan numbers (request rate, concurrent jobs, runtime, allowed programs) are placeholders; `/account/plan` exposes them, so confirm them before they become promises
+- [ ] Job spec is not durable: the `jobs` table has no columns for `kind`, `verify`, `requires`, `stages` or `dataset_artifacts` **(verified)**, so replicated jobs fail on restart and those fields can be absent after one
+- [ ] `recover_jobs` only watches a replicated job's first node **(verified)**: a non-first replica dying triggers no recovery
+- [ ] Register can finish before the worker's Control stream is up ("registered" is not "connected"); flagged earlier, never fixed
+- [ ] `Idempotency-Key`: a replay with a different request body silently returns the original job, and keys never expire (deliberately not built; decide before freezing)
+- [ ] A job queued with no worker online has no queue timeout and no customer-facing reason; only a "waiting for a worker" label exists
+- [ ] Leftovers from 2026-10-10: enroll-token expiry and use limit (no figures set), worker version check, per-org pool metering, docker image addresses, a `gcon-worker` / terminal CLI, tier cap on enrolled workers
+- [ ] No unified assurance badge in the staff dashboard (the `assurance` field exists on receipts)
+
+## Running two coordinators (high availability), as of 2026-10-16
+
+Design: active-passive. N coordinators share one control-plane database; one holds a lease and dispatches, the rest wait. A standby serves nothing (not even the dashboard) until it becomes leader.
+
+What works: two processes on **one host** with `--ha`, sharing one data dir (SQLite). That gives restart-without-outage, nothing more.
+
+What does **not** work yet across hosts (each **verified**):
+- **The lease was not safe on Postgres: FIXED (2026-10-16).** Two standbys racing for an expired lease both believed they were leader in about 90% of rounds (132-141 of 150, PostgreSQL 16). The update is now a compare-and-swap (and the first acquisition `ON CONFLICT DO NOTHING`); 3 x 150 races afterwards gave exactly one leader every time, and the tests fail on the old code.
+- **The identity database is SQLite only** (`GCON_DB_PATH`, default `data/gcon.db`): organizations, users, API keys, sessions, audit. A second coordinator on another host has none of them. `GCON_CONTROL_PLANE_DATABASE_URL` covers only the control plane.
+- **Signing and certificate material is generated locally**: the receipt HMAC key (`GCON_HMAC_KEY_PATH`, default `./keys/hmac_secret.key`) and the worker CA (`keys/grpc`). A second coordinator makes its own, so receipts signed by one fail verification on the other and workers' certificates stop validating.
+- **No standby serving, no leader flag in `/health`, no VIP or load balancer, and workers dial a single address.**
+- Railway attaches a volume to one service instance, so on Railway today there is effectively one coordinator.
+
+To get real cross-host HA: guard the lease update (compare-and-swap on holder and term, handle the insert race); move the identity database to Postgres; load the HMAC key, CA key and enroll token from shared secrets; expose leadership in `/health` and route through a load balancer; give workers a failover address list; make the job spec durable.
 
 ## v2 agenda (not v1 blockers)
 

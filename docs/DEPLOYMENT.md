@@ -444,12 +444,19 @@ sudo systemctl start gcon-agent
 
 ### Shared Storage Setup
 
-There is currently **no PostgreSQL or S3 storage backend** in GCON, and
-no `GCON_STORAGE_BACKEND` / `GCON_ARTIFACT_BACKEND` setting to switch one
-on — this whole section described infrastructure the codebase doesn't
-have. Persistence is exclusively local SQLite, via
-`gcon.persistence.control_plane.ControlPlane` and the coordinator's own
-`gcon.persistence.db` module:
+There are **two databases**, and only one of them can live in PostgreSQL:
+
+- **Control plane** (jobs, nodes, attempts, receipts, invoices, the leader
+  lease): SQLite by default, or a real PostgreSQL server when
+  `GCON_CONTROL_PLANE_DATABASE_URL` is set (`pip install gcon[postgres]`).
+  Verified against PostgreSQL 16, including billing and the leader lease.
+- **Identity** (organizations, users, API keys, sessions, audit log):
+  **SQLite only** (`GCON_DB_PATH`). It is not covered by the PostgreSQL
+  setting, so it must be on a persistent disk even when the control plane
+  is on PostgreSQL.
+
+There is no S3 or other artifact storage backend, and no
+`GCON_STORAGE_BACKEND` / `GCON_ARTIFACT_BACKEND` setting. The SQLite files:
 
 - `data/gcon.db` — coordinator's primary state
 - `data/gcon_control_plane.db` — settings, API keys, users, audit log
@@ -472,39 +479,38 @@ version of this. For a production deployment today, that still means:
   multi-writer network database. Same-host, multiple processes (e.g. a
   supervisor keeping two `--ha` processes running so one can restart
   without a full outage) is the supported case.
-- If you need a different storage backend for real cross-host HA, that's
-  a real gap — the Postgres dialect exists in the schema/migration
-  design (see `docs/TRANSPORT_AND_PERSISTENCE.md`) but isn't fully wired
-  through yet. Don't configure env vars for a backend that isn't wired
-  up; GCON will silently ignore them and keep using SQLite.
+- Real cross-host HA needs more than a shared control-plane database: the
+  identity database, the receipt signing key
+  (`GCON_HMAC_KEY_PATH`) and the certificate authority (`GCON_TLS_CERT_DIR`)
+  must also be shared, and workers need an address that follows the
+  leader. The leader lease itself is safe across hosts on PostgreSQL (a
+  compare-and-swap; two coordinators racing for an expired lease always
+  produce exactly one leader). The rest is not built; see `docs/BUILD_LOG.md`.
 
 ---
 
 ## Persistent Storage & Worker Enrollment
 
-**The coordinator needs persistent storage for four locations.** On a platform
+**The coordinator needs persistent storage for two directories.** On a platform
 whose filesystem is wiped on every deploy (Railway without a volume, a plain
 container), anything not on a volume is lost:
 
 | Directory | Setting | Holds |
 |---|---|---|
 | Certificate directory | `GCON_TLS_CERT_DIR` (default `keys/grpc`) | the certificate authority that every worker certificate is signed by, and the revocation list |
-| Data directory | `GCON_DATA_DIR` (default `data`) | the databases: organizations, users, API keys and sessions (`gcon.db`), and enrolled workers, enroll tokens, jobs, receipts (`gcon_control_plane.db`) |
-| Receipt-signing key | `GCON_HMAC_KEY_PATH` (default `./keys/hmac_secret.key`) | the key that signs receipts; without it receipts already issued no longer verify |
-| Webhook-secret key | `GCON_SECRETS_KEY_PATH` (default `./keys/secrets.key`), or set `GCON_SECRETS_KEY` instead | encrypts stored webhook secrets; without it they cannot be read |
+| Data directory | `GCON_DATA_DIR` (default `data`) | the databases: enrolled workers, enroll tokens, users, API keys, receipts, invoices |
+| Signing key | `GCON_HMAC_KEY_PATH` (default `keys/hmac_secret.key`) | the receipt signing key, and the root of the key that encrypts stored webhook secrets |
 
-**The identity database is always a local SQLite file, even when the control plane
-uses Postgres** (`GCON_CONTROL_PLANE_DATABASE_URL`). Postgres does not carry
-organizations, users or API keys: they stay under `GCON_DATA_DIR`, so that
-directory needs a volume either way. The key and certificate defaults sit under
-`./keys`, not under `GCON_DATA_DIR`, so mounting a volume at the data directory
-does not cover them; mount one at `./keys` as well, or point the settings above
-into the volume.
-
-At startup the coordinator logs where each of these lives and, inside a
-container, logs `DATA WILL NOT SURVIVE A REDEPLOY` for every one that is not on a
-mounted volume. It only reports; nothing is refused. A quiet start is not proof:
-the check cannot tell a durable volume from a mounted but throwaway one.
+**On Railway, attach a volume and you are done.** Railway sets
+`RAILWAY_VOLUME_MOUNT_PATH` when a volume is attached, and all three locations
+above then default to inside it (`<volume>/gcon.db`, `<volume>/keys/grpc`,
+`<volume>/keys/hmac_secret.key`) with no other setting. An explicit
+`GCON_DATA_DIR`, `GCON_TLS_CERT_DIR` or `GCON_HMAC_KEY_PATH` still wins. If the
+service runs on Railway with no volume (or one of those paths points off it),
+the coordinator logs a warning at startup and the staff dashboard shows a red
+"Data is not persistent" banner on every page, because every redeploy would
+otherwise wipe organizations, API keys, invoices and the certificate
+authority. `GET /management/persistence` reports the same thing.
 
 If the certificate directory is lost, the coordinator creates a **new**
 certificate authority on the next start and every enrolled worker is rejected
