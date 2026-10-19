@@ -641,4 +641,18 @@ MIGRATIONS: List[Migration] = [
             "ALTER TABLE enroll_tokens ADD COLUMN uses INTEGER NOT NULL DEFAULT 0",
         ],
     ),
+    Migration(
+        version=16,
+        name="invoice_line_item_exact_price_and_order",
+        up_sql=[
+            # unit_price_cents was declared INTEGER, but prices are fractions of a cent (0.05 per GPU-second).
+            # SQLite stores the fraction anyway; PostgreSQL rounds it to 0. The exact price now has its own
+            # DOUBLE PRECISION column (the legacy column keeps a rounded value and is read only for rows
+            # written before this migration).
+            "ALTER TABLE invoice_line_items ADD COLUMN unit_price DOUBLE PRECISION",
+            # Line items used to be ordered by SQLite's rowid, which PostgreSQL does not have. Rows written
+            # before this migration keep NULL here and are read in storage order, exactly as before.
+            "ALTER TABLE invoice_line_items ADD COLUMN position INTEGER",
+        ],
+    ),
 ]

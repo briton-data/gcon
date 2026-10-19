@@ -34,10 +34,16 @@ class LeaseRepository:
         """
         Returns the lease row if `holder_id` now holds (or continues
         to hold) the lease, or None if someone else holds an
-        unexpired lease. Atomic: the whole read-decide-write happens
-        inside one `transaction()` block, so no other writer can slip
-        a competing acquisition in between the expiry check and the
-        write.
+        unexpired lease or won the race for it.
+
+        Safe against another coordinator on ANOTHER connection or
+        process (the database may be shared): the read happens before
+        the write, so the write is a compare-and-swap. It only takes
+        effect if the row is still exactly what was read (same holder,
+        term and expiry); when two coordinators race for an expired
+        lease, the database lets exactly one UPDATE match, and the
+        other gets None. The first-ever acquisition uses
+        INSERT ... ON CONFLICT DO NOTHING for the same reason.
         """
         now = datetime.now(UTC)
         now_iso = now.isoformat()
@@ -51,14 +57,17 @@ class LeaseRepository:
             ).fetchone()
 
             if row is None:
-                conn.execute(
+                created = conn.execute(
                     """
                     INSERT INTO coordinator_leases
                         (lease_name, holder_id, term, acquired_at, expires_at, updated_at)
                     VALUES (?, ?, 1, ?, ?, ?)
+                    ON CONFLICT (lease_name) DO NOTHING
                     """,
                     (lease_name, holder_id, now_iso, expires_iso, now_iso),
                 )
+                if created.rowcount != 1:
+                    return None  # another coordinator created it first
                 return {
                     "lease_name": lease_name, "holder_id": holder_id, "term": 1,
                     "acquired_at": now_iso, "expires_at": expires_iso, "updated_at": now_iso,
@@ -73,14 +82,17 @@ class LeaseRepository:
 
             new_term = row["term"] + (0 if is_current_holder else 1)
             acquired_at = row["acquired_at"] if is_current_holder else now_iso
-            conn.execute(
+            swapped = conn.execute(
                 """
                 UPDATE coordinator_leases
                 SET holder_id = ?, term = ?, acquired_at = ?, expires_at = ?, updated_at = ?
-                WHERE lease_name = ?
+                WHERE lease_name = ? AND holder_id = ? AND term = ? AND expires_at = ?
                 """,
-                (holder_id, new_term, acquired_at, expires_iso, now_iso, lease_name),
+                (holder_id, new_term, acquired_at, expires_iso, now_iso,
+                 lease_name, row["holder_id"], row["term"], row["expires_at"]),
             )
+            if swapped.rowcount != 1:
+                return None  # the lease changed hands between the read and the write
             return {
                 "lease_name": lease_name, "holder_id": holder_id, "term": new_term,
                 "acquired_at": acquired_at, "expires_at": expires_iso, "updated_at": now_iso,
@@ -97,6 +109,6 @@ class LeaseRepository:
             if row is None or row["holder_id"] != holder_id:
                 return False
             conn.execute(
-                "DELETE FROM coordinator_leases WHERE lease_name = ?", (lease_name,)
+                "DELETE FROM coordinator_leases WHERE lease_name = ? AND holder_id = ?", (lease_name, holder_id)
             )
             return True

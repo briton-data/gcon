@@ -68,18 +68,18 @@ class InvoiceRepository:
                     """,
                     (invoice_id, org_id, period_start, period_end, currency, amount_cents, now),
                 )
-                for item in line_items:
+                for position, item in enumerate(line_items):
                     conn.execute(
                         """
                         INSERT INTO invoice_line_items
                             (line_item_id, invoice_id, description, quantity, unit,
-                             unit_price_cents, amount_cents)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                             unit_price_cents, amount_cents, unit_price, position)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             uuid.uuid4().hex, invoice_id, item["description"],
-                            item["quantity"], item["unit"], item["unit_price_cents"],
-                            item["amount_cents"],
+                            item["quantity"], item["unit"], int(round(item["unit_price_cents"])),
+                            item["amount_cents"], float(item["unit_price_cents"]), position,
                         ),
                     )
         except self.db.IntegrityError:
@@ -113,12 +113,23 @@ class InvoiceRepository:
             return None
         invoice = dict(row)
         invoice["line_items"] = [
-            dict(r) for r in self.db.query(
-                "SELECT * FROM invoice_line_items WHERE invoice_id = ? ORDER BY rowid",
+            self._line_item(r) for r in self.db.query(
+                "SELECT * FROM invoice_line_items WHERE invoice_id = ? ORDER BY position",
                 (invoice_id,),
             )
         ]
         return invoice
+
+    @staticmethod
+    def _line_item(row) -> Dict[str, Any]:
+        """A line item as the API presents it: the exact unit price when there is one (rows written before
+        migration 16 only have the legacy column), without the storage-only columns."""
+        item = dict(row)
+        exact = item.pop("unit_price", None)
+        item.pop("position", None)
+        if exact is not None:
+            item["unit_price_cents"] = exact
+        return item
 
     def get_for_period(self, org_id: str, period_start: str, period_end: str) -> Optional[Dict[str, Any]]:
         row = self.db.query_one(
