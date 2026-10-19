@@ -4903,7 +4903,25 @@ setupPillarToggles();
 setupThemeToggle();
 setupSidebarCollapse();
 
+// If this deployment's data (organizations, API keys, invoices, the worker certificate authority) would be lost on
+// a redeploy, say so on every page until it is fixed.
+async function checkPersistence() {
+    try {
+        const p = await fetchJson("/management/persistence");
+        const box = document.getElementById("persistence-warning");
+        if (!box) return;
+        if (p && p.on_railway && !p.durable) {
+            box.innerHTML = `<strong>Data is not persistent.</strong> ${escapeHtml(p.reason)} ` +
+                `Attach a Railway volume to this service (any mount path) and redeploy; nothing else needs configuring.`;
+            box.classList.remove("d-none");
+        } else {
+            box.classList.add("d-none");
+        }
+    } catch (err) { /* informational only */ }
+}
+
 bootstrapHomeDashboard();
+checkPersistence();
 loadOverviewExtras();
 loadCurrentUser();
 refreshDashboard();
