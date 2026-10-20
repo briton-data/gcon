@@ -508,7 +508,10 @@ above then default to inside it (`<volume>/gcon.db`, `<volume>/keys/grpc`,
 `GCON_DATA_DIR`, `GCON_TLS_CERT_DIR` or `GCON_HMAC_KEY_PATH` still wins. If the
 service runs on Railway with no volume (or one of those paths points off it),
 the coordinator logs a warning at startup and the staff dashboard shows a red
-"Data is not persistent" banner on every page, because every redeploy would
+"Data is not persistent" banner on every page. **Do not add
+`RAILWAY_VOLUME_MOUNT_PATH` yourself**: Railway sets it, and a hand-typed value
+(for example `GCON`) is not a volume; the coordinator ignores a relative path
+and reports an unmounted one as not durable, because every redeploy would
 otherwise wipe organizations, API keys, invoices and the certificate
 authority. `GET /management/persistence` reports the same thing.
 

@@ -54,6 +54,10 @@ Freeze means: v1 only gets additive changes; anything breaking goes to `/api/v2`
 - [ ] Plan numbers (request rate, concurrent jobs, runtime, allowed programs) are placeholders; `/account/plan` exposes them, so confirm them before they become promises
 - [ ] Job spec is not durable: the `jobs` table has no columns for `kind`, `verify`, `requires`, `stages` or `dataset_artifacts` **(verified)**, so replicated jobs fail on restart and those fields can be absent after one
 - [ ] `recover_jobs` only watches a replicated job's first node **(verified)**: a non-first replica dying triggers no recovery
+- [x] A runner thread that died on an unexpected exception left its job "running" forever while the worker showed idle **(reproduced, then fixed 2026-10-16)**: both runner threads are now wrapped; the job ends as `failed` with the reason (and a job already in a final state is never overwritten)
+- [ ] "Idle" is defined three ways: `get_idle_nodes()` counts draining and quarantined workers; `get_idle_node_count()` does not; neither considers the sandbox policy, so a worker that cannot take customer jobs (no sandbox) shows idle while jobs sit pending. The reason is in the Scheduler tab's last failure message
+- [ ] A job completes with NO receipt when receipt creation throws (best-effort by design); the Evidence coverage number is the only signal
+- [ ] Receipts signed before a lost signing key can never be checked again; they now report "signed with a key this coordinator no longer has" instead of "Invalid signature". Back up the signing key file (`GCON_HMAC_KEY_PATH`)
 - [ ] Register can finish before the worker's Control stream is up ("registered" is not "connected"); flagged earlier, never fixed
 - [ ] `Idempotency-Key`: a replay with a different request body silently returns the original job, and keys never expire (deliberately not built; decide before freezing)
 - [ ] A job queued with no worker online has no queue timeout and no customer-facing reason; only a "waiting for a worker" label exists
