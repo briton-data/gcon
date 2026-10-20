@@ -20,6 +20,12 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture
+def mounted(monkeypatch):
+    """A temp dir stands in for a real mounted volume."""
+    monkeypatch.setattr(os.path, "ismount", lambda p: True)
+
+
 class TestDefaultsAreUnchangedOffRailway:
     def test_the_old_locations(self):
         assert config.resolve_data_dir() == "data"
@@ -96,27 +102,38 @@ class TestDescribePersistence:
         p = config.describe_persistence()
         assert not p["durable"] and "no volume is attached" in p["reason"] and "lost on every redeploy" in p["reason"]
 
-    def test_on_railway_with_a_volume_it_is_durable(self, monkeypatch, tmp_path):
+    def test_on_railway_with_a_volume_it_is_durable(self, monkeypatch, tmp_path, mounted):
         monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path))
         assert config.describe_persistence()["durable"]
 
-    def test_one_path_pointed_off_the_volume_is_called_out(self, monkeypatch, tmp_path):
+    def test_one_path_pointed_off_the_volume_is_called_out(self, monkeypatch, tmp_path, mounted):
         monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path))
         monkeypatch.setenv("GCON_TLS_CERT_DIR", "/tmp-not-on-the-volume")
         p = config.describe_persistence()
         assert not p["durable"] and "tls_cert_dir" in p["reason"] and "data_dir" not in p["reason"]
 
-    def test_a_database_path_set_off_the_volume_is_called_out(self, monkeypatch, tmp_path):
+    def test_a_database_path_set_off_the_volume_is_called_out(self, monkeypatch, tmp_path, mounted):
         monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path))
         monkeypatch.setenv("GCON_DB_PATH", "/not/on/the/volume/gcon.db")
         p = config.describe_persistence()
         assert not p["durable"] and "identity_db" in p["reason"] and "control_plane_db" not in p["reason"]
 
-    def test_a_control_plane_on_postgres_has_no_local_file_to_lose(self, monkeypatch, tmp_path):
+    def test_a_control_plane_on_postgres_has_no_local_file_to_lose(self, monkeypatch, tmp_path, mounted):
         monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path))
         monkeypatch.setenv("GCON_CONTROL_PLANE_DATABASE_URL", "postgresql://u:p@h/db")
         p = config.describe_persistence()
         assert p["durable"] and "control_plane_db" not in p
+
+    def test_a_volume_path_typed_in_by_hand_is_not_trusted(self, monkeypatch):
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", "GCON")
+        assert config.persistent_volume_dir() is None and config.resolve_data_dir() == "data"       # nothing follows it
+        p = config.describe_persistence()
+        assert not p["durable"] and "'GCON'" in p["reason"] and "not an absolute path" in p["reason"] and "delete it" in p["reason"]
+
+    def test_an_absolute_path_with_nothing_mounted_is_not_durable(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production"); monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path))
+        p = config.describe_persistence()                                   # a plain folder is not a mount point
+        assert not p["durable"] and "nothing is mounted there" in p["reason"]
 
     def test_the_dashboard_route_reports_it(self, monkeypatch, tmp_path):
         from gcon.cluster.coordinator import GCONCoordinator
