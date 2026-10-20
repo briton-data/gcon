@@ -310,6 +310,11 @@ class ExecutionVerifier:
 }
         
         key_id = proof.get("key_id")
+        if key_id is not None and self._keyring is not None and self._keyring.get_secret(key_id) is None:
+            # Not a forgery: the key that signed this is simply not here (the signing key file was lost or
+            # replaced, e.g. by a redeploy that did not keep it), so it can't be checked either way.
+            return False, (f"Signed with key '{key_id}', which this coordinator no longer has "
+                           "(the signing key was lost or replaced), so it cannot be checked")
         if not self.verify_signature(proof_copy, signature, key_id=key_id):
             return False, "Invalid signature"
         

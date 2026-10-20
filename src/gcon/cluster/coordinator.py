@@ -1305,7 +1305,7 @@ class GCONCoordinator:
         dispatch_attempt_number = job["attempt_number"]
 
         thread = threading.Thread(
-        target=self._run_job,
+        target=self._run_job_guarded,
         args=(node, job_id, dispatch_attempt_number),
         daemon=True
     )
@@ -1429,7 +1429,7 @@ class GCONCoordinator:
         dispatch_attempt_number = job["attempt_number"]
 
         thread = threading.Thread(
-            target=self._run_replicated_job,
+            target=self._run_replicated_job_guarded,
             args=(nodes, job_id, dispatch_attempt_number),
             daemon=True,
         )
@@ -2030,6 +2030,70 @@ class GCONCoordinator:
         except Exception as e:
             _log_line(f"[WARN] workflow advancement failed for job "
                   f"'{job_id}' (workflow '{workflow_id}'): {e}")
+
+    def _run_job_guarded(self, node, job_id, dispatch_attempt_number):
+        """Run `_run_job` so that an unexpected exception can never strand the job.
+
+        Only part of `_run_job` is inside a try block. An exception anywhere else (recording the worker's
+        resources, capping the result, a bug in a later step) used to end the thread silently: the job stayed
+        "running" forever while its worker showed idle, and nothing ever recovered it.
+        """
+        try:
+            self._run_job(node, job_id, dispatch_attempt_number)
+        except Exception as e:
+            self._fail_stranded_job(job_id, dispatch_attempt_number, [node], e)
+
+    def _run_replicated_job_guarded(self, nodes, job_id, dispatch_attempt_number):
+        try:
+            self._run_replicated_job(nodes, job_id, dispatch_attempt_number)
+        except Exception as e:
+            self._fail_stranded_job(job_id, dispatch_attempt_number, list(nodes), e)
+
+    def _fail_stranded_job(self, job_id, dispatch_attempt_number, nodes, error):
+        """Last resort for a runner thread that died: free its workers and, if the job is still running on this
+        very attempt, end it as failed with the reason, so the customer sees an outcome instead of "running".
+        A job that already reached a final state (or moved to a newer attempt) is left exactly as it is."""
+        job = self.jobs.get(job_id)
+        trace_id = job.get("trace_id") if job else None
+        try:
+            self.telemetry.error(
+                f"[ERROR] The runner for '{job_id}' (attempt {dispatch_attempt_number}) failed unexpectedly: {error!r}",
+                event_type="job_runner_crashed", trace_id=trace_id, job_id=job_id,
+                payload={"dispatch_attempt_number": dispatch_attempt_number, "error": repr(error)},
+            )
+        except Exception:
+            pass
+        for node in nodes:
+            try:
+                node.status = "idle"
+                self.registry.heartbeat(node.node_id, "idle", node.heartbeat()["timestamp"])
+            except Exception:
+                pass
+        if job is None:
+            return
+        with self.jobs_lock:
+            if job.get("status") != "running" or job.get("attempt_number") != dispatch_attempt_number:
+                return
+            cancelled = job.get("cancel_requested", False)
+            job["status"] = "cancelled" if cancelled else "failed"
+            job["completed_at"] = datetime.now(UTC).isoformat()
+            job["result"] = {"status": "error",
+                             "message": f"Internal error while recording this job's result: {error}"}
+        for step in (
+            lambda: self._persist_job_status(job_id, job),
+            lambda: self._advance_workflow(job_id, job, success=False),
+            lambda: self._dispatch_webhook(job_id, job, "JOB_CANCELLED" if cancelled else "JOB_FAILED"),
+            lambda: self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC),
+                event_type="JOB_CANCELLED" if cancelled else "JOB_FAILED",
+                source="Coordinator",
+                payload={"job_id": job_id, "error": str(error)})),
+            lambda: self._evict_completed_if_over_capacity(),
+        ):
+            try:
+                step()
+            except Exception:
+                pass
 
     def _run_job(self, node, job_id, dispatch_attempt_number):
         """

@@ -47,7 +47,9 @@ def persistent_volume_dir() -> "str | None":
     (the databases, the worker certificate authority, the receipt signing key) follows it by default, so
     attaching a volume is all the setup needed. Not on Railway, this is None and nothing changes."""
     path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
-    return path or None
+    # A real mount path is always absolute. A relative value (for example one typed in by hand as "GCON")
+    # would just be a folder inside the container, which a redeploy wipes, so it is not trusted.
+    return path if path and os.path.isabs(path) else None
 
 
 def resolve_data_dir() -> str:
@@ -75,6 +77,7 @@ def resolve_hmac_key_path() -> str:
 def describe_persistence() -> dict:
     """Where state lives and whether that place survives a redeploy, for the startup log and the dashboard."""
     on_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
+    raw_volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
     volume = persistent_volume_dir()
     paths = {
         "data_dir": resolve_data_dir(),
@@ -88,7 +91,18 @@ def describe_persistence() -> dict:
         paths["control_plane_db"] = resolve_control_plane_db_path()
     durable = True
     reason = "not on Railway; state is on this machine's disk"
-    if on_railway:
+    if on_railway and raw_volume and volume is None:
+        durable = False
+        reason = (f"NOT durable: RAILWAY_VOLUME_MOUNT_PATH is set to '{raw_volume}', which is not an absolute path. "
+                  "Railway sets that variable itself when a volume is attached, so a copy added by hand is wrong: "
+                  "delete it, attach a real volume to the service, and redeploy. Until then organizations, API keys, "
+                  "invoices and the worker certificate authority are lost on every redeploy.")
+    elif on_railway and volume is not None and not os.path.ismount(volume):
+        durable = False
+        reason = (f"NOT durable: RAILWAY_VOLUME_MOUNT_PATH is '{volume}' but nothing is mounted there, so data "
+                  "written to it is on the container's disk and is lost on every redeploy. Attach a real volume to "
+                  "the service (Railway sets this variable itself; one added by hand is not a volume).")
+    elif on_railway:
         def under(p):
             if volume is None:
                 return False
