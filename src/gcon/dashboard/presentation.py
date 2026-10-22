@@ -351,6 +351,15 @@ class PresentationLayer:
             "workflow": {k: 0 for k in origin_keys},
             "direct": {k: 0 for k in origin_keys},
         }
+        # Verify pillar: independent replicated execution only (a job
+        # submitted with `verify`). A receipt's signature being intact
+        # is NOT verification -- that is Evidence. `not_requested` is
+        # completed jobs that never asked for replication, so nothing
+        # is ever shown as verified just because it finished.
+        verification = {
+            "verified": 0, "disputed": 0, "unavailable": 0,
+            "awaiting": 0, "not_requested": 0,
+        }
 
         for job in jobs:
 
@@ -358,6 +367,21 @@ class PresentationLayer:
             if status in origin_keys:
                 origin = "workflow" if job.get("workflow_id") else "direct"
                 by_origin[origin][status] += 1
+
+            if job.get("verify"):
+                outcome = (job.get("verification") or {}).get("outcome")
+                if outcome == "agreed":
+                    verification["verified"] += 1
+                elif outcome == "disputed":
+                    verification["disputed"] += 1
+                elif outcome == "unavailable" or status == "completed":
+                    # Completed with no usable verdict: say so rather
+                    # than leaving it out of every bucket.
+                    verification["unavailable"] += 1
+                elif status in ("pending", "running"):
+                    verification["awaiting"] += 1
+            elif status == "completed":
+                verification["not_requested"] += 1
 
             if status == "running":
                 running_jobs += 1
@@ -398,6 +422,7 @@ class PresentationLayer:
             "cancelled_jobs": cancelled_jobs,
             "workflow_jobs": by_origin["workflow"],
             "direct_jobs": by_origin["direct"],
+            "verification": verification,
             # Seconds the longest-waiting queued job has been waiting
             # (None when nothing is queued or no timestamp parses).
             # Computed server-side so browser clock skew can't distort it.
