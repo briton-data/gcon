@@ -1190,12 +1190,16 @@ function renderPillars(data) {
     const active = (nodeSummary.idle ?? 0) + (nodeSummary.busy ?? 0);
     setText("pillar-exec-workers", nodeSummary.total === undefined ? "--" : active);
 
-    // Verify — does an EXISTING receipt's signature actually check out?
-    // Two real fields only: receipts_summary has no third "failed"
-    // bucket distinct from "unverified" (that was a phantom stat
-    // that always rendered "--" before this fix).
-    setText("pillar-verify-verified", receipts.verified ?? "--");
-    setText("pillar-verify-pending", receipts.unverified ?? "--");
+    // Verify — independent replicated execution ONLY: a job submitted
+    // with `verify` ran on several workers and their results were
+    // compared. Finishing a job, or its receipt's signature being
+    // intact, is not verification (the signature check is Evidence's).
+    // Nothing is "verified" unless the replicas agreed.
+    const ver = metrics.verification;
+    ["verified", "disputed", "awaiting", "unavailable", "notrequested"].forEach(k => {
+        const key = k === "notrequested" ? "not_requested" : k;
+        setText(`pillar-verify-${k}`, ver ? ver[key] : "--");
+    });
 
     // Evidence — not "Prove". What's generated is an HMAC-signed
     // receipt bound to the submitting node's mTLS identity: proof of
@@ -1220,6 +1224,10 @@ function renderPillars(data) {
     const completed = metrics.completed_jobs ?? 0;
     const generated = receipts.total ?? 0;
     setText("pillar-evidence-generated", receipts.total ?? "--");
+    // Signature integrity lives here, not in Verify: this is the HMAC
+    // check on the receipt record itself, which the coordinator runs
+    // against its own key, so it passes for every job that finishes.
+    setText("pillar-evidence-badsig", receipts.unverified ?? "--");
     setText(
         "pillar-evidence-awaiting",
         receipts.total === undefined ? "--" : Math.max(0, completed - generated)
@@ -1254,10 +1262,12 @@ function renderPillars(data) {
         setPillarSummary("exec", `${active} worker(s) · ${exe.running} running`, ft, fc);
     } else setPillarSummary("exec", "--", "--", "na");
 
-    if (receipts.total !== undefined) {
-        const [vt, vc] = receipts.total === 0 ? ["no receipts", "na"]
-            : receipts.unverified > 0 ? [`${receipts.unverified} unverified`, "warn"] : ["OK", "ok"];
-        setPillarSummary("verify", `${receipts.verified} verified`, vt, vc);
+    if (ver) {
+        const [vt, vc] = ver.disputed > 0 ? [`${ver.disputed} disputed`, "bad"]
+            : ver.unavailable > 0 ? [`${ver.unavailable} no verdict`, "warn"]
+            : (ver.verified + ver.awaiting) === 0 ? ["none requested", "na"]
+            : ["OK", "ok"];
+        setPillarSummary("verify", `${ver.verified} verified`, vt, vc);
     } else setPillarSummary("verify", "--", "--", "na");
 
     if (policy && policy.evaluated > 0) {
@@ -1267,8 +1277,9 @@ function renderPillars(data) {
 
     if (receipts.total !== undefined) {
         const missing = Math.max(0, completed - generated);
-        setPillarSummary("evidence", `${generated} receipt(s)`,
-            missing > 0 ? `${missing} missing` : "OK", missing > 0 ? "warn" : "ok");
+        const [et, ec] = receipts.unverified > 0 ? [`${receipts.unverified} unconfirmed`, "warn"]
+            : missing > 0 ? [`${missing} missing`, "warn"] : ["OK", "ok"];
+        setPillarSummary("evidence", `${generated} receipt(s)`, et, ec);
     } else setPillarSummary("evidence", "--", "--", "na");
 }
 
