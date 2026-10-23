@@ -655,4 +655,14 @@ MIGRATIONS: List[Migration] = [
             "ALTER TABLE invoice_line_items ADD COLUMN position INTEGER",
         ],
     ),
+    Migration(
+        version=17,
+        name="node_archived_at",
+        up_sql=[
+            # A worker staff have archived (gone for good, or deregistered): hidden from the dashboard and no
+            # longer counted against its organization's worker cap. The row itself stays, because receipts and
+            # job attempts still point at it. NULL = active. A worker that reconnects clears it.
+            "ALTER TABLE nodes ADD COLUMN archived_at TEXT",
+        ],
+    ),
 ]

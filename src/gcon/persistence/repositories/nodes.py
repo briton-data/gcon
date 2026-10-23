@@ -94,7 +94,8 @@ class NodeRepository:
                         auth_fingerprint = COALESCE(?, auth_fingerprint),
                         last_seen_at = ?, metadata_json = ?,
                         org_id = COALESCE(?, org_id),
-                        ed25519_public_key = COALESCE(?, ed25519_public_key)
+                        ed25519_public_key = COALESCE(?, ed25519_public_key),
+                        archived_at = NULL
                     WHERE node_id = ?
                     """,
                     (
@@ -142,6 +143,22 @@ class NodeRepository:
             "UPDATE nodes SET last_seen_at = ? WHERE node_id = ?",
             (datetime.now(UTC).isoformat(), node_id),
         )
+
+    def archive(self, node_id: str) -> None:
+        """Hide a worker that is gone: kept for history, not counted against its organization's worker cap."""
+        self.db.execute(
+            "UPDATE nodes SET archived_at = ? WHERE node_id = ?",
+            (datetime.now(UTC).isoformat(), node_id),
+        )
+
+    def count_active_for_org(self, org_id: str, exclude_node_id: Optional[str] = None) -> int:
+        """Workers of this organization that are not archived. `exclude_node_id` leaves one worker out, so a worker
+        enrolling again under its own name (after a redeploy) is not counted against itself."""
+        row = self.db.query_one(
+            "SELECT COUNT(*) AS n FROM nodes WHERE org_id = ? AND archived_at IS NULL AND node_id != ?",
+            (org_id, exclude_node_id or ""),
+        )
+        return int(row["n"]) if row else 0
 
     def remove(self, node_id: str) -> None:
         self.db.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))

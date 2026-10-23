@@ -115,6 +115,22 @@ class IncidentRepository:
                 resolved += 1
         return resolved
 
+    def clear_resolved(self) -> int:
+        """Delete every resolved incident. Open incidents are never touched."""
+        n = self.db.query_one("SELECT COUNT(*) AS n FROM incidents WHERE status = 'resolved'")["n"]
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM incidents WHERE status = 'resolved'")
+        return int(n)
+
+    def dismiss_resolved(self, incident_id: str) -> bool:
+        """Delete one RESOLVED incident. False if it does not exist or is still open."""
+        row = self.db.query_one("SELECT status FROM incidents WHERE incident_id = ?", (incident_id,))
+        if not row or row["status"] != "resolved":
+            return False
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM incidents WHERE incident_id = ?", (incident_id,))
+        return True
+
     def set_owner(self, incident_id: str, owner: Optional[str], now_iso: str) -> bool:
         """
         Take (owner=<who>) or release (owner=None) an OPEN incident.
