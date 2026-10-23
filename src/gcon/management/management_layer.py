@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 
 from . import plans as plans_mod
 from . import rbac
@@ -94,6 +94,7 @@ class ManagementLayer:
         if coordinator is not None:
             coordinator.org_job_cap_resolver = self._plan_job_cap_for_org
             coordinator.org_job_rules_resolver = self._plan_job_rules_for_org
+            coordinator.org_worker_cap_resolver = self._plan_worker_cap_for_org
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -394,6 +395,79 @@ class ManagementLayer:
             actor.name, "added worker to the shared pool" if enabled else "removed worker from the shared pool",
             node_id)
         return {"node_id": node_id, "shared_pool": enabled}
+
+    # ---- worker enrollment tokens (staff-minted, per organization) ------------------------------
+    # Starting figures, shown pre-filled in the dashboard form and changeable per token: a token that
+    # is never given a lifetime or a use count is a standing way into the organization's pool.
+    ENROLL_TOKEN_DEFAULT_HOURS = 72
+    ENROLL_TOKEN_MAX_HOURS = 24 * 30
+    ENROLL_TOKEN_DEFAULT_USES = 5
+    ENROLL_TOKEN_MAX_USES = 1000
+
+    def _enroll_control_plane(self, actor):
+        if actor is None or actor.role not in self._POOL_ADMIN_ROLES:
+            raise PermissionError("Only an Owner or Administrator can manage worker enrollment tokens.")
+        plane = getattr(self.coordinator, "control_plane", None)
+        if plane is None:
+            raise ValueError("Enrollment tokens need a coordinator with a control plane.")
+        return plane
+
+    def list_enroll_tokens(self, *, actor):
+        plane = self._enroll_control_plane(actor)
+        names = {o["org_id"]: o["name"] for o in self.get_organizations()}
+        tokens = []
+        for row in plane.enroll_tokens.list_all():
+            if row.get("revoked_at"):
+                status = "revoked"
+            else:
+                reason = plane.enroll_tokens.unusable_reason(row)
+                status = "expired" if reason and "expired" in reason else "used up" if reason else "active"
+            tokens.append({
+                "token_id": row["token_id"], "org_id": row["org_id"], "org_name": names.get(row["org_id"]),
+                "label": row.get("label"), "created_at": row.get("created_at"),
+                "expires_at": row.get("expires_at"), "max_uses": row.get("max_uses"),
+                "uses": row.get("uses") or 0, "status": status,
+            })
+        return tokens
+
+    def create_enroll_token(self, org_id, label=None, expires_in_hours=None, max_uses=None, *, actor):
+        plane = self._enroll_control_plane(actor)
+        org = self.org_registry.get_organization(org_id)
+        hours = self.ENROLL_TOKEN_DEFAULT_HOURS if expires_in_hours is None else expires_in_hours
+        uses = self.ENROLL_TOKEN_DEFAULT_USES if max_uses is None else max_uses
+        for name, value, top in (("expires_in_hours", hours, self.ENROLL_TOKEN_MAX_HOURS),
+                                 ("max_uses", uses, self.ENROLL_TOKEN_MAX_USES)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= top:
+                raise ValueError(f"{name} must be a whole number from 1 to {top}")
+        expires_at = (datetime.now(UTC) + timedelta(hours=hours)).isoformat()
+        token = plane.enroll_tokens.create_token(
+            org.org_id, label=(label or None), expires_at=expires_at, max_uses=uses)
+        self.audit_logger.log(
+            actor.name, f"minted a worker enrollment token (expires in {hours}h, {uses} use(s))", org.name)
+        # The plaintext is shown this once and never stored.
+        return {"token": token, "org_id": org.org_id, "expires_at": expires_at, "max_uses": uses}
+
+    def revoke_enroll_token(self, token_id, *, actor):
+        plane = self._enroll_control_plane(actor)
+        row = next((r for r in plane.enroll_tokens.list_all() if r["token_id"] == token_id), None)
+        if row is None:
+            raise ValueError("Unknown enrollment token.")
+        plane.enroll_tokens.revoke(token_id)
+        self.audit_logger.log(actor.name, "revoked a worker enrollment token", row.get("label") or token_id)
+        return {"token_id": token_id, "revoked": True}
+
+    # ---- archiving workers that are gone ----------------------------------------------------------
+    def archive_worker(self, node_id, *, actor):
+        result = self.coordinator.archive_node(node_id)
+        self.audit_logger.log(actor.name, "archived worker", node_id)
+        return result
+
+    def archive_offline_workers(self, *, actor):
+        result = self.coordinator.archive_offline_nodes()
+        if result["count"]:
+            self.audit_logger.log(actor.name, f"archived {result['count']} offline worker(s)",
+                                  ", ".join(result["archived"]))
+        return result
 
     @staticmethod
     def _guard_owner(actor, target=None, new_role=None):
@@ -1228,7 +1302,7 @@ class ManagementLayer:
         return plans_mod.load_plan_limits(self._plan_settings())
 
     def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs,
-                        allowed_programs=None, max_runtime_seconds=None, *, actor):
+                        allowed_programs=None, max_runtime_seconds=None, max_workers=None, *, actor):
         """Owner/Administrator only. Applies on the next request. Leaving
         `allowed_programs` / `max_runtime_seconds` as None keeps the tier's
         current value."""
@@ -1241,7 +1315,7 @@ class ManagementLayer:
         previous = self.get_plan_limits()[plan]
         values = plans_mod.save_plan_limits(
             settings, plan, requests_per_minute, max_concurrent_jobs,
-            allowed_programs, max_runtime_seconds, updated_by=actor.name)
+            allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers)
         detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
@@ -1253,6 +1327,8 @@ class ManagementLayer:
         if values["max_runtime_seconds"] != previous["max_runtime_seconds"]:
             detail += (f"; max runtime {previous['max_runtime_seconds']}s -> "
                        f"{values['max_runtime_seconds']}s")
+        if values["max_workers"] != previous["max_workers"]:
+            detail += f"; max workers {previous['max_workers']} -> {values['max_workers']}"
         self.audit_logger.log(actor.name, detail, plan)
         return self.get_plans_overview()
 
@@ -1278,6 +1354,7 @@ class ManagementLayer:
             # No environment override for these two: staff edit them per plan.
             "allowed_programs": list(table[tier]["allowed_programs"]),
             "max_runtime_seconds": table[tier]["max_runtime_seconds"],
+            "max_workers": table[tier]["max_workers"],
         }
 
     def get_plans_overview(self):
@@ -1326,6 +1403,14 @@ class ManagementLayer:
             label = None
         tier = plans_mod.plan_for_limits(label)
         return self.get_plan_limits()[tier]["max_concurrent_jobs"]
+
+    def _plan_worker_cap_for_org(self, org_id):
+        """Resolver handed to the coordinator: the most workers this org's plan allows (0 = none)."""
+        try:
+            label = self.org_registry.get_organization(org_id).plan
+        except ValueError:
+            label = None
+        return self.get_plan_limits()[plans_mod.plan_for_limits(label)]["max_workers"]
 
     def _plan_job_rules_for_org(self, org_id):
         """Resolver handed to the coordinator: what this org's plan lets its
@@ -1907,6 +1992,42 @@ class ManagementLayer:
 
     def mark_all_notifications_read(self):
         return self.notification_center.mark_all_read()
+
+    # ---- clearing finished noise off the dashboard -------------------------------------------
+    def dismiss_notification(self, notification_id, *, actor):
+        self.notification_center.dismiss(notification_id)
+        return {"dismissed": notification_id}
+
+    def clear_read_notifications(self, *, actor):
+        count = self.notification_center.clear_read()
+        if count:
+            self.audit_logger.log(actor.name, f"cleared {count} read notification(s)")
+        return {"cleared": count}
+
+    def clear_resolved_incidents(self, *, actor):
+        cp = getattr(self.coordinator, "control_plane", None)
+        count = cp.incidents.clear_resolved() if cp is not None else 0
+        if count:
+            self.audit_logger.log(actor.name, f"cleared {count} resolved incident(s)")
+        return {"cleared": count}
+
+    def dismiss_resolved_incident(self, incident_id, *, actor):
+        cp = getattr(self.coordinator, "control_plane", None)
+        if cp is None or not cp.incidents.dismiss_resolved(incident_id):
+            raise ValueError("Only a resolved incident can be dismissed.")
+        return {"dismissed": incident_id}
+
+    def clear_audit_logs(self, older_than_days, *, actor):
+        """Owner only. Deletes audit entries older than N days, and records that it did, so the trail still
+        shows who cleared it and when."""
+        if actor is None or actor.role != "Owner":
+            raise PermissionError("Only an Owner can clear the audit log.")
+        if isinstance(older_than_days, bool) or not isinstance(older_than_days, int) or not 0 <= older_than_days <= 3650:
+            raise ValueError("older_than_days must be a whole number from 0 to 3650")
+        cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+        count = self.audit_logger.clear_older_than(cutoff)
+        self.audit_logger.log(actor.name, f"cleared {count} audit log entries older than {older_than_days} day(s)")
+        return {"cleared": count}
 
     # ------------------------------------------------------------
     # Dashboard cards
