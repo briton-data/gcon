@@ -122,6 +122,16 @@ class EnrollTokenRepository:
         )
         return [dict(r) for r in rows]
 
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Every organization's tokens, newest first. The hash is never returned."""
+        rows = self.db.query("SELECT * FROM enroll_tokens ORDER BY created_at DESC")
+        out = []
+        for r in rows:
+            row = dict(r)
+            row.pop("token_hash", None)
+            out.append(row)
+        return out
+
     def revoke(self, token_id: str) -> None:
         self.db.execute(
             "UPDATE enroll_tokens SET revoked_at = ? WHERE token_id = ?",

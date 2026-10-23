@@ -16,7 +16,9 @@ Exactly these, no more:
     for exactly what that does and does not guarantee),
   * `max_runtime_seconds`  -- how long one of its jobs may run before the worker
     kills it (enforced by passing the limit to the worker when the job is
-    dispatched).
+    dispatched),
+  * `max_workers`          -- how many workers the organization may have enrolled
+    at once (enforced when a worker enrolls; archived workers do not count).
 
 Pricing is NOT part of a plan: rates stay in gcon.billing.pricing and are the
 same for every organization.
@@ -59,7 +61,7 @@ log = logging.getLogger(__name__)
 
 PLAN_NAMES = ("Standard", "Pro", "Enterprise")
 DEFAULT_PLAN = "Standard"
-LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs", "allowed_programs", "max_runtime_seconds")
+LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs", "allowed_programs", "max_runtime_seconds", "max_workers")
 MAX_LIMIT_VALUE = 1_000_000
 MAX_RUNTIME_SECONDS = 30 * 24 * 3600
 MAX_PROGRAMS = 100
@@ -72,17 +74,17 @@ DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
     "Standard": {
         "requests_per_minute": 600, "max_concurrent_jobs": 50,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
-        "max_runtime_seconds": 3600,
+        "max_runtime_seconds": 3600, "max_workers": 5,
     },
     "Pro": {
         "requests_per_minute": 3000, "max_concurrent_jobs": 200,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo", "bash", "sh", "pip", "pip3"],
-        "max_runtime_seconds": 14400,
+        "max_runtime_seconds": 14400, "max_workers": 25,
     },
     "Enterprise": {
         "requests_per_minute": 12000, "max_concurrent_jobs": 1000,
         "allowed_programs": ["*"],
-        "max_runtime_seconds": 86400,
+        "max_runtime_seconds": 86400, "max_workers": 100,
     },
 }
 
@@ -141,6 +143,7 @@ def validate_limits(
     max_concurrent_jobs: Any,
     allowed_programs: Any,
     max_runtime_seconds: Any,
+    max_workers: Any = 0,
 ) -> Dict[str, Any]:
     """All four limits, cleaned. The numbers must be ints (0 = no limit; the
     request rate and job cap up to MAX_LIMIT_VALUE, the runtime up to 30 days);
@@ -150,6 +153,7 @@ def validate_limits(
         ("requests_per_minute", requests_per_minute, MAX_LIMIT_VALUE),
         ("max_concurrent_jobs", max_concurrent_jobs, MAX_LIMIT_VALUE),
         ("max_runtime_seconds", max_runtime_seconds, MAX_RUNTIME_SECONDS),
+        ("max_workers", max_workers, MAX_LIMIT_VALUE),
     ):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{field} must be a whole number (0 means no limit).")
@@ -186,6 +190,7 @@ def load_plan_limits(settings: Any) -> Dict[str, Dict[str, int]]:
             table[plan] = validate_limits(
                 merged.get("requests_per_minute"), merged.get("max_concurrent_jobs"),
                 merged.get("allowed_programs"), merged.get("max_runtime_seconds"),
+                merged.get("max_workers"),
             )
         except (ValueError, AttributeError, TypeError):
             log.error("Ignoring stored limits for plan %s (invalid); using its defaults.", plan)
@@ -200,9 +205,10 @@ def save_plan_limits(
     allowed_programs: Any = None,
     max_runtime_seconds: Any = None,
     updated_by: Optional[str] = None,
+    max_workers: Any = None,
 ) -> Dict[str, Any]:
     """Validate and store one tier's limits; the other tiers are kept as they
-    are. `allowed_programs` / `max_runtime_seconds` left as None keep that
+    are. `allowed_programs` / `max_runtime_seconds` / `max_workers` left as None keep that
     tier's current value. Returns the stored values."""
     plan = canonical_plan(plan)
     table = load_plan_limits(settings)
@@ -212,6 +218,7 @@ def save_plan_limits(
         max_concurrent_jobs,
         current["allowed_programs"] if allowed_programs is None else allowed_programs,
         current["max_runtime_seconds"] if max_runtime_seconds is None else max_runtime_seconds,
+        current["max_workers"] if max_workers is None else max_workers,
     )
     table[plan] = values
     settings.set(SETTINGS_KEY, json.dumps(table), updated_by=updated_by)

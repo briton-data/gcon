@@ -711,6 +711,7 @@ class WebServer:
                     payload.get("max_concurrent_jobs"),
                     payload.get("allowed_programs"),
                     payload.get("max_runtime_seconds"),
+                    payload.get("max_workers"),
                     actor=user,
                 )
             except PermissionError as e:
@@ -741,6 +742,48 @@ class WebServer:
                     node_id, bool(payload.get("enabled")), actor=user)
             except PermissionError as e:
                 raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        # Worker enrollment tokens (one per organization, with a lifetime and a use count) -- Owner/Administrator.
+        @self.app.get("/management/enroll-tokens")
+        def mgmt_list_enroll_tokens(user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.list_enroll_tokens(actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/enroll-tokens")
+        def mgmt_create_enroll_token(payload: dict, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.create_enroll_token(
+                    payload.get("org_id"), payload.get("label"),
+                    payload.get("expires_in_hours"), payload.get("max_uses"), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/enroll-tokens/{token_id}/revoke")
+        def mgmt_revoke_enroll_token(token_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.revoke_enroll_token(token_id, actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        # Archive workers that are gone (offline or deregistered): off the dashboard, off the plan's worker count.
+        @self.app.post("/management/nodes/archive-offline")
+        def mgmt_archive_offline_nodes(user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.archive_offline_workers(actor=user)
+
+        @self.app.post("/management/nodes/{node_id}/archive")
+        def mgmt_archive_node(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.archive_worker(node_id, actor=user)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -1100,6 +1143,43 @@ class WebServer:
         @self.app.post("/management/notifications/{notification_id}/read")
         def mgmt_mark_notification_read(notification_id: str, user=Depends(self.current_user)):
             return self.management.mark_notification_read(notification_id)
+
+        @self.app.post("/management/notifications/clear-read")
+        def mgmt_clear_read_notifications(user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.clear_read_notifications(actor=user)
+
+        @self.app.post("/management/notifications/{notification_id}/dismiss")
+        def mgmt_dismiss_notification(notification_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.dismiss_notification(notification_id, actor=user)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.post("/management/incidents/clear-resolved")
+        def mgmt_clear_resolved_incidents(user=Depends(self.require_permission("Manage cluster"))):
+            return self.management.clear_resolved_incidents(actor=user)
+
+        @self.app.post("/management/incidents/{incident_id}/dismiss")
+        def mgmt_dismiss_incident(incident_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.dismiss_resolved_incident(incident_id, actor=user)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/events/clear")
+        def mgmt_clear_events(user=Depends(self.require_permission("Manage cluster"))):
+            hidden = self.presentation.clear_events()
+            self.management.audit_logger.log(user.name, f"cleared {hidden} event(s) from the live feed")
+            return {"cleared": hidden}
+
+        @self.app.post("/management/audit-logs/clear")
+        def mgmt_clear_audit_logs(payload: dict, user=Depends(self.require_permission("Manage users"))):
+            try:
+                return self.management.clear_audit_logs(payload.get("older_than_days"), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
         @self.app.post("/management/notifications/mark-all-read")
         def mgmt_mark_all_notifications_read(user=Depends(self.current_user)):

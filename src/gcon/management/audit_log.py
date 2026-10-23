@@ -67,5 +67,13 @@ class AuditLogger:
                 conn.execute("DELETE FROM audit_log WHERE seq < ?", (cutoff_seq,))
         return entry
 
+    def clear_older_than(self, cutoff_iso):
+        """Delete entries stamped before `cutoff_iso`. Returns how many were removed."""
+        with self.db.transaction() as conn:
+            gone = [e for e in self.entries if e["timestamp"] < cutoff_iso]
+            self.entries = [e for e in self.entries if e["timestamp"] >= cutoff_iso]
+            conn.execute("DELETE FROM audit_log WHERE timestamp < ?", (cutoff_iso,))
+        return len(gone)
+
     def list_entries(self, limit=100):
         return list(reversed(self.entries[-limit:]))

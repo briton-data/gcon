@@ -971,7 +971,25 @@ async function loadIncidentsTab() {
         ]), "No open incidents", 5);
         fillTable("inc-resolved-body", resolved.map(i => [
             severityCell(i.severity), i.title, i.subject, fmtWhen(i.first_seen), fmtWhen(i.resolved_at),
-        ]), "Nothing resolved yet", 5);
+        ]), "Nothing resolved yet", 6);
+        const resolvedBody = document.getElementById("inc-resolved-body");
+        if (resolvedBody && resolved.length) {
+            [...resolvedBody.rows].forEach((tr, idx) => {
+                const td = document.createElement("td");
+                const btn = document.createElement("button");
+                btn.className = "btn btn-sm btn-link p-0 text-secondary";
+                btn.title = "Delete this resolved incident";
+                btn.innerHTML = `<i class="bi bi-x-lg"></i>`;
+                btn.addEventListener("click", async () => {
+                    try {
+                        await fetchJson(`/management/incidents/${encodeURIComponent(resolved[idx].incident_id)}/dismiss`, { method: "POST" });
+                        await loadIncidentsTab();
+                    } catch (err) { showToast(err.message || "Failed to delete the incident.", true); }
+                });
+                td.appendChild(btn);
+                tr.appendChild(td);
+            });
+        }
     } catch (err) {
         setMsg("inc-open-note", "Unavailable (needs 'View monitoring' or the request failed)");
     }
@@ -2298,27 +2316,52 @@ async function loadAdminConfig() {
     }
 }
 
+// Why a worker that shows as "online" may still not be taking customer jobs: the coordinator
+// states the reasons per worker (sandbox, organization, connection, version...).
+function nodeJobsCell(node) {
+    if (node.can_run_customer_jobs) {
+        return `<span class="badge bg-success">ready</span>`;
+    }
+    const why = (node.blockers || []).map(escapeHtml).join("<br>");
+    return `<span class="badge bg-warning text-dark">can't take customer jobs</span><div class="small text-secondary mt-1">${why}</div>`;
+}
+
 async function loadAdminNodes() {
     const body = document.getElementById("admin-nodes-body");
     if (!body) return;
     try {
         const nodes = await fetchJson("/nodes");
+        const offline = nodes.filter(n => n.status === "offline").length;
+        const ready = nodes.filter(n => n.can_run_customer_jobs).length;
+        setMsg("admin-nodes-summary", nodes.length
+            ? `${nodes.length - offline} online, ${ready} able to run a customer's job, ${offline} offline.`
+            : "");
+        const archiveAll = document.getElementById("admin-archive-offline-btn");
+        if (archiveAll) {
+            archiveAll.disabled = offline === 0;
+            archiveAll.innerHTML = `<i class="bi bi-archive me-1"></i>Archive all offline${offline ? ` (${offline})` : ""}`;
+        }
         if (nodes.length === 0) {
-            body.innerHTML = `<tr><td colspan="4" class="text-center text-secondary">No registered nodes.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No registered nodes.</td></tr>`;
             return;
         }
         let rows = "";
         for (const node of nodes) {
+            const isOffline = node.status === "offline";
+            const notConnected = !isOffline && node.connected === false
+                ? ` <span class="badge bg-warning text-dark" title="Registered, but its control stream is not up yet, so no job can be sent to it">not connected</span>` : "";
+            const outdated = node.outdated ? ` <span class="badge bg-danger">outdated</span>` : "";
+            const action = isOffline
+                ? `<button class="btn btn-sm btn-outline-secondary admin-archive-btn" data-node-id="${escapeHtml(node.node_id)}" title="Gone for good? Take it off this list and out of the plan's worker count">Archive</button>`
+                : `<button class="btn btn-sm btn-outline-danger admin-deregister-btn" data-node-id="${escapeHtml(node.node_id)}">Deregister</button>`;
             rows += `
                 <tr>
-                    <td>${escapeHtml(node.node_id)}</td>
-                    <td>${statusBadge(node.status)}</td>
+                    <td>${escapeHtml(node.node_id)}<div class="small text-secondary">${node.agent_version ? "v" + escapeHtml(node.agent_version) : "version unknown"}${outdated}</div></td>
+                    <td>${statusBadge(node.status)}${notConnected}</td>
+                    <td class="small">${escapeHtml(node.serves || "")}</td>
+                    <td>${nodeJobsCell(node)}</td>
                     <td>${escapeHtml(node.running_jobs)}</td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-danger admin-deregister-btn" data-node-id="${escapeHtml(node.node_id)}">
-                            Deregister
-                        </button>
-                    </td>
+                    <td>${action}</td>
                 </tr>
             `;
         }
@@ -2338,14 +2381,97 @@ async function loadAdminNodes() {
                 }
             });
         });
+        document.querySelectorAll(".admin-archive-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                btn.disabled = true;
+                try {
+                    await fetchJson(`/management/nodes/${encodeURIComponent(btn.dataset.nodeId)}/archive`, { method: "POST" });
+                    showToast(`Worker ${btn.dataset.nodeId} archived.`, false);
+                    await loadAdmin();
+                } catch (err) {
+                    showToast(err.message || "Failed to archive worker.", true);
+                    btn.disabled = false;
+                }
+            });
+        });
     } catch (err) {
         console.error("Failed to load admin node list:", err);
         setConnectionStatus(false);
     }
 }
 
+// ---- Worker enrollment tokens (Administration) ----
+async function loadEnrollTokens() {
+    const body = document.getElementById("enroll-tokens-body");
+    if (!body) return;
+    try {
+        const [tokens, orgs] = await Promise.all([
+            fetchJson("/management/enroll-tokens"),
+            fetchJson("/management/organizations"),
+        ]);
+        const select = document.getElementById("enroll-token-org");
+        if (select && select.options.length !== orgs.length) {
+            select.innerHTML = orgs.map(o => `<option value="${escapeHtml(o.org_id)}">${escapeHtml(o.name)}</option>`).join("");
+        }
+        if (!tokens.length) {
+            body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">No enrollment tokens yet.</td></tr>`;
+            return;
+        }
+        const cls = { active: "bg-success", revoked: "bg-danger", expired: "bg-secondary", "used up": "bg-secondary" };
+        body.innerHTML = tokens.map(t => `
+            <tr>
+                <td>${escapeHtml(t.org_name || t.org_id)}</td>
+                <td>${escapeHtml(t.label || "")}</td>
+                <td><span class="badge ${cls[t.status] || "bg-secondary"}">${escapeHtml(t.status)}</span></td>
+                <td>${escapeHtml(t.uses)} / ${escapeHtml(t.max_uses ?? "no limit")}</td>
+                <td>${escapeHtml(fmtWhen(t.expires_at))}</td>
+                <td>${t.status === "active" ? `<button class="btn btn-sm btn-outline-danger enroll-token-revoke-btn" data-token-id="${escapeHtml(t.token_id)}">Revoke</button>` : ""}</td>
+            </tr>
+        `).join("");
+        body.querySelectorAll(".enroll-token-revoke-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                if (!confirm("Revoke this token? Workers that have not enrolled yet will no longer be able to.")) return;
+                try {
+                    await fetchJson(`/management/enroll-tokens/${encodeURIComponent(btn.dataset.tokenId)}/revoke`, { method: "POST" });
+                    showToast("Token revoked.", false);
+                    await loadEnrollTokens();
+                } catch (err) {
+                    showToast(err.message || "Failed to revoke token.", true);
+                }
+            });
+        });
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">Only an Owner or Administrator can manage enrollment tokens.</td></tr>`;
+    }
+}
+
+async function createEnrollToken() {
+    const result = document.getElementById("enroll-token-result");
+    const hours = parseInt(document.getElementById("enroll-token-hours").value, 10);
+    const uses = parseInt(document.getElementById("enroll-token-uses").value, 10);
+    const orgId = document.getElementById("enroll-token-org").value;
+    if (!orgId) { showToast("Pick an organization first.", true); return; }
+    try {
+        const made = await fetchJson("/management/enroll-tokens", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                org_id: orgId,
+                label: document.getElementById("enroll-token-label").value.trim() || null,
+                expires_in_hours: hours,
+                max_uses: uses,
+            }),
+        });
+        result.classList.remove("d-none");
+        result.innerHTML = `Copy this token now, it is not shown again:<br><code class="user-select-all">${escapeHtml(made.token)}</code>`;
+        await loadEnrollTokens();
+    } catch (err) {
+        showToast(err.message || "Failed to create token.", true);
+    }
+}
+
 async function loadAdmin() {
-    await Promise.all([loadAdminConfig(), loadAdminNodes()]);
+    await Promise.all([loadAdminConfig(), loadAdminNodes(), loadEnrollTokens()]);
 }
 
 async function triggerScale(direction) {
@@ -2403,6 +2529,47 @@ function setupControls() {
         const btn = document.getElementById(id);
         if (btn) btn.addEventListener("click", () => triggerScale("down"));
     });
+
+    // Clear / archive controls. Each asks first, because none of them can be undone.
+    const wireClear = (id, ask, run) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+            if (!confirm(ask)) return;
+            try { await run(); } catch (err) { showToast(err.message || "That did not work.", true); }
+        });
+    };
+    const post = (url, payload) => fetchJson(url, payload === undefined ? { method: "POST" } : {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    wireClear("admin-archive-offline-btn",
+        "Archive every offline worker? They leave this list and the plan's worker count. A worker that reconnects comes back on its own.",
+        async () => { const r = await post("/management/nodes/archive-offline"); showToast(`${r.count} worker(s) archived.`); await loadAdmin(); });
+    wireClear("inc-clear-resolved-btn",
+        "Delete all resolved incidents? Open incidents are not touched.",
+        async () => { const r = await post("/management/incidents/clear-resolved"); showToast(`${r.cleared} resolved incident(s) cleared.`); await loadIncidentsTab(); });
+    wireClear("events-clear-btn",
+        "Hide the events shown so far? They are kept; new events still appear.",
+        async () => { const r = await post("/management/events/clear"); showToast(`${r.cleared} event(s) cleared from the feed.`); await loadEventsTab(); });
+    wireClear("notif-tab-clear-read-btn",
+        "Delete every notification already marked read? Unread ones stay.",
+        async () => { const r = await post("/management/notifications/clear-read"); showToast(`${r.cleared} notification(s) cleared.`); await refreshNotifications(); });
+    const auditBtn = document.getElementById("audit-clear-btn");
+    if (auditBtn) {
+        auditBtn.addEventListener("click", async () => {
+            const answer = prompt("Delete audit entries older than how many days? (0 = all of them). The clearing itself is recorded.", "30");
+            if (answer === null) return;
+            const days = parseInt(answer, 10);
+            if (!/^\d+$/.test(answer.trim()) || days > 3650) { showToast("Enter a whole number of days from 0 to 3650.", true); return; }
+            try {
+                const r = await post("/management/audit-logs/clear", { older_than_days: days });
+                showToast(`${r.cleared} audit entr${r.cleared === 1 ? "y" : "ies"} cleared.`);
+                await loadAuditLogsTab();
+            } catch (err) { showToast(err.message || "Failed to clear the audit log.", true); }
+        });
+    }
+    const tokenBtn = document.getElementById("enroll-token-create-btn");
+    if (tokenBtn) tokenBtn.addEventListener("click", createEnrollToken);
 
     const rediscoverBtn = document.getElementById("admin-rediscover-nodes-btn");
     if (rediscoverBtn) {
@@ -2957,6 +3124,7 @@ async function loadPlansPanel() {
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-rpm" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.requests_per_minute)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-jobs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_concurrent_jobs)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-runtime" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_runtime_seconds)}" style="max-width: 9rem;"></td>
+                <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-workers" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_workers)}" style="max-width: 7rem;"></td>
                 <td><input type="text" class="form-control form-control-sm plan-programs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((p.allowed_programs || []).join(", "))}" style="min-width: 14rem;"></td>
                 <td>${escapeHtml(p.organizations)}</td>
                 <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
@@ -2969,9 +3137,10 @@ async function loadPlansPanel() {
                 const rpm = body.querySelector(`.plan-rpm[data-plan="${plan}"]`).value.trim();
                 const jobs = body.querySelector(`.plan-jobs[data-plan="${plan}"]`).value.trim();
                 const runtime = body.querySelector(`.plan-runtime[data-plan="${plan}"]`).value.trim();
+                const workers = body.querySelector(`.plan-workers[data-plan="${plan}"]`).value.trim();
                 const programs = body.querySelector(`.plan-programs[data-plan="${plan}"]`).value
                     .split(",").map(x => x.trim()).filter(x => x.length > 0);
-                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime)) {
+                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime) || !/^\d+$/.test(workers)) {
                     showToast("Enter whole numbers (0 means no limit).", true);
                     return;
                 }
@@ -2987,6 +3156,7 @@ async function loadPlansPanel() {
                             requests_per_minute: parseInt(rpm, 10),
                             max_concurrent_jobs: parseInt(jobs, 10),
                             max_runtime_seconds: parseInt(runtime, 10),
+                            max_workers: parseInt(workers, 10),
                             allowed_programs: programs,
                         }),
                     });
@@ -3019,7 +3189,7 @@ async function loadPlansPanel() {
         }
     } catch (err) {
         console.error("Failed to load plans:", err);
-        body.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">Could not load plans.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="8" class="text-center text-secondary">Could not load plans.</td></tr>`;
     }
 }
 
@@ -4318,6 +4488,7 @@ function renderNotificationItem(n, compact) {
             </div>
             <div class="gcon-activity-message">${escapeHtml(n.message)}</div>
             ${!n.read ? `<button class="btn btn-sm btn-link p-0 gcon-notif-read-btn" title="Mark as read"><i class="bi bi-check2"></i></button>` : ""}
+            <button class="btn btn-sm btn-link p-0 ms-1 text-secondary gcon-notif-dismiss-btn" title="Delete"><i class="bi bi-x-lg"></i></button>
         </div>
     `;
 }
@@ -4335,7 +4506,22 @@ async function markNotificationRead(notificationId) {
     }
 }
 
+async function dismissNotification(notificationId) {
+    try {
+        await fetchJson(`/management/notifications/${encodeURIComponent(notificationId)}/dismiss`, { method: "POST" });
+        await refreshNotifications();
+    } catch (err) {
+        showToast(err.message || "Failed to delete the notification.", true);
+    }
+}
+
 function attachNotifClickHandlers(container) {
+    container.querySelectorAll(".gcon-notif-dismiss-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            dismissNotification(btn.closest(".gcon-notif-item").dataset.notifId);
+        });
+    });
     container.querySelectorAll(".gcon-notif-read-btn").forEach(btn => {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();

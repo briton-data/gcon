@@ -10,7 +10,7 @@ from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
 
-from .registry import NodeRegistry
+from .registry import NodeRegistry, node_connected
 from .scheduler import Scheduler
 from .communication import CommunicationManager
 from gcon.cluster.autoscaler import AutoScaler
@@ -129,6 +129,8 @@ class GCONCoordinator:
             * transport_config.heartbeat_miss_threshold
         )
         self.registry = NodeRegistry(timeout_seconds=node_timeout_seconds)
+        # Workers older than this never receive a job (GCON_MIN_WORKER_VERSION, e.g. "1.2.0"). Unset = no check.
+        self.registry.min_worker_version = os.environ.get("GCON_MIN_WORKER_VERSION", "").strip() or None
         # Historical/durable node records restored from the control
         # plane (see restore_from_persistence). This is deliberately
         # separate from self.registry, which holds *live* scheduling
@@ -265,6 +267,9 @@ class GCONCoordinator:
         # ManagementLayer. Programs are checked at submission; the runtime
         # limit is handed to the worker when the job is dispatched.
         self.org_job_rules_resolver = None
+        # Optional callable(org_id) -> the most workers the org's plan allows (0 = no limit), also set by
+        # ManagementLayer. Enforced when a worker enrolls (see the Enroll handler in grpc_transport).
+        self.org_worker_cap_resolver = None
         # recover_jobs() (worker-loss reassignment) and retry_job/
         # retry_failed_jobs (manual retry) previously had no cap at
         # all -- a job that fails deterministically (bad command, a
@@ -4029,13 +4034,9 @@ class GCONCoordinator:
         """
         Return all currently idle node objects.
         """
-        idle_nodes = []
-
-        for info in self.registry.snapshot().values():
-            if info["status"] == "idle":
-                idle_nodes.append(info["node"])
-
-        return idle_nodes
+        # Same definition of "idle" as the scheduler and get_idle_node_count: a worker a job can really be
+        # sent to (connected, not draining, not quarantined, not outdated).
+        return self.registry.available_nodes()
     
     def register_job_artifact(self, job_id, node_id, filepath):
         """
@@ -4149,6 +4150,8 @@ class GCONCoordinator:
         for node_id, info in self.registry.snapshot().items():
             if org_id is not None and info.get("org_id") != org_id:
                 continue
+            connected = node_connected(info["node"])
+            blockers, serves = self._node_blockers(info, connected)
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
@@ -4169,9 +4172,91 @@ class GCONCoordinator:
                 "gpu_memory_total": info.get("gpu_memory_total", 0),
                 "gpu_memory_used": info.get("gpu_memory_used", 0),
                 "gpu_utilization_percent": info.get("gpu_utilization_percent", 0.0),
+                # Registered is not connected: the control stream comes up just after registration.
+                "connected": connected,
+                "agent_version": info.get("agent_version"),
+                "outdated": bool(info.get("outdated")),
+                "sandboxed": bool(getattr(info["node"], "sandboxed", False)),
+                "shared_pool": bool(info.get("shared_pool")),
+                # Who this worker can take jobs from, and what (if anything) stops it taking a customer's job
+                # right now. Empty blockers = it can run a customer job as soon as it is idle.
+                "serves": serves,
+                "blockers": blockers,
+                "can_run_customer_jobs": not blockers,
             })
 
         return nodes
+
+    def _node_blockers(self, info, connected):
+        """(blockers, serves) for one registry entry. The same rules the scheduler applies (select_node and
+        registry.dispatchable), stated per worker so staff can see WHY an 'online' worker is not taking jobs."""
+        node = info["node"]
+        sandboxed = bool(getattr(node, "sandboxed", False))
+        blockers = []
+        if info.get("status") == "offline":
+            blockers.append("offline: no heartbeat")
+        elif not connected:
+            blockers.append("registered but its control stream is not connected")
+        if info.get("outdated"):
+            blockers.append(
+                f"worker version {info.get('agent_version') or 'unknown'} is below the minimum "
+                f"{self.registry.min_worker_version}")
+        if info.get("draining"):
+            blockers.append("draining")
+        if info.get("quarantined"):
+            blockers.append("quarantined")
+        if info.get("org_id") is not None:
+            serves = f"organization {info['org_id']}"
+            if self._sandbox_policy == "required" and not sandboxed:
+                blockers.append("no verified container sandbox (customer jobs require one)")
+        elif info.get("shared_pool"):
+            serves = "shared pool"
+            if not sandboxed:
+                blockers.append("no verified container sandbox (the shared pool requires one)")
+        else:
+            serves = "jobs with no organization only"
+            blockers.append(
+                "no organization (enrolled with the shared token) and not in the shared pool: takes no customer jobs")
+        return blockers, serves
+
+    def archive_node(self, node_id):
+        """Take a worker that is gone off the dashboard and out of its organization's worker count. Only a worker
+        that is offline (or already absent from the live registry) can be archived: an online one is drained or
+        stopped first. The record itself stays, because receipts and job attempts still point at it; a worker
+        that reconnects later clears the archive on its own."""
+        try:
+            status = self.registry.get_node_info(node_id).get("status")
+        except ValueError:
+            status = None
+        if status is not None and status != "offline":
+            raise ValueError(f"Worker '{node_id}' is {status}, not offline. Drain or stop it first.")
+        known_durably = self.control_plane is not None and self.control_plane.nodes.get(node_id) is not None
+        if status is None and not known_durably:
+            raise ValueError(f"Worker '{node_id}' is not known to this coordinator.")
+        if status is not None:
+            self.event_bus.publish(Event(
+                timestamp=datetime.now(UTC), event_type=EventType.NODE_DEREGISTERED, source="Coordinator",
+                payload={"node_id": node_id, "status": "archived"},
+            ))
+            self.registry.remove(node_id)
+        if known_durably:
+            self.control_plane.nodes.archive(node_id)
+        _log_line(f"Node '{node_id}' archived.")
+        return {"node_id": node_id, "archived": True}
+
+    def archive_offline_nodes(self):
+        """Archive every worker that is currently offline. Returns the ids archived."""
+        gone = [
+            node_id for node_id, info in self.registry.snapshot().items() if info.get("status") == "offline"
+        ]
+        archived = []
+        for node_id in gone:
+            try:
+                self.archive_node(node_id)
+                archived.append(node_id)
+            except ValueError:
+                continue
+        return {"archived": archived, "count": len(archived)}
 
     def get_jobs_page(self, status=None, search=None, org_id=None, limit=50, offset=0):
         """
@@ -5013,7 +5098,8 @@ class GCONCoordinator:
         """
         nodes = self.get_nodes()
 
-        summary = {"total": len(nodes), "idle": 0, "busy": 0, "offline": 0, "draining": 0}
+        summary = {"total": len(nodes), "idle": 0, "busy": 0, "offline": 0, "draining": 0,
+                   "customer_ready": 0}
 
         for node in nodes:
             status = node.get("status", "unknown")
@@ -5021,6 +5107,9 @@ class GCONCoordinator:
                 summary[status] += 1
             if node.get("draining"):
                 summary["draining"] += 1
+            # Workers that could run a customer's job (as opposed to merely being online).
+            if node.get("can_run_customer_jobs"):
+                summary["customer_ready"] += 1
 
         return summary
     

@@ -12,8 +12,10 @@ from datetime import datetime, UTC
 
 
 class RemoteNodeProxy:
-    def __init__(self, node_id, transport, org_id=None, address=None, sandboxed=False):
+    def __init__(self, node_id, transport, org_id=None, address=None, sandboxed=False, agent_version=None):
         self.node_id = node_id
+        # What the worker reported at registration (checked against GCON_MIN_WORKER_VERSION).
+        self.agent_version = agent_version
         self.transport = transport
         self.status = "idle"
         # Which company this (dedicated) node belongs to, if any --
@@ -31,6 +33,18 @@ class RemoteNodeProxy:
         # older worker that reports nothing is never assumed isolated.
         # Read by Scheduler.select_node to honor GCON_SANDBOX_POLICY.
         self.sandboxed = sandboxed
+
+    def is_connected(self):
+        """Is this worker's control stream up right now? Registered is not the same as connected: the stream comes
+        up just after registration, and drops before the heartbeat timeout notices."""
+        get_node = getattr(self.transport, "get_node", None)
+        if get_node is None:
+            return True
+        try:
+            get_node(self.node_id)
+            return True
+        except Exception:
+            return False
 
     def execute_job(self, job_id, command, timeout=None):
         self.status = "busy"

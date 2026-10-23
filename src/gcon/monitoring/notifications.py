@@ -143,6 +143,22 @@ class NotificationCenter:
                     return entry
         raise ValueError(f"Notification '{notification_id}' does not exist.")
 
+    def dismiss(self, notification_id):
+        """Delete one notification."""
+        with self.db.transaction() as conn:
+            if not any(e["notification_id"] == notification_id for e in self.entries):
+                raise ValueError(f"Notification '{notification_id}' does not exist.")
+            self.entries = [e for e in self.entries if e["notification_id"] != notification_id]
+            conn.execute("DELETE FROM notifications WHERE notification_id = ?", (notification_id,))
+
+    def clear_read(self):
+        """Delete every notification already marked read. Unread ones are never touched."""
+        with self.db.transaction() as conn:
+            gone = [e for e in self.entries if e["read"]]
+            self.entries = [e for e in self.entries if not e["read"]]
+            conn.execute("DELETE FROM notifications WHERE read = 1")
+        return len(gone)
+
     def mark_all_read(self):
         with self.db.transaction() as conn:
             for entry in self.entries:

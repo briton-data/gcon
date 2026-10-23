@@ -38,6 +38,7 @@ class PresentationLayer:
         # nodes it personally remembers creating.
         self.autoscaler = coordinator.autoscaler
         self.started_at = datetime.now(UTC)
+        self._events_cleared_at = None
   
     def get_nodes(self, org_id=None):
         """
@@ -165,6 +166,10 @@ class PresentationLayer:
         Return the most recent cluster events, formatted for display.
         """
         events = self.coordinator.get_events(limit=limit)
+        # "Clear" hides what was there when staff pressed it; the events themselves are kept, because
+        # other parts of the coordinator (for example the scheduler's paused/resumed history) read them.
+        if self._events_cleared_at is not None:
+            events = [e for e in events if e.timestamp > self._events_cleared_at]
 
         formatted = []
         for event in events[-limit:]:
@@ -270,6 +275,12 @@ class PresentationLayer:
         """
         return self.coordinator.register_agent(node)
 
+
+    def clear_events(self):
+        """Hide the events shown so far from the live feed. Returns how many were hidden."""
+        shown = len(self.get_events(limit=10000))
+        self._events_cleared_at = datetime.now(UTC)
+        return shown
 
     def deregister_node(self, node_id):
         """

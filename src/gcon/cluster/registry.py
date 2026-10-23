@@ -1,5 +1,50 @@
 import threading
 from datetime import datetime, UTC, timedelta
+
+
+def version_tuple(version):
+    """'1.2.3' -> (1, 2, 3). None when it is not dotted whole numbers."""
+    try:
+        return tuple(int(part) for part in str(version).strip().split("."))
+    except (TypeError, ValueError):
+        return None
+
+
+def version_below(version, minimum):
+    """True when a worker reporting `version` is older than `minimum`. No minimum set = never. A worker that
+    reports no readable version is below any minimum: it cannot be shown to be new enough."""
+    if not minimum:
+        return False
+    wanted = version_tuple(minimum)
+    if wanted is None:
+        return False
+    have = version_tuple(version)
+    return have is None or have < wanted
+
+
+def node_connected(node):
+    """Is the worker's control stream up? A worker registers first and its stream comes up a moment later: until
+    then it is registered but cannot be sent a job. In-process nodes have no stream and count as connected."""
+    check = getattr(node, "is_connected", None)
+    if not callable(check):
+        return True
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def dispatchable(info):
+    """The one definition of 'idle': a job can really be sent to this worker right now."""
+    return (
+        info["status"] == "idle"
+        and not info.get("draining")
+        and not info.get("quarantined")
+        and not info.get("outdated")
+        and node_connected(info["node"])
+    )
+
+
 class NodeRegistry:
     """
     Stores and manages GCON nodes.
@@ -28,6 +73,8 @@ class NodeRegistry:
         # pool? Set by the coordinator when it has a control plane; read
         # once per registration (never on the scheduling hot path).
         self.shared_pool_lookup = None
+        # Lowest worker version allowed to receive jobs (GCON_MIN_WORKER_VERSION). None = no check.
+        self.min_worker_version = None
 
     def register(self, node):
         """
@@ -113,6 +160,10 @@ class NodeRegistry:
                 # have no network address of their own -- not a
                 # placeholder, a legitimate "not applicable" value.
                 "address": getattr(node, "address", None),
+                # What the worker reported about itself, and whether that is below the minimum. An outdated
+                # worker stays registered and visible but is never sent a job.
+                "agent_version": getattr(node, "agent_version", None),
+                "outdated": version_below(getattr(node, "agent_version", None), self.min_worker_version),
             }
 
     def set_shared_pool(self, node_id, enabled):
@@ -198,7 +249,7 @@ class NodeRegistry:
             return [
                 info["node"]
                 for info in self.nodes.values()
-                if info["status"] == "idle" and not info.get("draining") and not info.get("quarantined")
+                if dispatchable(info)
             ]
 
     def get_node_info(self, node_id):
@@ -255,7 +306,7 @@ class NodeRegistry:
             best_info = None
             lowest_score = float("inf")
             for info in self.nodes.values():
-                if info["status"] != "idle" or info.get("draining") or info.get("quarantined"):
+                if not dispatchable(info):
                     continue
                 if filter_fn is not None and not filter_fn(info):
                     continue

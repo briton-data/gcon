@@ -253,6 +253,8 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         self.on_heartbeat = on_heartbeat
         self.on_node_disconnected = on_node_disconnected
         self.on_node_registered = on_node_registered
+        # org_id -> the most workers its plan allows (0 = no limit). Set by the coordinator wiring; None = no cap.
+        self.org_worker_cap_resolver = None
         self._sessions: Dict[str, NodeSession] = {}
         self._lock = threading.RLock()
 
@@ -465,6 +467,24 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
                 )
                 return pb.EnrollResponse(accepted=False, reason=reason)
+        # The plan's worker cap. A worker enrolling again under its own name (after a redeploy) is not
+        # a new worker, so it is not counted against itself.
+        if org_id is not None and self.control_plane is not None and self.org_worker_cap_resolver is not None:
+            try:
+                cap = int(self.org_worker_cap_resolver(org_id) or 0)
+            except Exception as exc:
+                logger.warning("Could not look up the worker cap for org %s: %r", org_id, exc)
+                cap = 0
+            if cap > 0:
+                enrolled = self.control_plane.nodes.count_active_for_org(org_id, exclude_node_id=request.node_id)
+                if enrolled >= cap:
+                    reason = (f"this organization already has {enrolled} workers and its plan allows {cap}; "
+                              "archive a worker that is gone, or move to a larger plan")
+                    self.control_plane.node_enrollment_audit.record(
+                        node_id=request.node_id, accepted=False, org_id=org_id,
+                        enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
+                    )
+                    return pb.EnrollResponse(accepted=False, reason=reason)
         try:
             cert_pem = tls.sign_agent_csr(
                 self.config.tls_cert_dir, request.csr_pem, request.node_id, org_id=org_id,
