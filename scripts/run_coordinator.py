@@ -178,6 +178,9 @@ def main():
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
         proxy = RemoteNodeProxy(
             node_id, transport, org_id=org_id, address=address,
+            # The version the worker reported is already on its record (Register saves it just before this
+            # runs); it is checked against GCON_MIN_WORKER_VERSION when the node joins the registry.
+            agent_version=(control_plane.nodes.get(node_id) or {}).get("agent_version"),
             # Declared AND verified: the worker reports "sandbox"="docker" only
             # alongside a passed startup probe ("sandbox_verified"="1"). A worker
             # that reports only the first (an older build) counts as unsandboxed.
@@ -204,6 +207,11 @@ def main():
         on_node_disconnected=on_node_disconnected,
     )
     coordinator.communication = CommunicationManager(transport=transport)
+    # The plan's worker cap is read at Enroll time. Looked up on the coordinator each time, because the
+    # management layer (which knows the plans) is attached to it after this point.
+    transport.servicer.org_worker_cap_resolver = lambda org_id: (
+        coordinator.org_worker_cap_resolver(org_id) if getattr(coordinator, "org_worker_cap_resolver", None) else 0
+    )
 
     transport.start()
     logger.info(
