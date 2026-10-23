@@ -382,8 +382,14 @@
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h5 class="mb-0"><i class="bi bi-list-ul me-2"></i>Event Stream</h5>
-                        <input type="text" id="events-search" class="form-control form-control-sm w-auto"
-                               placeholder="Filter events...">
+                        <div class="d-flex gap-2">
+                            <input type="text" id="events-search" class="form-control form-control-sm w-auto"
+                                   placeholder="Filter events...">
+                            <button class="btn btn-sm btn-outline-secondary" id="events-clear-btn"
+                                    title="Hide the events shown so far. They are kept; new ones appear as they happen.">
+                                <i class="bi bi-eraser me-1"></i>Clear
+                            </button>
+                        </div>
                     </div>
                     <div class="gcon-panel-body">
                         <div class="gcon-activity-feed" id="events-tab-feed">
@@ -467,23 +473,63 @@
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">Node Management</h5>
-                        <button class="btn btn-sm btn-outline-light" id="admin-rediscover-nodes-btn">
-                            <i class="bi bi-arrow-repeat me-1"></i>Rediscover Nodes
-                        </button>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-secondary" id="admin-archive-offline-btn" disabled
+                                    title="Take every offline worker off this list and out of its plan's worker count">
+                                <i class="bi bi-archive me-1"></i>Archive all offline
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="admin-rediscover-nodes-btn">
+                                <i class="bi bi-arrow-repeat me-1"></i>Rediscover Nodes
+                            </button>
+                        </div>
                     </div>
                     <div class="gcon-panel-body">
+                        <div class="small text-secondary mb-2" id="admin-nodes-summary"></div>
                         <div class="table-responsive">
-                            <table class="table gcon-table">
+                            <table class="table gcon-table align-middle">
                                 <thead>
                                     <tr>
                                         <th>Node ID</th>
                                         <th>Status</th>
+                                        <th>Serves</th>
+                                        <th>Customer jobs</th>
                                         <th>Running Jobs</th>
                                         <th>Action</th>
                                     </tr>
                                 </thead>
                                 <tbody id="admin-nodes-body">
-                                    <tr><td colspan="4" class="text-center text-secondary">Loading...</td></tr>
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel mt-4">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-key me-2"></i>Worker enrollment tokens</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="small text-secondary mb-3">
+                            A token lets one organization's workers enroll themselves, and only into that organization.
+                            It stops working after its lifetime or its number of uses, whichever comes first.
+                            The token is shown once, when it is created.
+                        </div>
+                        <div class="row g-2 align-items-end mb-3">
+                            <div class="col-md-3"><label class="form-label small mb-1">Organization</label>
+                                <select class="form-select form-select-sm" id="enroll-token-org"></select></div>
+                            <div class="col-md-3"><label class="form-label small mb-1">Label (optional)</label>
+                                <input class="form-control form-control-sm" id="enroll-token-label" placeholder="e.g. codespaces"></div>
+                            <div class="col-md-2"><label class="form-label small mb-1">Lifetime (hours)</label>
+                                <input type="number" min="1" max="720" class="form-control form-control-sm" id="enroll-token-hours" value="72"></div>
+                            <div class="col-md-2"><label class="form-label small mb-1">Workers it may enroll</label>
+                                <input type="number" min="1" max="1000" class="form-control form-control-sm" id="enroll-token-uses" value="5"></div>
+                            <div class="col-md-2"><button class="btn btn-sm btn-primary w-100" id="enroll-token-create-btn">Create token</button></div>
+                        </div>
+                        <div class="alert alert-success d-none" id="enroll-token-result"></div>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Organization</th><th>Label</th><th>Status</th><th>Used</th><th>Expires</th><th></th></tr></thead>
+                                <tbody id="enroll-tokens-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -598,6 +644,7 @@
                                         <th>API requests / minute</th>
                                         <th>Concurrent jobs</th>
                                         <th>Max runtime (seconds)</th>
+                                        <th>Max workers</th>
                                         <th>Allowed programs</th>
                                         <th>Organizations</th>
                                         <th></th>
@@ -983,7 +1030,13 @@
                 <div class="gcon-panel">
                     <div class="gcon-panel-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="bi bi-journal-text me-2"></i>Audit Logs</h5>
-                        <span class="badge bg-success">Live</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <button class="btn btn-sm btn-outline-secondary" id="audit-clear-btn"
+                                    title="Owner only. Deletes old entries and records that you did.">
+                                <i class="bi bi-eraser me-1"></i>Clear old entries
+                            </button>
+                            <span class="badge bg-success">Live</span>
+                        </div>
                     </div>
                     <div class="gcon-panel-body">
                         <div class="gcon-activity-feed gcon-activity-feed-lg" id="audit-log-feed">
@@ -1010,6 +1063,10 @@
                             </div>
                             <button class="btn btn-sm btn-outline-light" id="notif-tab-mark-all-read-btn">
                                 <i class="bi bi-check2-all me-1"></i>Mark all read
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" id="notif-tab-clear-read-btn"
+                                    title="Delete every notification already marked read">
+                                <i class="bi bi-trash me-1"></i>Clear read
                             </button>
                         </div>
                     </div>
