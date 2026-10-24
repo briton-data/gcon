@@ -209,6 +209,11 @@ def main():
     coordinator.communication = CommunicationManager(transport=transport)
     # The plan's worker cap is read at Enroll time. Looked up on the coordinator each time, because the
     # management layer (which knows the plans) is attached to it after this point.
+    # A hosted worker's answer to "clean yourself" goes to the lease manager, which decides what it means.
+    transport.servicer.on_sanitize_result = lambda node_id, ref, ok, detail: (
+        coordinator.worker_leases.on_sanitize_result(node_id, ref, ok, detail)
+        if getattr(coordinator, "worker_leases", None) is not None else None
+    )
     transport.servicer.org_worker_cap_resolver = lambda org_id: (
         coordinator.org_worker_cap_resolver(org_id) if getattr(coordinator, "org_worker_cap_resolver", None) else 0
     )
