@@ -536,6 +536,51 @@
                     </div>
                 </div>
 
+                <div class="gcon-panel mt-4">
+                    <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-hdd-rack me-2"></i>GCON hosted fleet</h5></div>
+                    <div class="gcon-panel-body">
+                        <div class="small text-secondary mb-3">
+                            Workers GCON runs itself. A customer on a plan with hosted workers leases some, and each
+                            leased worker runs that customer's jobs and nobody else's until it is released. It is then
+                            cleaned, and returns to the pool only after it confirms it is clean. A worker that is lost
+                            while leased, or fails its clean-up, is held until staff have it cleaned.
+                        </div>
+                        <div class="small mb-3" id="fleet-summary"></div>
+                        <div class="table-responsive mb-4">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Worker</th><th>State</th><th>Leased to</th><th>Version</th><th>Notes</th><th></th></tr></thead>
+                                <tbody id="fleet-workers-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <h6>Recent leases</h6>
+                        <div class="table-responsive mb-4">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Organization</th><th>Worker</th><th>Started</th><th>Ended</th><th>Why</th><th>Clean-up</th></tr></thead>
+                                <tbody id="fleet-leases-body">
+                                    <tr><td colspan="6" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <h6>Enroll a hosted worker</h6>
+                        <div class="small text-secondary mb-2">
+                            A fleet token enrolls a worker into GCON's own fleet, with no organization. Keep it to
+                            GCON's own machines. It is shown once.
+                        </div>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-4"><label class="form-label small mb-1">Label (optional)</label>
+                                <input class="form-control form-control-sm" id="fleet-token-label" placeholder="e.g. rack-1"></div>
+                            <div class="col-md-3"><label class="form-label small mb-1">Lifetime (hours)</label>
+                                <input type="number" min="1" max="720" class="form-control form-control-sm" id="fleet-token-hours" value="72"></div>
+                            <div class="col-md-3"><label class="form-label small mb-1">Workers it may enroll</label>
+                                <input type="number" min="1" max="1000" class="form-control form-control-sm" id="fleet-token-uses" value="5"></div>
+                            <div class="col-md-2"><button class="btn btn-sm btn-primary w-100" id="fleet-token-create-btn">Create token</button></div>
+                        </div>
+                        <div class="alert alert-success d-none mt-3" id="fleet-token-result"></div>
+                    </div>
+                </div>
+
             </div>
 
             <!-- Users Management -->
@@ -645,6 +690,7 @@
                                         <th>Concurrent jobs</th>
                                         <th>Max runtime (seconds)</th>
                                         <th>Max workers</th>
+                                        <th>Max hosted workers</th>
                                         <th>Allowed programs</th>
                                         <th>Organizations</th>
                                         <th></th>

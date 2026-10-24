@@ -2400,6 +2400,87 @@ async function loadAdminNodes() {
     }
 }
 
+// ---- GCON hosted fleet (Administration) ----
+async function loadFleet() {
+    const body = document.getElementById("fleet-workers-body");
+    if (!body) return;
+    try {
+        const fleet = await fetchJson("/management/fleet");
+        const c = fleet.counts || {};
+        setMsg("fleet-summary", fleet.workers.length
+            ? `${c.total} hosted worker(s): ${c.available || 0} available, ${(c.leased || 0) + (c.ending || 0)} leased, ${c.cleaning || 0} being cleaned, ${c.held || 0} held, ${c.unavailable || 0} unavailable.`
+            : "No hosted workers yet. Create a fleet token below and enroll one.");
+        const badge = { available: "bg-success", leased: "bg-primary", ending: "bg-info text-dark",
+                        cleaning: "bg-info text-dark", held: "bg-danger", unavailable: "bg-secondary" };
+        body.innerHTML = fleet.workers.length ? fleet.workers.map(w => {
+            const notes = w.state === "held" ? escapeHtml(w.held_reason || "")
+                : (w.why_unavailable || []).map(escapeHtml).join("<br>");
+            let action = "";
+            if (w.state === "leased" || w.state === "ending") {
+                action = `<button class="btn btn-sm btn-outline-danger fleet-release-btn" data-lease-id="${escapeHtml(w.lease_id)}">Release</button>`;
+            } else if (w.state === "held") {
+                action = `<button class="btn btn-sm btn-outline-secondary fleet-clean-btn" data-node-id="${escapeHtml(w.node_id)}" ${w.connected ? "" : "disabled"} title="${w.connected ? "Ask the worker to clean itself" : "The worker must be connected to be cleaned"}">Clean</button>`;
+            }
+            return `<tr>
+                <td>${escapeHtml(w.node_id)}</td>
+                <td><span class="badge ${badge[w.state] || "bg-secondary"}">${escapeHtml(w.state)}</span></td>
+                <td>${escapeHtml(w.leased_to || "")}</td>
+                <td class="small">${w.agent_version ? "v" + escapeHtml(w.agent_version) : "unknown"}</td>
+                <td class="small text-secondary">${notes}</td>
+                <td>${action}</td>
+            </tr>`;
+        }).join("") : `<tr><td colspan="6" class="text-center text-secondary">No hosted workers.</td></tr>`;
+
+        const leases = [...fleet.open_leases, ...fleet.recent_leases];
+        document.getElementById("fleet-leases-body").innerHTML = leases.length ? leases.map(l => `<tr>
+            <td>${escapeHtml(l.org_name || l.org_id)}</td>
+            <td>${escapeHtml(l.node_id)}</td>
+            <td>${escapeHtml(fmtWhen(l.started_at))}</td>
+            <td>${l.ended_at ? escapeHtml(fmtWhen(l.ended_at)) : `<span class="badge bg-primary">${escapeHtml(l.state)}</span>`}</td>
+            <td class="small">${escapeHtml((l.end_reason || "").replaceAll("_", " "))}</td>
+            <td class="small">${escapeHtml(l.sanitize_result || "")}</td>
+        </tr>`).join("") : `<tr><td colspan="6" class="text-center text-secondary">No leases yet.</td></tr>`;
+
+        body.querySelectorAll(".fleet-release-btn").forEach(btn => btn.addEventListener("click", async () => {
+            if (!confirm("Release this lease now? The worker finishes its running job, is cleaned, and returns to the pool.")) return;
+            try {
+                await fetchJson(`/management/leases/${encodeURIComponent(btn.dataset.leaseId)}/release`, { method: "POST" });
+                showToast("Lease released.", false);
+                await loadFleet();
+            } catch (err) { showToast(err.message || "Failed to release the lease.", true); }
+        }));
+        body.querySelectorAll(".fleet-clean-btn").forEach(btn => btn.addEventListener("click", async () => {
+            try {
+                await fetchJson(`/management/fleet/${encodeURIComponent(btn.dataset.nodeId)}/clean`, { method: "POST" });
+                showToast("Asked the worker to clean itself. It returns to the pool only if it confirms it is clean.", false);
+                await loadFleet();
+            } catch (err) { showToast(err.message || "Failed to start the clean-up.", true); }
+        }));
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6" class="text-center text-secondary">${escapeHtml(err.message || "Could not load the hosted fleet.")}</td></tr>`;
+    }
+}
+
+async function createFleetToken() {
+    const result = document.getElementById("fleet-token-result");
+    try {
+        const made = await fetchJson("/management/fleet/tokens", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                label: document.getElementById("fleet-token-label").value.trim() || null,
+                expires_in_hours: parseInt(document.getElementById("fleet-token-hours").value, 10),
+                max_uses: parseInt(document.getElementById("fleet-token-uses").value, 10),
+            }),
+        });
+        result.classList.remove("d-none");
+        result.innerHTML = `Copy this token now, it is not shown again:<br><code class="user-select-all">${escapeHtml(made.token)}</code>`;
+        await loadEnrollTokens();
+    } catch (err) {
+        showToast(err.message || "Failed to create the fleet token.", true);
+    }
+}
+
 // ---- Worker enrollment tokens (Administration) ----
 async function loadEnrollTokens() {
     const body = document.getElementById("enroll-tokens-body");
@@ -2471,7 +2552,7 @@ async function createEnrollToken() {
 }
 
 async function loadAdmin() {
-    await Promise.all([loadAdminConfig(), loadAdminNodes(), loadEnrollTokens()]);
+    await Promise.all([loadAdminConfig(), loadAdminNodes(), loadEnrollTokens(), loadFleet()]);
 }
 
 async function triggerScale(direction) {
@@ -2568,6 +2649,8 @@ function setupControls() {
             } catch (err) { showToast(err.message || "Failed to clear the audit log.", true); }
         });
     }
+    const fleetTokenBtn = document.getElementById("fleet-token-create-btn");
+    if (fleetTokenBtn) fleetTokenBtn.addEventListener("click", createFleetToken);
     const tokenBtn = document.getElementById("enroll-token-create-btn");
     if (tokenBtn) tokenBtn.addEventListener("click", createEnrollToken);
 
@@ -3125,6 +3208,7 @@ async function loadPlansPanel() {
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-jobs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_concurrent_jobs)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-runtime" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_runtime_seconds)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-workers" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_workers)}" style="max-width: 7rem;"></td>
+                <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-leased" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_leased_workers)}" style="max-width: 7rem;" title="GCON-hosted workers the plan may lease at once (0 = none)"></td>
                 <td><input type="text" class="form-control form-control-sm plan-programs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((p.allowed_programs || []).join(", "))}" style="min-width: 14rem;"></td>
                 <td>${escapeHtml(p.organizations)}</td>
                 <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
@@ -3138,9 +3222,10 @@ async function loadPlansPanel() {
                 const jobs = body.querySelector(`.plan-jobs[data-plan="${plan}"]`).value.trim();
                 const runtime = body.querySelector(`.plan-runtime[data-plan="${plan}"]`).value.trim();
                 const workers = body.querySelector(`.plan-workers[data-plan="${plan}"]`).value.trim();
+                const leased = body.querySelector(`.plan-leased[data-plan="${plan}"]`).value.trim();
                 const programs = body.querySelector(`.plan-programs[data-plan="${plan}"]`).value
                     .split(",").map(x => x.trim()).filter(x => x.length > 0);
-                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime) || !/^\d+$/.test(workers)) {
+                if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime) || !/^\d+$/.test(workers) || !/^\d+$/.test(leased)) {
                     showToast("Enter whole numbers (0 means no limit).", true);
                     return;
                 }
@@ -3157,6 +3242,7 @@ async function loadPlansPanel() {
                             max_concurrent_jobs: parseInt(jobs, 10),
                             max_runtime_seconds: parseInt(runtime, 10),
                             max_workers: parseInt(workers, 10),
+                            max_leased_workers: parseInt(leased, 10),
                             allowed_programs: programs,
                         }),
                     });
@@ -3189,7 +3275,7 @@ async function loadPlansPanel() {
         }
     } catch (err) {
         console.error("Failed to load plans:", err);
-        body.innerHTML = `<tr><td colspan="8" class="text-center text-secondary">Could not load plans.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9" class="text-center text-secondary">Could not load plans.</td></tr>`;
     }
 }
 
