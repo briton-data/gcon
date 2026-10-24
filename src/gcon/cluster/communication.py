@@ -78,6 +78,12 @@ class CommunicationManager:
         """
         return self.transport.cancel_job(node_id, job_id)
 
+    def sanitize_node(self, node_id, ref):
+        """Ask a hosted worker to clean itself (see cluster/worker_leases.py). False when the transport cannot
+        (in-process transport) or the worker is not connected."""
+        sanitize = getattr(self.transport, "sanitize_node", None)
+        return bool(sanitize(node_id, ref)) if sanitize else False
+
     def shutdown(self, grace_period=None):
         """
         Gracefully shut down the underlying transport.

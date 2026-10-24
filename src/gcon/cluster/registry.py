@@ -34,8 +34,24 @@ def node_connected(node):
         return False
 
 
+# The first worker version that can clean itself on request. A hosted-fleet worker older than this can never be
+# leased: GCON could not clean it between customers.
+FLEET_MIN_WORKER_VERSION = "1.1.0"
+
+
 def dispatchable(info):
     """The one definition of 'idle': a job can really be sent to this worker right now."""
+    if info.get("fleet"):
+        # A hosted worker takes jobs only while a customer holds an ACTIVE lease on it (an ending or sanitizing
+        # lease takes none), and only ever inside a sandbox: with a customer's code on a machine GCON runs, the
+        # container is the boundary. Which customer is settled by info["org_id"], which a lease sets.
+        node = info["node"]
+        if (
+            info.get("lease_state") != "active"
+            or not getattr(node, "sandboxed", False)
+            or version_below(info.get("agent_version"), FLEET_MIN_WORKER_VERSION)
+        ):
+            return False
     return (
         info["status"] == "idle"
         and not info.get("draining")
@@ -75,6 +91,11 @@ class NodeRegistry:
         self.shared_pool_lookup = None
         # Lowest worker version allowed to receive jobs (GCON_MIN_WORKER_VERSION). None = no check.
         self.min_worker_version = None
+        # node_id -> is it in the GCON-hosted fleet?  /  node_id -> (org_id, state) of its open lease, or None.
+        # Set by the coordinator; read when a worker registers, so a reconnecting worker comes back with its
+        # lease intact. Unset = no hosted fleet.
+        self.fleet_lookup = None
+        self.lease_lookup = None
 
     def register(self, node):
         """
@@ -97,6 +118,15 @@ class NodeRegistry:
                 raise ValueError(
                     f"Node '{node.node_id}' already exists and is still active."
                 )
+
+            # Hosted fleet. Only a worker that has NO organization of its own can be in it: a customer's own
+            # worker is never leased to anyone else, whatever the fleet table says.
+            fleet = (
+                getattr(node, "org_id", None) is None
+                and bool(self.fleet_lookup and self.fleet_lookup(node.node_id))
+            )
+            lease = self.lease_lookup(node.node_id) if (fleet and self.lease_lookup) else None
+            lease_org, lease_state = lease if lease else (None, None)
 
             self.nodes[node.node_id] = {
                 "node": node,
@@ -145,13 +175,21 @@ class NodeRegistry:
                 # existing caller of register(node) keeps working
                 # unchanged. getattr with a default: not every node
                 # type is required to have this attribute.
-                "org_id": getattr(node, "org_id", None),
+                # A leased hosted worker acts as its customer's worker for as long as the lease lasts: scheduling,
+                # the customer's own node list and every other org check read this one field.
+                "org_id": lease_org if fleet else getattr(node, "org_id", None),
+                "fleet": fleet,
+                "lease_org_id": lease_org,
+                "lease_state": lease_state,
+                # When the scheduler last gave this worker a job (used to tell an idle lease from a busy one).
+                "last_claimed_at": None,
                 # In the shared pool (serves any organization's jobs, as that
                 # organization allows)? Only an operator can put a worker
                 # there -- never the worker itself -- and only one with no
                 # organization of its own.
                 "shared_pool": (
                     getattr(node, "org_id", None) is None
+                    and not fleet
                     and bool(self.shared_pool_lookup and self.shared_pool_lookup(node.node_id))
                 ),
                 # Real remote IP captured at registration time (see
@@ -176,7 +214,20 @@ class NodeRegistry:
         with self._lock:
             info = self.nodes.get(node_id)
             if info is not None:
-                info["shared_pool"] = bool(enabled) and info.get("org_id") is None
+                info["shared_pool"] = bool(enabled) and info.get("org_id") is None and not info.get("fleet")
+
+    def set_lease(self, node_id, org_id, state):
+        """Apply a lease change to a registered hosted worker right away. `state` None = no lease (back in the
+        pool). A no-op for a worker that is not registered (its lease is read when it registers) or is not a
+        hosted-fleet worker."""
+        with self._lock:
+            info = self.nodes.get(node_id)
+            if info is None or not info.get("fleet"):
+                return
+            info["lease_state"] = state
+            info["lease_org_id"] = org_id if state else None
+            info["org_id"] = org_id if state else None
+            info["shared_pool"] = False
 
     def remove(self, node_id):
         """
@@ -320,6 +371,7 @@ class NodeRegistry:
             # that closes the race; no concurrent caller can see this
             # node as "idle" again until something explicitly frees it.
             best_info["status"] = "busy"
+            best_info["last_claimed_at"] = datetime.now(UTC)
             return best_info["node"]
 
     def heartbeat(self, node_id, status, timestamp):

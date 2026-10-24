@@ -10,7 +10,8 @@ from collections import deque
 from queue import Queue
 from datetime import datetime, UTC
 
-from .registry import NodeRegistry, node_connected
+from .registry import NodeRegistry, node_connected, version_below, FLEET_MIN_WORKER_VERSION
+from .worker_leases import WorkerLeaseManager
 from .scheduler import Scheduler
 from .communication import CommunicationManager
 from gcon.cluster.autoscaler import AutoScaler
@@ -145,6 +146,20 @@ class GCONCoordinator:
         self.communication = CommunicationManager(transport=transport)
         self.agents = {}
         self.event_bus = EventBus()
+
+        # GCON-hosted workers leased to customers (see cluster/worker_leases.py). Needs the durable store: without a
+        # control plane there is no fleet and no leases.
+        self.worker_leases = None
+        if control_plane is not None:
+            self.worker_leases = WorkerLeaseManager(
+                control_plane, self.registry,
+                cap_resolver=lambda org_id: (
+                    self.org_leased_worker_cap_resolver(org_id) if self.org_leased_worker_cap_resolver else 0),
+                send_sanitize=lambda node_id, ref: self.communication.sanitize_node(node_id, ref),
+                publish=self._publish_lease_event,
+            )
+            self.registry.fleet_lookup = control_plane.fleet_nodes.is_member
+            self.registry.lease_lookup = self.worker_leases.lookup
         
         self.jobs = {}
         self.jobs_lock = threading.RLock()
@@ -270,6 +285,9 @@ class GCONCoordinator:
         # Optional callable(org_id) -> the most workers the org's plan allows (0 = no limit), also set by
         # ManagementLayer. Enforced when a worker enrolls (see the Enroll handler in grpc_transport).
         self.org_worker_cap_resolver = None
+        # Optional callable(org_id) -> how many GCON-hosted workers the org's plan lets it lease at once
+        # (0 = the plan has no hosted workers), also set by ManagementLayer.
+        self.org_leased_worker_cap_resolver = None
         # recover_jobs() (worker-loss reassignment) and retry_job/
         # retry_failed_jobs (manual retry) previously had no cap at
         # all -- a job that fails deterministically (bad command, a
@@ -1607,8 +1625,19 @@ class GCONCoordinator:
             ))
             self.recover_jobs(node_id)
 
+        if self.worker_leases is not None:
+            try:
+                self.worker_leases.tick()
+            except Exception as e:
+                # Leases must never affect scheduling or health.
+                _log_line(f"[LEASES] tick failed: {e!r}")
+
         self._sample_health_and_trust()
         self._maybe_sweep_retention()
+
+    def _publish_lease_event(self, event_type, payload):
+        self.event_bus.publish(Event(
+            timestamp=datetime.now(UTC), event_type=event_type, source="Leases", payload=payload))
 
     def _maybe_sweep_retention(self):
         """
@@ -4146,16 +4175,22 @@ class GCONCoordinator:
         by an org-scoped API key's view of its own fleet.
         """
         nodes = []
+        # One query for every hosted worker's record, instead of one per worker per call.
+        fleet_rows = (
+            {r["node_id"]: r for r in self.control_plane.fleet_nodes.list_all()}
+            if self.control_plane is not None else {}
+        )
         
         for node_id, info in self.registry.snapshot().items():
             if org_id is not None and info.get("org_id") != org_id:
                 continue
             connected = node_connected(info["node"])
-            blockers, serves = self._node_blockers(info, connected)
+            blockers, serves = self._node_blockers(info, connected, fleet_rows)
             nodes.append({
                 "node_id": node_id,
                 "status": info.get("status", "unknown"),
-                "address": info.get("address"),
+                # A hosted worker's address is GCON's infrastructure, not something its current customer needs.
+                "address": None if (info.get("fleet") and org_id is not None) else info.get("address"),
                 "cpu": info.get("cpu", "N/A"),
                 "memory": info.get("memory", "N/A"),
                 "running_jobs": info.get("running_jobs", 0),
@@ -4178,6 +4213,8 @@ class GCONCoordinator:
                 "outdated": bool(info.get("outdated")),
                 "sandboxed": bool(getattr(info["node"], "sandboxed", False)),
                 "shared_pool": bool(info.get("shared_pool")),
+                "fleet": bool(info.get("fleet")),
+                "lease_state": info.get("lease_state"),
                 # Who this worker can take jobs from, and what (if anything) stops it taking a customer's job
                 # right now. Empty blockers = it can run a customer job as soon as it is idle.
                 "serves": serves,
@@ -4187,7 +4224,7 @@ class GCONCoordinator:
 
         return nodes
 
-    def _node_blockers(self, info, connected):
+    def _node_blockers(self, info, connected, fleet_rows=None):
         """(blockers, serves) for one registry entry. The same rules the scheduler applies (select_node and
         registry.dispatchable), stated per worker so staff can see WHY an 'online' worker is not taking jobs."""
         node = info["node"]
@@ -4205,7 +4242,26 @@ class GCONCoordinator:
             blockers.append("draining")
         if info.get("quarantined"):
             blockers.append("quarantined")
-        if info.get("org_id") is not None:
+        if info.get("fleet"):
+            # Hosted by GCON: serves a customer only while that customer holds a lease on it.
+            row = (fleet_rows or {}).get(node.node_id)
+            state = info.get("lease_state")
+            if state is None:
+                serves = "GCON hosted fleet, not leased"
+                blockers.append("hosted worker, not leased to any organization")
+            else:
+                serves = f"GCON hosted fleet, leased to organization {info.get('lease_org_id')}"
+                if state != "active":
+                    blockers.append(f"lease is {state}: no new jobs; the worker is being cleaned")
+            if row and row.get("held_reason"):
+                blockers.append(f"held out of the pool: {row['held_reason']}")
+            if not sandboxed:
+                blockers.append("no verified container sandbox (hosted workers require one)")
+            if version_below(info.get("agent_version"), FLEET_MIN_WORKER_VERSION):
+                blockers.append(
+                    f"worker version {info.get('agent_version') or 'unknown'} cannot clean itself between customers; "
+                    f"needs {FLEET_MIN_WORKER_VERSION} or newer")
+        elif info.get("org_id") is not None:
             serves = f"organization {info['org_id']}"
             if self._sandbox_policy == "required" and not sandboxed:
                 blockers.append("no verified container sandbox (customer jobs require one)")
@@ -4230,6 +4286,8 @@ class GCONCoordinator:
             status = None
         if status is not None and status != "offline":
             raise ValueError(f"Worker '{node_id}' is {status}, not offline. Drain or stop it first.")
+        if self.control_plane is not None and self.control_plane.worker_leases.get_open_for_node(node_id):
+            raise ValueError(f"Worker '{node_id}' has an open lease; release the lease first.")
         known_durably = self.control_plane is not None and self.control_plane.nodes.get(node_id) is not None
         if status is None and not known_durably:
             raise ValueError(f"Worker '{node_id}' is not known to this coordinator.")
