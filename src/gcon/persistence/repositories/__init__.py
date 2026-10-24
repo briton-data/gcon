@@ -17,6 +17,8 @@ from gcon.persistence.repositories.node_enrollment_audit import NodeEnrollmentAu
 from gcon.persistence.repositories.idempotency_keys import IdempotencyKeyRepository
 from gcon.persistence.repositories.org_pool_settings import OrgPoolSettingsRepository
 from gcon.persistence.repositories.shared_pool_nodes import SharedPoolNodeRepository
+from gcon.persistence.repositories.fleet_nodes import FleetNodeRepository
+from gcon.persistence.repositories.worker_leases import WorkerLeaseRepository
 from gcon.persistence.repositories.workflows import WorkflowRepository
 from gcon.persistence.repositories.observability import (
     IncidentRepository,
@@ -30,6 +32,8 @@ __all__ = [
     "IdempotencyKeyRepository",
     "OrgPoolSettingsRepository",
     "SharedPoolNodeRepository",
+    "FleetNodeRepository",
+    "WorkerLeaseRepository",
     "IncidentRepository",
     "WorkflowRepository",
     "MetricSnapshotRepository",

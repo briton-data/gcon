@@ -31,6 +31,8 @@ from gcon.persistence.repositories import (
     IdempotencyKeyRepository,
     OrgPoolSettingsRepository,
     SharedPoolNodeRepository,
+    FleetNodeRepository,
+    WorkerLeaseRepository,
     IncidentRepository,
     MetricSnapshotRepository,
     ObservabilityQueries,
@@ -73,6 +75,8 @@ class ControlPlane:
         self.idempotency_keys = IdempotencyKeyRepository(self.db)
         self.org_pool_settings = OrgPoolSettingsRepository(self.db)
         self.shared_pool_nodes = SharedPoolNodeRepository(self.db)
+        self.fleet_nodes = FleetNodeRepository(self.db)
+        self.worker_leases = WorkerLeaseRepository(self.db)
         self.metric_snapshots = MetricSnapshotRepository(self.db)
         self.incidents = IncidentRepository(self.db)
         self.workflows = WorkflowRepository(self.db)

@@ -29,6 +29,10 @@ from typing import Any, Dict, List, Optional
 from gcon.persistence.db import ControlPlaneDatabase
 
 
+# Stored where an organization id would be, for a fleet token (the column is NOT NULL). Never a real org id.
+FLEET_TOKEN_MARKER = "(hosted-fleet)"
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -37,9 +41,18 @@ class EnrollTokenRepository:
     def __init__(self, db: ControlPlaneDatabase):
         self.db = db
 
+    def create_fleet_token(
+        self, label: Optional[str] = None,
+        expires_at: Optional[str] = None, max_uses: Optional[int] = None,
+    ) -> str:
+        """An operator-only token that enrolls a GCON-HOSTED worker: no organization, and the worker joins the
+        hosted fleet (see fleet_nodes.py). It is stored with a marker where an organization would be, and
+        lookup_org_id never returns it, so nothing can mistake it for an organization's token."""
+        return self.create_token(FLEET_TOKEN_MARKER, label, expires_at, max_uses, kind="fleet")
+
     def create_token(
         self, org_id: str, label: Optional[str] = None,
-        expires_at: Optional[str] = None, max_uses: Optional[int] = None,
+        expires_at: Optional[str] = None, max_uses: Optional[int] = None, kind: str = "org",
     ) -> str:
         """Mints a new token for `org_id`, stores only its hash, and
         returns the plaintext -- the one and only time it's ever
@@ -60,10 +73,10 @@ class EnrollTokenRepository:
         self.db.execute(
             """
             INSERT INTO enroll_tokens
-                (token_id, org_id, token_hash, label, created_at, revoked_at, expires_at, max_uses)
-            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                (token_id, org_id, token_hash, label, created_at, revoked_at, expires_at, max_uses, kind)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
             """,
-            (token_id, org_id, _hash_token(token), label, now, expires_at, max_uses),
+            (token_id, org_id, _hash_token(token), label, now, expires_at, max_uses, kind),
         )
         return token
 
@@ -78,7 +91,7 @@ class EnrollTokenRepository:
         if not token:
             return None
         row = self.db.query_one(
-            "SELECT org_id FROM enroll_tokens WHERE token_hash = ? AND revoked_at IS NULL",
+            "SELECT org_id FROM enroll_tokens WHERE token_hash = ? AND revoked_at IS NULL AND kind = 'org'",
             (_hash_token(token),),
         )
         return row["org_id"] if row else None

@@ -665,4 +665,53 @@ MIGRATIONS: List[Migration] = [
             "ALTER TABLE nodes ADD COLUMN archived_at TEXT",
         ],
     ),
+    Migration(
+        version=18,
+        name="hosted_fleet_and_worker_leases",
+        up_sql=[
+            # Enrollment tokens come in two kinds. 'org' (every token so far) enrolls a worker into ONE
+            # organization. 'fleet' is an operator-only token that enrolls a GCON-hosted worker into no
+            # organization at all; such a worker then serves a customer only while that customer holds a lease on it.
+            "ALTER TABLE enroll_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'org'",
+            # The hosted fleet: workers GCON itself runs. Membership is recorded when a worker enrolls with a fleet
+            # token, never declared by the worker. `held_reason` keeps a worker out of leasing until it has been
+            # cleaned (it was lost while leased, or its last clean-up failed). `sanitizing_since`/`sanitize_ref`
+            # track a clean-up that has been asked for and not yet answered.
+            """
+            CREATE TABLE fleet_nodes (
+                node_id          TEXT PRIMARY KEY,
+                enrolled_at      TEXT NOT NULL,
+                enroll_token_id  TEXT,
+                held_reason      TEXT,
+                held_at          TEXT,
+                sanitizing_since TEXT,
+                sanitize_ref     TEXT
+            )
+            """,
+            # A customer's exclusive hold on one hosted worker. States: active (the customer's jobs run on it),
+            # ending (no new jobs; waiting for the running one to finish), sanitizing (the worker is being cleaned),
+            # ended (finished; the worker is back in the pool, or held if the clean-up did not succeed).
+            # Rows are never deleted: this is the record of which customer had which worker, and when.
+            """
+            CREATE TABLE worker_leases (
+                lease_id         TEXT PRIMARY KEY,
+                node_id          TEXT NOT NULL,
+                org_id           TEXT NOT NULL,
+                state            TEXT NOT NULL,
+                requested_by     TEXT,
+                started_at       TEXT NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                ending_at        TEXT,
+                ended_at         TEXT,
+                end_reason       TEXT,
+                ended_by         TEXT,
+                sanitize_result  TEXT
+            )
+            """,
+            # The guarantee everything else rests on: a worker can have at most ONE open lease, enforced by the
+            # database itself, so two requests racing for the same worker cannot both win.
+            "CREATE UNIQUE INDEX uq_worker_leases_node_open ON worker_leases (node_id) WHERE state != 'ended'",
+            "CREATE INDEX idx_worker_leases_org ON worker_leases (org_id, state)",
+        ],
+    ),
 ]
