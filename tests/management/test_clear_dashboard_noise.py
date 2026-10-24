@@ -9,12 +9,20 @@ def _incident(cp, rule, subject, resolved):
     now = datetime.now(UTC).isoformat()
     cp.incidents.open_incident(rule, "warning", subject, f"{rule} on {subject}", {}, now)
     if resolved:
-        cp.incidents.resolve_missing(set(), now)
+        cp.db.execute("UPDATE incidents SET status = 'resolved', resolved_at = ? WHERE rule = ? AND subject = ?",
+                      (now, rule, subject))
 
 
-def test_clear_resolved_incidents_keeps_open_ones(env):  # noqa: F811
+def _hold_the_incident_loop_off(cp, monkeypatch):
+    """The coordinator's own health loop resolves open incidents that are no longer firing. These tests create
+    incidents by hand, so that loop must not touch them."""
+    monkeypatch.setattr(cp.incidents, "resolve_missing", lambda *a, **k: 0)
+
+
+def test_clear_resolved_incidents_keeps_open_ones(env, monkeypatch):  # noqa: F811
     clients, server, coordinator, _org = env
     cp = coordinator.control_plane
+    _hold_the_incident_loop_off(cp, monkeypatch)
     _incident(cp, "r1", "a", resolved=True)
     _incident(cp, "r2", "b", resolved=True)
     _incident(cp, "r3", "c", resolved=False)
@@ -22,19 +30,22 @@ def test_clear_resolved_incidents_keeps_open_ones(env):  # noqa: F811
     r = clients["Owner"].post("/management/incidents/clear-resolved")
     assert r.status_code == 200 and r.json()["cleared"] == 2
     shown = clients["Owner"].get("/management/incidents").json()
-    assert shown["resolved"] == [] and [i["rule"] for i in shown["open"]] == ["r3"]
+    assert shown["resolved"] == []
+    assert "r3" in [i["rule"] for i in shown["open"]]            # the live loop may open real incidents of its own
 
 
-def test_dismiss_one_resolved_incident_but_never_an_open_one(env):  # noqa: F811
+def test_dismiss_one_resolved_incident_but_never_an_open_one(env, monkeypatch):  # noqa: F811
     clients, _server, coordinator, _org = env
     cp = coordinator.control_plane
+    _hold_the_incident_loop_off(cp, monkeypatch)
     _incident(cp, "r1", "a", resolved=True)
     _incident(cp, "r2", "b", resolved=False)
     resolved_id = cp.incidents.recent_resolved()[0]["incident_id"]
     open_id = cp.incidents.open_incidents()[0]["incident_id"]
     assert clients["Owner"].post(f"/management/incidents/{open_id}/dismiss").status_code == 400
     assert clients["Owner"].post(f"/management/incidents/{resolved_id}/dismiss").status_code == 200
-    assert cp.incidents.recent_resolved() == [] and len(cp.incidents.open_incidents()) == 1
+    assert cp.incidents.recent_resolved() == []
+    assert any(i["rule"] == "r2" for i in cp.incidents.open_incidents())
 
 
 def test_clear_read_notifications_keeps_unread(env):  # noqa: F811

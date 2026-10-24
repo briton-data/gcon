@@ -65,7 +65,7 @@ class TestValidation:
     def test_accepts_whole_numbers_including_zero(self):
         assert plans.validate_limits(0, 10, ["python"], 0) == {
             "requests_per_minute": 0, "max_concurrent_jobs": 10,
-            "allowed_programs": ["python"], "max_runtime_seconds": 0, "max_workers": 0}
+            "allowed_programs": ["python"], "max_runtime_seconds": 0, "max_workers": 0, "max_leased_workers": 0}
         top = plans.validate_limits(plans.MAX_LIMIT_VALUE, 1, ["*"], plans.MAX_RUNTIME_SECONDS)
         assert top["requests_per_minute"] == plans.MAX_LIMIT_VALUE
         assert top["max_runtime_seconds"] == plans.MAX_RUNTIME_SECONDS
@@ -109,7 +109,7 @@ class TestStorage:
     def test_save_changes_one_plan_and_keeps_the_others(self, settings):
         saved = plans.save_plan_limits(settings, "pro", 100, 7, ["python"], 90, updated_by="ann")
         assert saved == {"requests_per_minute": 100, "max_concurrent_jobs": 7,
-                         "allowed_programs": ["python"], "max_runtime_seconds": 90, "max_workers": 25}
+                         "allowed_programs": ["python"], "max_runtime_seconds": 90, "max_workers": 25, "max_leased_workers": 4}
         table = plans.load_plan_limits(settings)
         assert table["Pro"] == saved
         assert table["Standard"] == plans.DEFAULT_PLAN_LIMITS["Standard"]
