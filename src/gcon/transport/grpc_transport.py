@@ -255,6 +255,9 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         self.on_node_registered = on_node_registered
         # org_id -> the most workers its plan allows (0 = no limit). Set by the coordinator wiring; None = no cap.
         self.org_worker_cap_resolver = None
+        # callable(node_id, ref, ok, detail): a hosted worker's answer to a clean-up request (see
+        # cluster/worker_leases.py). Set by the coordinator wiring.
+        self.on_sanitize_result = None
         self._sessions: Dict[str, NodeSession] = {}
         self._lock = threading.RLock()
 
@@ -416,22 +419,26 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         source_ip = _peer_address(context)
         org_id = None
         enroll_token_id = None
+        # A fleet token enrolls a GCON-hosted worker: NO organization (a fleet token stores a marker where an
+        # organization id would be, and that marker must never reach a certificate).
+        is_fleet = False
         if self.control_plane is not None:
             token_row = self.control_plane.enroll_tokens.get_by_token(request.enroll_token)
             if token_row is not None and token_row.get("revoked_at") is None:
+                is_fleet = token_row.get("kind") == "fleet"
                 # A real token that is expired or out of uses is refused as
                 # such -- it must not fall through to the legacy shared token.
                 unusable = self.control_plane.enroll_tokens.unusable_reason(token_row)
                 if unusable:
                     self.control_plane.node_enrollment_audit.record(
                         node_id=request.node_id or "(unknown)", accepted=False,
-                        org_id=token_row["org_id"], enroll_token_id=token_row["token_id"],
+                        org_id=None if is_fleet else token_row["org_id"], enroll_token_id=token_row["token_id"],
                         source_ip=source_ip, reason=unusable,
                     )
                     return pb.EnrollResponse(accepted=False, reason=unusable)
-                org_id = token_row["org_id"]
+                org_id = None if is_fleet else token_row["org_id"]
                 enroll_token_id = token_row["token_id"]
-        if org_id is None:
+        if org_id is None and not is_fleet:
             enroll_token = _enroll_token()
             if not enroll_token or not secrets.compare_digest(request.enroll_token, enroll_token):
                 # Durable audit trail for a REJECTED attempt too -- see
@@ -454,6 +461,17 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     reason="node_id is required",
                 )
             return pb.EnrollResponse(accepted=False, reason="node_id is required")
+        # The name of a hosted-fleet worker can only be enrolled again with a fleet token. Without this, anyone
+        # holding an organization's token or the shared one could enroll under a hosted worker's name and take
+        # over its identity (and the customer's jobs it is running).
+        if (self.control_plane is not None and not is_fleet
+                and self.control_plane.fleet_nodes.is_member(request.node_id)):
+            reason = "node_id belongs to the GCON-hosted fleet and can only be enrolled with a fleet token"
+            self.control_plane.node_enrollment_audit.record(
+                node_id=request.node_id, accepted=False, org_id=org_id,
+                enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
+            )
+            return pb.EnrollResponse(accepted=False, reason=reason)
         # A node name that already belongs to another organization (or to none)
         # cannot be enrolled under a different one: the certificate would let
         # the holder take over that node's identity and session.
@@ -513,13 +531,16 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             ca_cert_pem = f.read()
 
         if self.control_plane is not None:
+            if is_fleet:
+                self.control_plane.fleet_nodes.add(request.node_id, enroll_token_id)
             self.control_plane.node_enrollment_audit.record(
                 node_id=request.node_id, accepted=True, org_id=org_id,
                 enroll_token_id=enroll_token_id, source_ip=source_ip,
+                reason="enrolled into the GCON-hosted fleet" if is_fleet else None,
             )
         logger.info(
-            "Enrolled new node via CSR: node_id=%s org_id=%s from %s",
-            request.node_id, org_id, source_ip,
+            "Enrolled new node via CSR: node_id=%s org_id=%s%s from %s",
+            request.node_id, org_id, " (hosted fleet)" if is_fleet else "", source_ip,
         )
         return pb.EnrollResponse(accepted=True, cert_pem=cert_pem, ca_cert_pem=ca_cert_pem)
 
@@ -669,6 +690,11 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     "(job_id=%s) -- dispatcher likely already timed out.",
                     jr.request_message_id, jr.job_id,
                 )
+        elif kind == "sanitize_result":
+            # Whose answer it is comes from the session (proved by the stream), never from the message.
+            sr = envelope.sanitize_result
+            if self.on_sanitize_result is not None:
+                self.on_sanitize_result(session.node_id, sr.ref, bool(sr.ok), sr.detail)
         elif kind == "shutdown_notice":
             self.control_plane.cluster_events.record(
                 "NODE_SHUTDOWN_NOTICE",
@@ -882,6 +908,16 @@ class GrpcTransport(Transport):
         if session is None or not session.connected.is_set():
             raise NodeUnavailableError(f"Node '{node_id}' is not connected.")
         return session
+
+    def sanitize_node(self, node_id: str, ref: str) -> bool:
+        """Ask a connected hosted worker to remove everything a customer's jobs could have left on it. False when
+        the worker is not connected. The answer arrives as a SanitizeResult (see on_sanitize_result)."""
+        try:
+            session = self.get_node(node_id)
+        except NodeUnavailableError:
+            return False
+        session.send(pb.CoordinatorEnvelope(sanitize=pb.Sanitize(ref=ref)))
+        return True
 
     def list_node_ids(self) -> List[str]:
         return [

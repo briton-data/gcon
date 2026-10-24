@@ -63,6 +63,11 @@ _TLS_TRUST_FAILURE_MARKERS = (
 )
 
 
+# What this worker reports at registration. A hosted-fleet worker must report at least
+# registry.FLEET_MIN_WORKER_VERSION (the first version that can clean itself when asked); a test checks the two agree.
+AGENT_VERSION = "1.1.0"
+
+
 def _looks_like_tls_trust_failure(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _TLS_TRUST_FAILURE_MARKERS)
@@ -337,7 +342,7 @@ class AgentDaemon:
                 pb.RegisterRequest(
                     node_id=self.node_id,
                     hostname=self.hostname,
-                    agent_version="1.0.0",
+                    agent_version=AGENT_VERSION,
                     capabilities=self.capabilities,
                     ed25519_public_key_pem=self._ed25519_public_key_pem,
                 ),
@@ -443,6 +448,27 @@ class AgentDaemon:
                 self.agent.cancel()
         elif kind == "ping":
             pass  # keepalive; no response payload required
+        elif kind == "sanitize":
+            # A hosted worker's lease is over: remove what the customer's jobs left here, then say how it went.
+            self._executor.submit(self._run_sanitize, envelope.sanitize.ref, outbound, session_token)
+
+    def _run_sanitize(self, ref, outbound, session_token) -> None:
+        from gcon.execution.sanitize import sanitize_host
+        try:
+            ok, detail = sanitize_host(
+                docker_image=getattr(self.agent, "docker_image", None),
+                running_jobs=len(self._active_jobs),
+            )
+        except Exception as exc:  # never claim clean because the clean-up itself blew up
+            logger.exception("Host clean-up raised")
+            ok, detail = False, f"clean-up raised {exc!r}"
+        outbound.put(
+            pb.AgentEnvelope(
+                node_id=self.node_id,
+                session_token=session_token,
+                sanitize_result=pb.SanitizeResult(ref=ref, ok=ok, detail=detail[:500]),
+            )
+        )
 
     def _run_job(self, job_assign, outbound, session_token, stub) -> None:
         timeout = job_assign.timeout_seconds or None

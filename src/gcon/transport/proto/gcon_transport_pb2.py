@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14gcon_transport.proto\x12\x11gcon.transport.v1\"\xec\x01\n\x0fRegisterRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08hostname\x18\x02 \x01(\t\x12\x15\n\ragent_version\x18\x03 \x01(\t\x12J\n\x0c\x63\x61pabilities\x18\x04 \x03(\x0b\x32\x34.gcon.transport.v1.RegisterRequest.CapabilitiesEntry\x12\x1e\n\x16\x65\x64\x32\x35\x35\x31\x39_public_key_pem\x18\x05 \x01(\t\x1a\x33\n\x11\x43\x61pabilitiesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"o\n\x10RegisterResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\"\n\x1aheartbeat_interval_seconds\x18\x03 \x01(\x05\x12\x0e\n\x06reason\x18\x04 \x01(\t\"G\n\rEnrollRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x65nroll_token\x18\x02 \x01(\t\x12\x0f\n\x07\x63sr_pem\x18\x03 \x01(\x0c\"Y\n\x0e\x45nrollResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x10\n\x08\x63\x65rt_pem\x18\x03 \x01(\x0c\x12\x13\n\x0b\x63\x61_cert_pem\x18\x04 \x01(\x0c\"\xe7\x01\n\rAgentEnvelope\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x31\n\theartbeat\x18\x03 \x01(\x0b\x32\x1c.gcon.transport.v1.HeartbeatH\x00\x12\x32\n\njob_result\x18\x04 \x01(\x0b\x32\x1c.gcon.transport.v1.JobResultH\x00\x12<\n\x0fshutdown_notice\x18\x05 \x01(\x0b\x32!.gcon.transport.v1.ShutdownNoticeH\x00\x42\t\n\x07payload\"\xb1\x01\n\x13\x43oordinatorEnvelope\x12\x32\n\njob_assign\x18\x01 \x01(\x0b\x32\x1c.gcon.transport.v1.JobAssignH\x00\x12\x32\n\njob_cancel\x18\x02 \x01(\x0b\x32\x1c.gcon.transport.v1.JobCancelH\x00\x12\'\n\x04ping\x18\x03 \x01(\x0b\x32\x17.gcon.transport.v1.PingH\x00\x42\t\n\x07payload\"\xe9\x01\n\tHeartbeat\x12\x10\n\x08sequence\x18\x01 \x01(\x03\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x13\n\x0b\x63pu_percent\x18\x03 \x01(\x01\x12\x16\n\x0ememory_percent\x18\x04 \x01(\x01\x12\x14\n\x0crunning_jobs\x18\x05 \x01(\x05\x12\x11\n\ttimestamp\x18\x06 \x01(\t\x12\x10\n\x08gpu_name\x18\x07 \x01(\t\x12\x18\n\x10gpu_memory_total\x18\x08 \x01(\x03\x12\x17\n\x0fgpu_memory_used\x18\t \x01(\x03\x12\x1f\n\x17gpu_utilization_percent\x18\n \x01(\x01\"\x8c\x01\n\tJobAssign\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x17\n\x0ftimeout_seconds\x18\x03 \x01(\x05\x12\x1a\n\x12request_message_id\x18\x04 \x01(\t\x12\x12\n\nattempt_id\x18\x05 \x01(\t\x12\x15\n\rmetadata_json\x18\x06 \x01(\t\"\x1b\n\tJobCancel\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"\x9c\x02\n\tJobResult\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x1a\n\x12request_message_id\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x13\n\x0breturn_code\x18\x04 \x01(\x05\x12\x17\n\x0fruntime_seconds\x18\x05 \x01(\x01\x12\x0e\n\x06stdout\x18\x06 \x01(\t\x12\x0e\n\x06stderr\x18\x07 \x01(\t\x12\r\n\x05\x65rror\x18\x08 \x01(\t\x12\x14\n\x0cmetrics_json\x18\t \x01(\t\x12\x11\n\ttimestamp\x18\n \x01(\t\x12\'\n\x1fworker_attestation_payload_json\x18\x0b \x01(\t\x12$\n\x1cworker_attestation_signature\x18\x0c \x01(\t\" \n\x0eShutdownNotice\x12\x0e\n\x06reason\x18\x01 \x01(\t\"\x19\n\x04Ping\x12\x11\n\ttimestamp\x18\x01 \x01(\t\"\x89\x01\n\x08LogChunk\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x12\n\nattempt_id\x18\x04 \x01(\t\x12\x0e\n\x06stream\x18\x05 \x01(\t\x12\x10\n\x08sequence\x18\x06 \x01(\x03\x12\x0f\n\x07\x63ontent\x18\x07 \x01(\t\"(\n\x06LogAck\x12\x1e\n\x16last_sequence_received\x18\x01 \x01(\x03\"\x9a\x01\n\rReceiptUpload\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x12\n\nattempt_id\x18\x04 \x01(\t\x12\x14\n\x0creceipt_hash\x18\x05 \x01(\t\x12\x11\n\tsignature\x18\x06 \x01(\t\x12\x14\n\x0cpayload_json\x18\x07 \x01(\t\"1\n\nReceiptAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x11\n\tduplicate\x18\x02 \x01(\x08\x32\xa5\x03\n\x0c\x41gentControl\x12S\n\x08Register\x12\".gcon.transport.v1.RegisterRequest\x1a#.gcon.transport.v1.RegisterResponse\x12M\n\x06\x45nroll\x12 .gcon.transport.v1.EnrollRequest\x1a!.gcon.transport.v1.EnrollResponse\x12W\n\x07\x43ontrol\x12 .gcon.transport.v1.AgentEnvelope\x1a&.gcon.transport.v1.CoordinatorEnvelope(\x01\x30\x01\x12\x46\n\nStreamLogs\x12\x1b.gcon.transport.v1.LogChunk\x1a\x19.gcon.transport.v1.LogAck(\x01\x12P\n\rUploadReceipt\x12 .gcon.transport.v1.ReceiptUpload\x1a\x1d.gcon.transport.v1.ReceiptAckb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14gcon_transport.proto\x12\x11gcon.transport.v1\"\xec\x01\n\x0fRegisterRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08hostname\x18\x02 \x01(\t\x12\x15\n\ragent_version\x18\x03 \x01(\t\x12J\n\x0c\x63\x61pabilities\x18\x04 \x03(\x0b\x32\x34.gcon.transport.v1.RegisterRequest.CapabilitiesEntry\x12\x1e\n\x16\x65\x64\x32\x35\x35\x31\x39_public_key_pem\x18\x05 \x01(\t\x1a\x33\n\x11\x43\x61pabilitiesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"o\n\x10RegisterResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\"\n\x1aheartbeat_interval_seconds\x18\x03 \x01(\x05\x12\x0e\n\x06reason\x18\x04 \x01(\t\"G\n\rEnrollRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x65nroll_token\x18\x02 \x01(\t\x12\x0f\n\x07\x63sr_pem\x18\x03 \x01(\x0c\"Y\n\x0e\x45nrollResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x10\n\x08\x63\x65rt_pem\x18\x03 \x01(\x0c\x12\x13\n\x0b\x63\x61_cert_pem\x18\x04 \x01(\x0c\"\xa5\x02\n\rAgentEnvelope\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x31\n\theartbeat\x18\x03 \x01(\x0b\x32\x1c.gcon.transport.v1.HeartbeatH\x00\x12\x32\n\njob_result\x18\x04 \x01(\x0b\x32\x1c.gcon.transport.v1.JobResultH\x00\x12<\n\x0fshutdown_notice\x18\x05 \x01(\x0b\x32!.gcon.transport.v1.ShutdownNoticeH\x00\x12<\n\x0fsanitize_result\x18\x06 \x01(\x0b\x32!.gcon.transport.v1.SanitizeResultH\x00\x42\t\n\x07payload\"\xe2\x01\n\x13\x43oordinatorEnvelope\x12\x32\n\njob_assign\x18\x01 \x01(\x0b\x32\x1c.gcon.transport.v1.JobAssignH\x00\x12\x32\n\njob_cancel\x18\x02 \x01(\x0b\x32\x1c.gcon.transport.v1.JobCancelH\x00\x12\'\n\x04ping\x18\x03 \x01(\x0b\x32\x17.gcon.transport.v1.PingH\x00\x12/\n\x08sanitize\x18\x04 \x01(\x0b\x32\x1b.gcon.transport.v1.SanitizeH\x00\x42\t\n\x07payload\"\x17\n\x08Sanitize\x12\x0b\n\x03ref\x18\x01 \x01(\t\"9\n\x0eSanitizeResult\x12\x0b\n\x03ref\x18\x01 \x01(\t\x12\n\n\x02ok\x18\x02 \x01(\x08\x12\x0e\n\x06\x64\x65tail\x18\x03 \x01(\t\"\xe9\x01\n\tHeartbeat\x12\x10\n\x08sequence\x18\x01 \x01(\x03\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x13\n\x0b\x63pu_percent\x18\x03 \x01(\x01\x12\x16\n\x0ememory_percent\x18\x04 \x01(\x01\x12\x14\n\x0crunning_jobs\x18\x05 \x01(\x05\x12\x11\n\ttimestamp\x18\x06 \x01(\t\x12\x10\n\x08gpu_name\x18\x07 \x01(\t\x12\x18\n\x10gpu_memory_total\x18\x08 \x01(\x03\x12\x17\n\x0fgpu_memory_used\x18\t \x01(\x03\x12\x1f\n\x17gpu_utilization_percent\x18\n \x01(\x01\"\x8c\x01\n\tJobAssign\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x17\n\x0ftimeout_seconds\x18\x03 \x01(\x05\x12\x1a\n\x12request_message_id\x18\x04 \x01(\t\x12\x12\n\nattempt_id\x18\x05 \x01(\t\x12\x15\n\rmetadata_json\x18\x06 \x01(\t\"\x1b\n\tJobCancel\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"\x9c\x02\n\tJobResult\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x1a\n\x12request_message_id\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x13\n\x0breturn_code\x18\x04 \x01(\x05\x12\x17\n\x0fruntime_seconds\x18\x05 \x01(\x01\x12\x0e\n\x06stdout\x18\x06 \x01(\t\x12\x0e\n\x06stderr\x18\x07 \x01(\t\x12\r\n\x05\x65rror\x18\x08 \x01(\t\x12\x14\n\x0cmetrics_json\x18\t \x01(\t\x12\x11\n\ttimestamp\x18\n \x01(\t\x12\'\n\x1fworker_attestation_payload_json\x18\x0b \x01(\t\x12$\n\x1cworker_attestation_signature\x18\x0c \x01(\t\" \n\x0eShutdownNotice\x12\x0e\n\x06reason\x18\x01 \x01(\t\"\x19\n\x04Ping\x12\x11\n\ttimestamp\x18\x01 \x01(\t\"\x89\x01\n\x08LogChunk\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x12\n\nattempt_id\x18\x04 \x01(\t\x12\x0e\n\x06stream\x18\x05 \x01(\t\x12\x10\n\x08sequence\x18\x06 \x01(\x03\x12\x0f\n\x07\x63ontent\x18\x07 \x01(\t\"(\n\x06LogAck\x12\x1e\n\x16last_sequence_received\x18\x01 \x01(\x03\"\x9a\x01\n\rReceiptUpload\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rsession_token\x18\x02 \x01(\t\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x12\n\nattempt_id\x18\x04 \x01(\t\x12\x14\n\x0creceipt_hash\x18\x05 \x01(\t\x12\x11\n\tsignature\x18\x06 \x01(\t\x12\x14\n\x0cpayload_json\x18\x07 \x01(\t\"1\n\nReceiptAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x11\n\tduplicate\x18\x02 \x01(\x08\x32\xa5\x03\n\x0c\x41gentControl\x12S\n\x08Register\x12\".gcon.transport.v1.RegisterRequest\x1a#.gcon.transport.v1.RegisterResponse\x12M\n\x06\x45nroll\x12 .gcon.transport.v1.EnrollRequest\x1a!.gcon.transport.v1.EnrollResponse\x12W\n\x07\x43ontrol\x12 .gcon.transport.v1.AgentEnvelope\x1a&.gcon.transport.v1.CoordinatorEnvelope(\x01\x30\x01\x12\x46\n\nStreamLogs\x12\x1b.gcon.transport.v1.LogChunk\x1a\x19.gcon.transport.v1.LogAck(\x01\x12P\n\rUploadReceipt\x12 .gcon.transport.v1.ReceiptUpload\x1a\x1d.gcon.transport.v1.ReceiptAckb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,29 +44,33 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ENROLLRESPONSE']._serialized_start=468
   _globals['_ENROLLRESPONSE']._serialized_end=557
   _globals['_AGENTENVELOPE']._serialized_start=560
-  _globals['_AGENTENVELOPE']._serialized_end=791
-  _globals['_COORDINATORENVELOPE']._serialized_start=794
-  _globals['_COORDINATORENVELOPE']._serialized_end=971
-  _globals['_HEARTBEAT']._serialized_start=974
-  _globals['_HEARTBEAT']._serialized_end=1207
-  _globals['_JOBASSIGN']._serialized_start=1210
-  _globals['_JOBASSIGN']._serialized_end=1350
-  _globals['_JOBCANCEL']._serialized_start=1352
-  _globals['_JOBCANCEL']._serialized_end=1379
-  _globals['_JOBRESULT']._serialized_start=1382
-  _globals['_JOBRESULT']._serialized_end=1666
-  _globals['_SHUTDOWNNOTICE']._serialized_start=1668
-  _globals['_SHUTDOWNNOTICE']._serialized_end=1700
-  _globals['_PING']._serialized_start=1702
-  _globals['_PING']._serialized_end=1727
-  _globals['_LOGCHUNK']._serialized_start=1730
-  _globals['_LOGCHUNK']._serialized_end=1867
-  _globals['_LOGACK']._serialized_start=1869
-  _globals['_LOGACK']._serialized_end=1909
-  _globals['_RECEIPTUPLOAD']._serialized_start=1912
-  _globals['_RECEIPTUPLOAD']._serialized_end=2066
-  _globals['_RECEIPTACK']._serialized_start=2068
-  _globals['_RECEIPTACK']._serialized_end=2117
-  _globals['_AGENTCONTROL']._serialized_start=2120
-  _globals['_AGENTCONTROL']._serialized_end=2541
+  _globals['_AGENTENVELOPE']._serialized_end=853
+  _globals['_COORDINATORENVELOPE']._serialized_start=856
+  _globals['_COORDINATORENVELOPE']._serialized_end=1082
+  _globals['_SANITIZE']._serialized_start=1084
+  _globals['_SANITIZE']._serialized_end=1107
+  _globals['_SANITIZERESULT']._serialized_start=1109
+  _globals['_SANITIZERESULT']._serialized_end=1166
+  _globals['_HEARTBEAT']._serialized_start=1169
+  _globals['_HEARTBEAT']._serialized_end=1402
+  _globals['_JOBASSIGN']._serialized_start=1405
+  _globals['_JOBASSIGN']._serialized_end=1545
+  _globals['_JOBCANCEL']._serialized_start=1547
+  _globals['_JOBCANCEL']._serialized_end=1574
+  _globals['_JOBRESULT']._serialized_start=1577
+  _globals['_JOBRESULT']._serialized_end=1861
+  _globals['_SHUTDOWNNOTICE']._serialized_start=1863
+  _globals['_SHUTDOWNNOTICE']._serialized_end=1895
+  _globals['_PING']._serialized_start=1897
+  _globals['_PING']._serialized_end=1922
+  _globals['_LOGCHUNK']._serialized_start=1925
+  _globals['_LOGCHUNK']._serialized_end=2062
+  _globals['_LOGACK']._serialized_start=2064
+  _globals['_LOGACK']._serialized_end=2104
+  _globals['_RECEIPTUPLOAD']._serialized_start=2107
+  _globals['_RECEIPTUPLOAD']._serialized_end=2261
+  _globals['_RECEIPTACK']._serialized_start=2263
+  _globals['_RECEIPTACK']._serialized_end=2312
+  _globals['_AGENTCONTROL']._serialized_start=2315
+  _globals['_AGENTCONTROL']._serialized_end=2736
 # @@protoc_insertion_point(module_scope)

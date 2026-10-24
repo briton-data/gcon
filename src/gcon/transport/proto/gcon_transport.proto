@@ -96,6 +96,7 @@ message AgentEnvelope {
     Heartbeat heartbeat = 3;
     JobResult job_result = 4;
     ShutdownNotice shutdown_notice = 5;
+    SanitizeResult sanitize_result = 6;
   }
 }
 
@@ -104,7 +105,21 @@ message CoordinatorEnvelope {
     JobAssign job_assign = 1;
     JobCancel job_cancel = 2;
     Ping ping = 3;
+    Sanitize sanitize = 4;
   }
+}
+
+// Coordinator -> hosted worker: a customer's lease on you is over; remove everything that customer's jobs could
+// have left on this machine. `ref` is echoed back in SanitizeResult so the coordinator knows which request it is.
+message Sanitize {
+  string ref = 1;
+}
+
+// Worker -> coordinator: the answer. ok = everything was removed; otherwise detail says what was not.
+message SanitizeResult {
+  string ref = 1;
+  bool ok = 2;
+  string detail = 3;
 }
 
 message Heartbeat {
