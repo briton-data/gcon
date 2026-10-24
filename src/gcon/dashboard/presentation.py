@@ -218,6 +218,11 @@ class PresentationLayer:
             "QUEUE_CLEARED": f"Queue cleared ({len(payload.get('cleared_job_ids', []))} job(s))",
             "FAILED_JOBS_RETRIED": f"Retried {len(payload.get('job_ids', []))} failed job(s)",
             "FAILED_JOBS_CLEARED": f"Cleared {len(payload.get('job_ids', []))} failed job(s)",
+            "WORKER_LEASE_STARTED": f"Hosted worker {node_id} leased to organization {payload.get('org_id')}",
+            "WORKER_LEASE_ENDING": f"Lease on hosted worker {node_id} ending ({payload.get('end_reason')})",
+            "WORKER_LEASE_ENDED": f"Lease on hosted worker {node_id} ended ({payload.get('sanitize_result') or 'over'})",
+            "WORKER_HELD": f"Hosted worker {node_id} held out of the pool: {payload.get('reason')}",
+            "WORKER_RETURNED_TO_POOL": f"Hosted worker {node_id} cleaned and returned to the pool",
             "EMERGENCY_STOP": f"Emergency stop — cancelled {len(payload.get('cancelled_job_ids', []))} running job(s)",
         }
 

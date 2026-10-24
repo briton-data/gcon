@@ -26,9 +26,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from gcon.cluster.coordinator import ConcurrentJobLimitError, NotLeaderError, PolicyRejectionError
+from gcon.cluster.worker_leases import LeaseError
 from gcon.management.rate_limit import LoginRateLimiter
 from gcon.management import plans as plans_mod
 from gcon.management.request_limiter import RequestRateLimiter, env_override
@@ -41,6 +43,21 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------
 # Response / request schemas (also drive the OpenAPI docs)
 # ---------------------------------------------------------------
+
+class LeaseRequestIn(BaseModel):
+    count: int = Field(description="How many GCON-hosted workers to lease (all or none).", ge=1, le=50)
+
+
+class LeaseOut(BaseModel):
+    lease_id: str
+    node_id: str
+    state: str = Field(description="active, ending (finishing its running job), sanitizing (being cleaned) or ended")
+    started_at: str
+    ending_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    end_reason: Optional[str] = Field(
+        default=None, description="customer_release, idle, worker_lost or staff_release once the lease has ended")
+
 
 class NodeOut(BaseModel):
     node_id: str
@@ -938,6 +955,71 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             raise HTTPException(status_code=400, detail="This key has no organization.")
         mode = presentation.coordinator.control_plane.org_pool_settings.get_mode(org_id)
         return {"mode": mode, "description": _POOL_MODE_HELP[mode], "modes": _POOL_MODE_HELP}
+
+    # ---- GCON-hosted workers, leased to this organization ------------------------------------------------
+    def _lease_manager():
+        manager = getattr(presentation.coordinator, "worker_leases", None)
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Hosted workers are not available on this coordinator.")
+        return manager
+
+    def _org_of(auth):
+        owner = auth["owner"]
+        return getattr(owner, "organization_id", None) if owner else None
+
+    def _lease_out(lease):
+        return {k: lease.get(k) for k in
+                ("lease_id", "node_id", "state", "started_at", "ending_at", "ended_at", "end_reason")}
+
+    def _lease_http_error(exc):
+        status = {"bad_request": 400, "plan_limit": 403, "not_enough_workers": 409, "not_found": 404}.get(exc.code, 400)
+        body = {"detail": str(exc), "code": exc.code}
+        if exc.code == "not_enough_workers":
+            body["available"] = exc.available
+        return JSONResponse(status_code=status, content=body)
+
+    @app.post(
+        "/workers/leases",
+        response_model=List[LeaseOut],
+        tags=["Workers"],
+        summary="Lease GCON-hosted workers: they run this organization's jobs, and only its jobs, until released",
+        responses={401: {"model": ErrorOut}, 403: {"model": ErrorOut}, 409: {"model": ErrorOut}},
+    )
+    def request_worker_leases(payload: LeaseRequestIn, auth=Depends(require_scope("Submit workflows"))):
+        """All or none: either `count` workers are leased or nothing changes. 403 when the plan does not include
+        hosted workers (or `count` would pass its limit); 409 when fewer than `count` are free right now."""
+        try:
+            leases = _lease_manager().request(_org_of(auth), payload.count, auth["owner"].name)
+        except LeaseError as exc:
+            return _lease_http_error(exc)
+        return jsonable_encoder([_lease_out(l) for l in leases])
+
+    @app.get(
+        "/workers/leases",
+        response_model=List[LeaseOut],
+        tags=["Workers"],
+        summary="This organization's hosted-worker leases (open ones, and recently ended)",
+        responses={401: {"model": ErrorOut}},
+    )
+    def list_worker_leases(auth=Depends(require_scope("View monitoring"))):
+        manager = _lease_manager()
+        return jsonable_encoder(
+            [_lease_out(l) for l in presentation.coordinator.control_plane.worker_leases.list_for_org(_org_of(auth))])
+
+    @app.delete(
+        "/workers/leases/{lease_id}",
+        response_model=LeaseOut,
+        tags=["Workers"],
+        summary="Release a leased worker. It finishes the job it is running, is cleaned, and returns to GCON's pool",
+        responses={401: {"model": ErrorOut}, 404: {"model": ErrorOut}},
+    )
+    def release_worker_lease(lease_id: str, auth=Depends(require_scope("Submit workflows"))):
+        try:
+            lease = _lease_manager().release(lease_id, org_id=_org_of(auth), by=auth["owner"].name)
+        except LeaseError as exc:
+            # Same 404 whether the lease does not exist or belongs to another organization.
+            return _lease_http_error(exc)
+        return jsonable_encoder(_lease_out(lease))
 
     @app.get(
         "/enroll/ca",

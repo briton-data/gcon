@@ -95,6 +95,7 @@ class ManagementLayer:
             coordinator.org_job_cap_resolver = self._plan_job_cap_for_org
             coordinator.org_job_rules_resolver = self._plan_job_rules_for_org
             coordinator.org_worker_cap_resolver = self._plan_worker_cap_for_org
+            coordinator.org_leased_worker_cap_resolver = self._plan_leased_worker_cap_for_org
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -422,8 +423,11 @@ class ManagementLayer:
             else:
                 reason = plane.enroll_tokens.unusable_reason(row)
                 status = "expired" if reason and "expired" in reason else "used up" if reason else "active"
+            is_fleet = row.get("kind") == "fleet"
             tokens.append({
-                "token_id": row["token_id"], "org_id": row["org_id"], "org_name": names.get(row["org_id"]),
+                "token_id": row["token_id"], "kind": row.get("kind") or "org",
+                "org_id": None if is_fleet else row["org_id"],
+                "org_name": "GCON hosted fleet" if is_fleet else names.get(row["org_id"]),
                 "label": row.get("label"), "created_at": row.get("created_at"),
                 "expires_at": row.get("expires_at"), "max_uses": row.get("max_uses"),
                 "uses": row.get("uses") or 0, "status": status,
@@ -455,6 +459,96 @@ class ManagementLayer:
         plane.enroll_tokens.revoke(token_id)
         self.audit_logger.log(actor.name, "revoked a worker enrollment token", row.get("label") or token_id)
         return {"token_id": token_id, "revoked": True}
+
+    # ---- the GCON-hosted fleet and its leases -----------------------------------------------------
+    def _lease_manager(self):
+        manager = getattr(self.coordinator, "worker_leases", None)
+        if manager is None:
+            raise ValueError("Hosted workers need a coordinator with a control plane.")
+        return manager
+
+    def create_fleet_token(self, label=None, expires_in_hours=None, max_uses=None, *, actor):
+        """Mint the operator-only token that enrolls a GCON-hosted worker (no organization). Shown once."""
+        plane = self._enroll_control_plane(actor)
+        hours = self.ENROLL_TOKEN_DEFAULT_HOURS if expires_in_hours is None else expires_in_hours
+        uses = self.ENROLL_TOKEN_DEFAULT_USES if max_uses is None else max_uses
+        for name, value, top in (("expires_in_hours", hours, self.ENROLL_TOKEN_MAX_HOURS),
+                                 ("max_uses", uses, self.ENROLL_TOKEN_MAX_USES)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= top:
+                raise ValueError(f"{name} must be a whole number from 1 to {top}")
+        expires_at = (datetime.now(UTC) + timedelta(hours=hours)).isoformat()
+        token = plane.enroll_tokens.create_fleet_token(label=(label or None), expires_at=expires_at, max_uses=uses)
+        self.audit_logger.log(
+            actor.name, f"minted a hosted-fleet enrollment token (expires in {hours}h, {uses} use(s))", "hosted fleet")
+        return {"token": token, "expires_at": expires_at, "max_uses": uses}
+
+    def get_fleet(self):
+        """Every hosted worker with what it is doing, the open leases, and the recent ones."""
+        manager = self._lease_manager()
+        plane = self.coordinator.control_plane
+        names = {o["org_id"]: o["name"] for o in self.get_organizations()}
+        live = {n["node_id"]: n for n in self.coordinator.get_nodes() if n.get("fleet")}
+        free = set(manager.available_nodes())
+        workers = []
+        for row in plane.fleet_nodes.list_all():
+            node_id = row["node_id"]
+            lease = plane.worker_leases.get_open_for_node(node_id)
+            node = live.get(node_id)
+            if row.get("held_reason"):
+                state = "held"
+            elif row.get("sanitizing_since") or (lease and lease["state"] == "sanitizing"):
+                state = "cleaning"
+            elif lease:
+                state = "leased" if lease["state"] == "active" else lease["state"]
+            elif node_id in free:
+                state = "available"
+            else:
+                state = "unavailable"
+            workers.append({
+                "node_id": node_id, "state": state,
+                "status": node["status"] if node else "offline",
+                "connected": bool(node and node.get("connected")),
+                "agent_version": node.get("agent_version") if node else None,
+                "held_reason": row.get("held_reason"),
+                "lease_id": lease["lease_id"] if lease else None,
+                "leased_to": names.get(lease["org_id"], lease["org_id"]) if lease else None,
+                "lease_started_at": lease["started_at"] if lease else None,
+                "why_unavailable": (node["blockers"] if node else ["not connected to this coordinator"])
+                if state == "unavailable" else [],
+            })
+
+        def label(lease):
+            return {**lease, "org_name": names.get(lease["org_id"], lease["org_id"])}
+
+        counts = {"total": len(workers)}
+        for w in workers:
+            counts[w["state"]] = counts.get(w["state"], 0) + 1
+        return {
+            "workers": workers,
+            "open_leases": [label(l) for l in plane.worker_leases.list_open()],
+            "recent_leases": [label(l) for l in plane.worker_leases.list_recent_ended(50)],
+            "counts": counts,
+        }
+
+    def get_fleet_worker_history(self, node_id):
+        """Every customer that has held this hosted worker, with times: the starting point when a worker is
+        suspected of being compromised. Pair it with the receipts and job attempts recorded against the node id."""
+        plane = self.coordinator.control_plane
+        self._lease_manager()
+        if plane.fleet_nodes.get(node_id) is None:
+            raise ValueError(f"'{node_id}' is not a hosted-fleet worker.")
+        names = {o["org_id"]: o["name"] for o in self.get_organizations()}
+        return [{**l, "org_name": names.get(l["org_id"], l["org_id"])} for l in plane.worker_leases.list_for_node(node_id)]
+
+    def release_lease_as_staff(self, lease_id, *, actor):
+        lease = self._lease_manager().release(lease_id, by=actor.name, reason="staff_release")
+        self.audit_logger.log(actor.name, "released a hosted-worker lease", lease["node_id"])
+        return lease
+
+    def clean_fleet_worker(self, node_id, *, actor):
+        row = self._lease_manager().sanitize_held_node(node_id, actor.name)
+        self.audit_logger.log(actor.name, "asked a hosted worker to clean itself", node_id)
+        return row
 
     # ---- archiving workers that are gone ----------------------------------------------------------
     def archive_worker(self, node_id, *, actor):
@@ -1302,7 +1396,8 @@ class ManagementLayer:
         return plans_mod.load_plan_limits(self._plan_settings())
 
     def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs,
-                        allowed_programs=None, max_runtime_seconds=None, max_workers=None, *, actor):
+                        allowed_programs=None, max_runtime_seconds=None, max_workers=None,
+                        max_leased_workers=None, *, actor):
         """Owner/Administrator only. Applies on the next request. Leaving
         `allowed_programs` / `max_runtime_seconds` as None keeps the tier's
         current value."""
@@ -1315,7 +1410,8 @@ class ManagementLayer:
         previous = self.get_plan_limits()[plan]
         values = plans_mod.save_plan_limits(
             settings, plan, requests_per_minute, max_concurrent_jobs,
-            allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers)
+            allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers,
+            max_leased_workers=max_leased_workers)
         detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
@@ -1329,6 +1425,8 @@ class ManagementLayer:
                        f"{values['max_runtime_seconds']}s")
         if values["max_workers"] != previous["max_workers"]:
             detail += f"; max workers {previous['max_workers']} -> {values['max_workers']}"
+        if values["max_leased_workers"] != previous["max_leased_workers"]:
+            detail += f"; max hosted workers {previous['max_leased_workers']} -> {values['max_leased_workers']}"
         self.audit_logger.log(actor.name, detail, plan)
         return self.get_plans_overview()
 
@@ -1355,6 +1453,7 @@ class ManagementLayer:
             "allowed_programs": list(table[tier]["allowed_programs"]),
             "max_runtime_seconds": table[tier]["max_runtime_seconds"],
             "max_workers": table[tier]["max_workers"],
+            "max_leased_workers": table[tier]["max_leased_workers"],
         }
 
     def get_plans_overview(self):
@@ -1411,6 +1510,14 @@ class ManagementLayer:
         except ValueError:
             label = None
         return self.get_plan_limits()[plans_mod.plan_for_limits(label)]["max_workers"]
+
+    def _plan_leased_worker_cap_for_org(self, org_id):
+        """Resolver handed to the coordinator: the most GCON-hosted workers this org's plan lets it hold (0 = none)."""
+        try:
+            label = self.org_registry.get_organization(org_id).plan
+        except ValueError:
+            label = None
+        return self.get_plan_limits()[plans_mod.plan_for_limits(label)]["max_leased_workers"]
 
     def _plan_job_rules_for_org(self, org_id):
         """Resolver handed to the coordinator: what this org's plan lets its

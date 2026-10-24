@@ -712,6 +712,7 @@ class WebServer:
                     payload.get("allowed_programs"),
                     payload.get("max_runtime_seconds"),
                     payload.get("max_workers"),
+                    payload.get("max_leased_workers"),
                     actor=user,
                 )
             except PermissionError as e:
@@ -774,6 +775,52 @@ class WebServer:
                 raise HTTPException(status_code=403, detail=str(e))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+
+        # The GCON-hosted fleet: who is available, who holds which worker, and the controls staff need.
+        def _lease_http(e):
+            from gcon.cluster.worker_leases import LeaseNotFound, NotAHostedWorker
+            status = 404 if isinstance(e, (LeaseNotFound, NotAHostedWorker)) else 400
+            return HTTPException(status_code=status, detail=str(e))
+
+        @self.app.get("/management/fleet")
+        def mgmt_get_fleet(user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.get_fleet()
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.get("/management/fleet/{node_id}/leases")
+        def mgmt_fleet_worker_history(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.get_fleet_worker_history(node_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @self.app.post("/management/fleet/tokens")
+        def mgmt_create_fleet_token(payload: dict, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.create_fleet_token(
+                    payload.get("label"), payload.get("expires_in_hours"), payload.get("max_uses"), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/leases/{lease_id}/release")
+        def mgmt_release_lease(lease_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            from gcon.cluster.worker_leases import LeaseError
+            try:
+                return self.management.release_lease_as_staff(lease_id, actor=user)
+            except (LeaseError, ValueError) as e:
+                raise _lease_http(e)
+
+        @self.app.post("/management/fleet/{node_id}/clean")
+        def mgmt_clean_fleet_worker(node_id: str, user=Depends(self.require_permission("Manage cluster"))):
+            from gcon.cluster.worker_leases import LeaseError
+            try:
+                return self.management.clean_fleet_worker(node_id, actor=user)
+            except (LeaseError, ValueError) as e:
+                raise _lease_http(e)
 
         # Archive workers that are gone (offline or deregistered): off the dashboard, off the plan's worker count.
         @self.app.post("/management/nodes/archive-offline")
