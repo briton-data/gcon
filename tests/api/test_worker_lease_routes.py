@@ -103,3 +103,14 @@ def test_it_requires_authentication(env):
     assert client.post("/workers/leases", json={"count": 1}).status_code == 401
     assert client.get("/workers/leases").status_code == 401
     assert client.delete("/workers/leases/lease_x").status_code == 401
+
+
+def test_the_plan_endpoint_tells_a_customer_what_hosted_workers_it_may_hold(env):
+    client, coordinator = env
+    acme, _ = _signup(client, "Acme", "a@acme.example")
+    plan = client.get("/account/plan", headers=acme).json()
+    assert plan["max_leased_workers"] == 1 and plan["leased_workers_held"] == 0      # Standard: one hosted worker
+    assert plan["max_workers"] == 5
+    _hosted(coordinator, "h1", "h2")
+    client.post("/workers/leases", json={"count": 2}, headers=acme)
+    assert client.get("/account/plan", headers=acme).json()["leased_workers_held"] == 2
