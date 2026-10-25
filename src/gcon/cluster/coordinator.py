@@ -298,10 +298,14 @@ class GCONCoordinator:
         # Optional callable(org_id, replicas) -> None, or the refusal dict, set by ManagementLayer: does this
         # organization have the workers to run a job needing `replicas` distinct ones? Checked at submission.
         self.org_worker_gate_resolver = None
-        # The shared pool (an organization's job falling back to an organization-less worker staff flagged) is
-        # SWITCHED OFF: hosted workers are claimed through leases instead (docs/WORKERS_AND_ENROLLMENT.md). The
-        # code stays so it can be turned back on (GCON_SHARED_POOL=on) until it is removed for good.
-        self.shared_pool_enabled = os.environ.get("GCON_SHARED_POOL", "off").strip().lower() in ("on", "1", "true", "yes")
+        # The shared pool (an organization's job falling back to an organization-less worker staff flagged) has a
+        # master switch, OFF by default: hosted workers are claimed through leases instead
+        # (docs/WORKERS_AND_ENROLLMENT.md). Staff flip it on the dashboard; the choice is stored. GCON_SHARED_POOL
+        # only sets the starting value for a deployment that has never stored a choice.
+        self._shared_pool_env_default = os.environ.get("GCON_SHARED_POOL", "off").strip().lower() in (
+            "on", "1", "true", "yes")
+        self._shared_pool_override = None       # set directly (tests); wins over the stored choice
+        self._shared_pool_cache = (None, 0.0)   # (stored value, when read): the decision is asked once per job
         # Optional callable(org_id) -> how many GCON-hosted workers the org's plan lets it lease at once
         # (0 = the plan has no hosted workers), also set by ManagementLayer.
         self.org_leased_worker_cap_resolver = None
@@ -1135,6 +1139,39 @@ class GCONCoordinator:
             # whatever else was asked: there the sandbox is the only boundary.
             or job.get("execution_pool") == "shared"
         )
+
+    @property
+    def shared_pool_enabled(self):
+        """The shared pool's master switch: a directly set value, else the stored dashboard choice, else the
+        deployment's starting value. The stored choice is re-read at most every 2 seconds."""
+        if self._shared_pool_override is not None:
+            return self._shared_pool_override
+        plane = self.control_plane
+        if plane is not None:
+            stored, read_at = self._shared_pool_cache
+            now = time.monotonic()
+            if now - read_at > 2.0:
+                try:
+                    stored = plane.settings.get("shared_pool_enabled")
+                except Exception:
+                    stored = None
+                self._shared_pool_cache = (stored, now)
+            if stored in ("on", "off"):
+                return stored == "on"
+        return self._shared_pool_env_default
+
+    @shared_pool_enabled.setter
+    def shared_pool_enabled(self, value):
+        self._shared_pool_override = None if value is None else bool(value)
+
+    def set_shared_pool_enabled(self, enabled, by=None):
+        """Store the master switch (what the dashboard switch does). Takes effect on the next job placement."""
+        if self.control_plane is None:
+            raise ValueError("The shared-pool switch needs a coordinator with a control plane.")
+        self.control_plane.settings.set("shared_pool_enabled", "on" if enabled else "off", updated_by=by)
+        self._shared_pool_override = None
+        self._shared_pool_cache = (None, 0.0)
+        return bool(enabled)
 
     def _shared_pool_allowed(self, job):
         """

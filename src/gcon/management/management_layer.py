@@ -371,6 +371,39 @@ class ManagementLayer:
             raise ValueError("Shared-pool settings need a coordinator with a control plane.")
         return plane
 
+    def get_shared_pool(self):
+        """Everything the dashboard's shared-pool panel shows: the master switch, the workers that could be flagged
+        (organization-less and not hosted) with whether each is in the pool, and every organization's mode."""
+        plane = getattr(self.coordinator, "control_plane", None)
+        if plane is None:
+            raise ValueError("Shared-pool settings need a coordinator with a control plane.")
+        from gcon.persistence.repositories.org_pool_settings import POOL_MODES
+        members = {m["node_id"] if isinstance(m, dict) else m for m in plane.shared_pool_nodes.list_members()}
+        live = {n["node_id"]: n for n in self.coordinator.get_nodes()}
+        workers = []
+        for row in plane.nodes.list_all():
+            node_id = row["node_id"]
+            if row.get("org_id") is not None or row.get("archived_at") or plane.fleet_nodes.is_member(node_id):
+                continue
+            node = live.get(node_id)
+            workers.append({
+                "node_id": node_id, "in_pool": node_id in members,
+                "status": node["status"] if node else "offline",
+                "sandboxed": bool(node and node.get("sandboxed")),
+            })
+        orgs = [{"org_id": o["org_id"], "name": o["name"], "mode": plane.org_pool_settings.get_mode(o["org_id"])}
+                for o in self.get_organizations()]
+        return {"enabled": bool(self.coordinator.shared_pool_enabled), "modes": list(POOL_MODES),
+                "workers": sorted(workers, key=lambda w: w["node_id"]), "organizations": orgs}
+
+    def set_shared_pool_enabled(self, enabled, *, actor):
+        self._pool_control_plane(actor)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be true or false")
+        self.coordinator.set_shared_pool_enabled(enabled, by=actor.name)
+        self.audit_logger.log(actor.name, "switched the shared worker pool " + ("ON" if enabled else "OFF"), "shared pool")
+        return self.get_shared_pool()
+
     def set_org_shared_pool_mode(self, org_id, mode, *, actor):
         plane = self._pool_control_plane(actor)
         org = self.org_registry.get_organization(org_id)
@@ -387,6 +420,8 @@ class ManagementLayer:
             raise ValueError(f"Worker '{node_id}' is not known to this coordinator.")
         if row.get("org_id") is not None:
             raise ValueError("A worker that belongs to an organization cannot join the shared pool.")
+        if plane.fleet_nodes.is_member(node_id):
+            raise ValueError("A GCON-hosted worker is leased to one customer at a time and never joins the shared pool.")
         enabled = bool(enabled)
         if enabled:
             plane.shared_pool_nodes.add(node_id, actor.name)

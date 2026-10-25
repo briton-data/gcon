@@ -734,6 +734,22 @@ class WebServer:
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+        @self.app.get("/management/shared-pool")
+        def mgmt_get_shared_pool(user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.get_shared_pool()
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.put("/management/shared-pool")
+        def mgmt_set_shared_pool_switch(payload: dict, user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.set_shared_pool_enabled(payload.get("enabled"), actor=user)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         @self.app.put("/management/nodes/{node_id}/shared-pool")
         def mgmt_set_node_shared_pool(
             node_id: str, payload: dict, user=Depends(self.require_permission("Manage cluster")),
