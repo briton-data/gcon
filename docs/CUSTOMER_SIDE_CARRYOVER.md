@@ -175,7 +175,7 @@ workers. Full behaviour is in `docs/WORKERS_AND_ENROLLMENT.md`. Everything marke
 | See my workers, including leased ones | `GET /nodes`, `GET /nodes/{node_id}` (a hosted worker's `address` is null) | exists, see gaps |
 | Enrollment attempts for one of my workers | `GET /nodes/{node_id}/enrollment-history` | exists |
 | Submit a job or workflow | `POST /jobs`, `POST /workflows`: **new `409`** when I have no worker to run it (below) | exists |
-| Is GCON's old shared pool on? | `GET /org/shared-pool` -> `enabled` (false now; the pool is switched off, so hide any pool UI) | exists |
+| Is GCON's old shared pool on? | `GET /org/shared-pool` -> `enabled` (false unless staff turned the pool on in the dashboard; hide any pool UI while false) | exists |
 
 Lease states for the UI: `active`, `ending` (finishing a running job), `sanitizing` (being cleaned), `ended` with
 `end_reason` `customer_release` / `idle` / `staff_release` / `worker_lost`.
@@ -226,9 +226,33 @@ get this `409`; the site should say their worker was released for being idle, no
 | Decision | State |
 |---|---|
 | Hosted workers are claimed by the customer (`POST /workers/leases`); no automatic assignment | built |
-| The old shared pool is disabled (it duplicated leases) | **built**: off by default (`GCON_SHARED_POOL`); code and staff routes remain until removed |
+| The old shared pool is kept but off (it duplicates leases) | **built**: master switch on the staff dashboard (Administration, "Shared worker pool"), off by default, stored; flags and modes managed in the same panel |
 | The Standard plan includes 1 hosted worker; Pro 4; Enterprise 20 (placeholders) | **built** (`max_leased_workers`) |
 | A job with no worker to run it is refused with an error that says what to do | **built**: the `409` above |
 | Verification needs 2 workers, so on Standard it needs the customer's own workers or a larger plan | **built**: `not_enough_workers_to_verify` |
 | Standard `max_workers` (own workers) is 5 | placeholder: set to 0 if self-hosting should be a paid feature |
 | The shared `GCON_ENROLL_TOKEN` (never expires, organization-less) | undecided; see `docs/WORKERS_AND_ENROLLMENT.md` section 12 |
+
+### 12. Staff-dashboard controls that exist in the backend but have no button (checked 2026-10-25)
+
+Method: every staff route listed in `docs/CODEMAP.md` was searched for in `static/js/dashboard.js` and the templates.
+145 routes; the ones below have no caller. Most are **deliberate**: Round 7 removed per-node and per-job controls from
+the staff console on purpose (incident response is not done from that UI; the routes were kept for the customer side).
+
+| Route(s) | What it does | Why there is no button |
+|---|---|---|
+| `POST /cluster/nodes/{id}/drain`, `/stop`, `/restart`, `/clear-quarantine` | Operate one worker | Removed in Round 7 on purpose. The dashboard still **shows** draining and quarantined state. |
+| `POST /cluster/emergency-stop`, `POST /cluster/queue/clear` | Cluster-wide stop; empty the queue | Removed in Round 7 on purpose |
+| `POST /jobs/{id}/cancel`, `/jobs/{id}/retry`, `GET /jobs/{id}` | One job | Removed in Round 7 on purpose (per-job drill-in belongs to the customer side). The customer API already has cancel/retry/detail for a customer's own jobs. |
+| `POST /jobs/retry-failed`, `/jobs/clear-failed`, `GET /jobs/status-counts` | Bulk failed-job actions | Removed in Round 7 with the job list |
+| `POST /receipts/verify-all`, `GET /receipts-summary` | Re-check all receipts | Removed in Round 7 with the receipts tab |
+| `GET /analytics`, `/artifacts`, `/cluster/snapshot`, `/hero-status`, `/system-metrics`, `/trust-history`, `/logs/export`, `/metrics/export`, `/management/search`, `/management/dashboard-cards` | Read-only data and exports | Data endpoints, not controls; the dashboard gets its numbers through the live feed instead |
+| `POST /admin/scale-up`, `/admin/scale-down` | Scale workers | The buttons exist; they only work with a real cloud provisioner (explicitly left as is) |
+
+Built since: shared pool switch, flags and modes (panel in Administration); lease history per hosted worker.
+
+**One decision this raises:** hosted-fleet workers have Release, Clean and History on the dashboard but no Stop or
+Drain. For a suspected compromised hosted worker the runbook is "release its lease, do not return it to the pool,
+stop it", and stopping it is done outside the dashboard today. Adding Stop and Drain for hosted workers only would
+reverse Round 7 for that one place; it needs an explicit yes.
+

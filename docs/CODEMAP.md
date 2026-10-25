@@ -65,7 +65,7 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 
 ## Staff dashboard routes
 
-145 routes. Permissions used: `Access analytics`, `Manage API keys`, `Manage cluster`, `Manage users`, `View monitoring`.
+147 routes. Permissions used: `Access analytics`, `Manage API keys`, `Manage cluster`, `Manage users`, `View monitoring`.
 
 | Method | Path | Handler |
 |---|---|---|
@@ -173,6 +173,8 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 | GET | `/management/roles` | mgmt_roles |
 | GET | `/management/scheduler` | mgmt_scheduler |
 | GET | `/management/search` | mgmt_search |
+| GET | `/management/shared-pool` | mgmt_get_shared_pool |
+| PUT | `/management/shared-pool` | mgmt_set_shared_pool_switch |
 | GET | `/management/staking` | mgmt_staking |
 | GET | `/management/staking/events` | mgmt_staking_events |
 | POST | `/management/staking/{node_id}/bond` | mgmt_bond_stake |
@@ -420,7 +422,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `tests/dashboard/` (1): `test_verify_pillar_metrics.py`
 - `tests/execution/` (13): `test_assurance.py`, `test_attestation_pinning.py`, `test_command_check.py`, `test_docker_executor.py`, `test_docker_hardening.py`, `test_docker_run_isolation.py`, `test_gpu_sampling.py`, `test_job_run_as_user.py`, `test_output_cap.py`, `test_replication_compare.py`, `test_sanitize_host.py`, `test_worker_identity.py`, `test_worker_script_secrets.py`
 - `tests/integration/` (1): `test_multiprocess_fault_injection.py`
-- `tests/management/` (17): `test_api_key_hashed_storage.py`, `test_clear_dashboard_noise.py`, `test_client_recent_jobs.py`, `test_customer_accounts.py`, `test_fleet_admin.py`, `test_owner_role_protection.py`, `test_password_persistence.py`, `test_plan_management.py`, `test_plans.py`, `test_request_limiter.py`, `test_session_and_audit_privacy.py`, `test_shared_pool_admin.py`, `test_token_hashed_storage.py`, `test_user_update_fields.py`, `test_username_and_status.py`, `test_webhook_secret_not_exposed.py`, `test_worker_enrollment_controls.py`
+- `tests/management/` (18): `test_api_key_hashed_storage.py`, `test_clear_dashboard_noise.py`, `test_client_recent_jobs.py`, `test_customer_accounts.py`, `test_fleet_admin.py`, `test_owner_role_protection.py`, `test_password_persistence.py`, `test_plan_management.py`, `test_plans.py`, `test_request_limiter.py`, `test_session_and_audit_privacy.py`, `test_shared_pool_admin.py`, `test_shared_pool_switch.py`, `test_token_hashed_storage.py`, `test_user_update_fields.py`, `test_username_and_status.py`, `test_webhook_secret_not_exposed.py`, `test_worker_enrollment_controls.py`
 - `tests/monitoring/` (5): `test_logging.py`, `test_observability.py`, `test_overview_scope.py`, `test_scheduler_restart.py`, `test_scheduler_status.py`
 - `tests/persistence/` (10): `test_control_plane.py`, `test_durability_warnings.py`, `test_job_deletion_keeps_receipts.py`, `test_lease_race.py`, `test_node_enrollment_audit.py`, `test_node_registration_keeps_identity.py`, `test_on_node_disconnected.py`, `test_postgres_backend.py`, `test_volume_paths.py`, `test_webhook_secret_encryption.py`
 - `tests/sdk/` (3): `test_client_billing.py`, `test_client_new_methods.py`, `test_client_plan.py`

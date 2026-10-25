@@ -24,7 +24,7 @@ dispatchable), `src/gcon/cluster/scheduler.py` (who gets a job), `src/gcon/clust
 | Customer-hosted worker | A worker the customer runs and enrolls itself (section 3). |
 | Hosted-fleet worker | A worker GCON runs. It has no organization of its own and serves a customer only while leased (sections 5 and 6). |
 | Lease | A customer's exclusive hold on one hosted worker (section 6). |
-| Shared pool | The older mechanism: staff-flagged organization-less workers that an organization's job could fall back to. **Switched off by default** (`GCON_SHARED_POOL`); replaced by leases (section 3.3). Hosted-fleet workers were never part of it. |
+| Shared pool | The older mechanism: staff-flagged organization-less workers that an organization's job could fall back to. **Has a master switch on the dashboard, OFF by default**; leases are the safer replacement (section 3.3). Hosted-fleet workers were never part of it. |
 
 ## 2. The two kinds of worker
 
@@ -79,19 +79,28 @@ an organization an attested fact. A hosted-fleet worker's certificate has no OU.
 |---|---|---|---|---|
 | `org` | Staff (Administration, "Worker enrollment tokens") or `scripts/create_enroll_token.py` | The one chosen | Dashboard always sets both (defaults 72 h, 5 uses; maximums 720 h, 1000). The script leaves them unlimited unless given `--expires-in-hours` / `--max-uses`. | That organization's jobs |
 | `fleet` | Owner/Administrator (Administration, "GCON hosted fleet") | None (stored under the marker `(hosted-fleet)`, never a real org id) | Same figures and limits as above | Nobody until leased |
-| Shared `GCON_ENROLL_TOKEN` | Environment variable on the coordinator | None | Never expires, unlimited | Only jobs that have no organization (staff/dev jobs). With the shared pool switched off, it cannot run a customer's job at all |
+| Shared `GCON_ENROLL_TOKEN` | Environment variable on the coordinator | None | Never expires, unlimited | Only jobs that have no organization (staff/dev jobs). While the shared pool is off (the default) it cannot run a customer's job at all; with the pool on, only if staff flagged it |
 
 Tokens are stored as hashes. The plaintext is shown once, when created. A fleet token can never be mistaken for an
 organization's: `lookup_org_id` ignores `kind='fleet'`, and Enroll reads the kind explicitly so the marker can never
 reach a certificate.
 
-The **shared pool** (older mechanism) is **switched off**. It let an organization's job fall back, per job, to an
-organization-less worker that staff had flagged and that ran in a sandbox, according to the organization's pool mode
-(`off` / `basic` / `full`). That duplicated leases with weaker isolation: consecutive jobs of different customers ran
-on the same machine with nothing wiped between them. It is disabled by `GCON_SHARED_POOL` being unset (or `off`); the
-code and the stored per-organization mode remain, so it can be turned back on (`GCON_SHARED_POOL=on`) until it is
-removed. While off, `GET /org/shared-pool` reports `enabled: false` and points to leases, and no job is ever placed
-on a flagged worker.
+The **shared pool** (older mechanism) has a **master switch on the dashboard** (Administration, "Shared worker pool"),
+**off by default**. It lets an organization's job fall back, per job, to an organization-less worker that staff have
+flagged and that runs in a sandbox, according to the organization's pool mode (`off` / `basic` / `full`). That
+duplicates leases with weaker isolation: consecutive jobs of different customers run on the same machine with nothing
+wiped between them, which is why it is off.
+
+- **The switch** is stored (`settings.shared_pool_enabled`, `on` / `off`), survives restarts, and is changed by an
+  Owner or Administrator (`PUT /management/shared-pool`, audit-logged). `GCON_SHARED_POOL=on` only sets the starting
+  value for a deployment that has never stored a choice. A change takes effect on the next job placement (the stored
+  value is re-read at most every 2 seconds).
+- **While it is off**, no job is placed on a flagged worker, whatever the flags and modes say; they are kept, so
+  turning it on restores them. `GET /org/shared-pool` (customer API) reports `enabled: false` and points to leases.
+- **Flags and modes** are managed in the same panel: a worker with no organization that is not hosted can be added
+  or removed from the pool (`PUT /management/nodes/{id}/shared-pool`); each organization has a mode
+  (`PUT /management/organizations/{id}/shared-pool`).
+- **Hosted workers can never be flagged**: the route refuses them, and the registry never marks one as shared.
 
 ### 3.4 Coordinator and CA persistence
 
@@ -289,6 +298,8 @@ created, with the next step in the body:
 | Administration, Node Management | Per worker: status, "not connected", version, who it serves, why it cannot take customer jobs; **Archive** (offline workers) and **Archive all offline** (`POST /management/nodes/{id}/archive`, `/archive-offline`). An online worker, or one with an open lease, cannot be archived. |
 | Administration, Worker enrollment tokens | Mint, list, revoke organization tokens (`/management/enroll-tokens`; Owner or Administrator). |
 | Administration, GCON hosted fleet | Fleet counts; each hosted worker's state (available, leased, ending, cleaning, held, unavailable) and why; **Release** a lease (`POST /management/leases/{id}/release`); **Clean** a held worker; recent leases; mint a fleet token (`POST /management/fleet/tokens`; Owner or Administrator). `GET /management/fleet`. |
+| Administration, Shared worker pool | The master switch (Owner or Administrator), the workers that could be in the pool with Add / Remove, and each organization's mode. |
+| Administration, GCON hosted fleet, per worker | **History**: every customer that has held that worker (`GET /management/fleet/{id}/leases`). |
 | Plans table | `max_workers` and `max_leased_workers` per plan (`Max workers`, `Max hosted workers`). |
 | Events, Notifications, Incidents, Audit Logs | Clear / dismiss controls (below). |
 
@@ -307,7 +318,7 @@ worker) it needs the organization's own workers or a larger plan.
 | `GCON_ENROLL_TOKEN` | Coordinator | Opens the enroll port; also the shared organization-less token (legacy). Worker side: the token to present. |
 | `GCON_ENROLL_ADDRESS`, `GCON_CA_FINGERPRINT`, `GCON_CA_CERT_B64`, `GCON_ENROLL_INSECURE` | Worker | Where and how to enroll and verify the coordinator. |
 | `GCON_MIN_WORKER_VERSION` | Coordinator | Workers below it stay visible but get no jobs. Unset = off. |
-| `GCON_SHARED_POOL` | Coordinator | `on` re-enables the old shared pool. Unset or `off` (default): switched off (section 3.3). |
+| `GCON_SHARED_POOL` | Coordinator | Starting value of the shared-pool switch for a deployment that has never stored a choice. After that, the dashboard switch decides (section 3.3). Unset or `off`: off. |
 | `GCON_SANDBOX_POLICY` | Coordinator | `required` (default): customer jobs only on sandboxed workers. `trusted`: operator accepts unsandboxed workers. Hosted workers always need a sandbox. |
 | `GCON_EXECUTION_BACKEND=docker` | Worker | Makes the worker sandboxed. |
 | `GCON_JOB_IO_ROOT`, `GCON_JOB_DOCKER_IMAGE` | Worker | Job IO directory; the container image (operator's). |
@@ -338,9 +349,9 @@ and enroll it again.
 
 ## 12. Known limits and open decisions
 
-- **Shared pool.** Switched off (section 3.3), not yet deleted: the code, the staff routes that flag workers and set an
-  organization's mode (`/management/nodes/{id}/shared-pool`, `/management/organizations/{id}/shared-pool`) and the
-  stored data remain, and do nothing while it is off. Remove them in one change when sure it will not return.
+- **Shared pool.** Kept, with a dashboard switch that is off by default (section 3.3). Whenever it is turned on, the
+  weaker isolation above applies to the workers flagged in it. Nothing forces a customer who is on a leased plan away
+  from it while it is on; leaving it off is what keeps the per-job sharing out.
 - **Self-hosting is still allowed** and the Standard plan's `max_workers` starting value (5) invites it. Set it to 0
   to make self-hosting a paid-plan feature; that is a plan number, not code.
 - **A customer who claims a worker and goes idle for the idle time (60 minutes by default) loses it**, and their next
@@ -366,8 +377,9 @@ and enroll it again.
 gRPC), `tests/transport/test_enroll_worker_cap.py` (plan cap), `tests/api/test_worker_lease_routes.py` (customer API),
 `tests/management/test_fleet_admin.py` and `test_worker_enrollment_controls.py` (staff controls, tokens, archive),
 `tests/management/test_clear_dashboard_noise.py` (clear/dismiss), `tests/api/test_worker_gate.py` (the submission gate:
-refusal bodies, what counts as a worker, verification, validation order), `tests/cluster/test_shared_pool.py` and
-`tests/api/test_shared_pool_route.py` (the pool, and that it is off by default), `tests/test_codemap_current.py`
+refusal bodies, what counts as a worker, verification, validation order), `tests/cluster/test_shared_pool.py`,
+`tests/api/test_shared_pool_route.py` and `tests/management/test_shared_pool_switch.py` (the pool, its dashboard
+switch, and that it is off by default), `tests/test_codemap_current.py`
 (`docs/CODEMAP.md` is current).
 
 Test files that are about something other than worker availability set `coordinator.org_worker_gate_resolver = None`
