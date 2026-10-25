@@ -29,6 +29,7 @@ def build(tmp_path, monkeypatch, rate_env=None, jobs_env=None):
             monkeypatch.setenv(name, str(value))
     coordinator = GCONCoordinator(control_plane=ControlPlane(path=str(tmp_path / "cp.db")))
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     client = TestClient(create_api_v1_app(management, PresentationLayer(coordinator)))
     return client, coordinator, management
 
@@ -71,6 +72,9 @@ class TestAccountPlan:
             "allowed_programs": standard["allowed_programs"],
             "max_runtime_seconds": standard["max_runtime_seconds"],
             "jobs_in_flight": 0,
+            "max_workers": 5,
+            "max_leased_workers": 1,
+            "leased_workers_held": 0,
         }
 
     def test_a_customer_cannot_pick_their_plan_at_signup(self, env):

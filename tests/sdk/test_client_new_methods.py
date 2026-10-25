@@ -69,6 +69,7 @@ class LiveServer:
         db = str(tmp_path / "cp.db")
         self.coordinator = GCONCoordinator(control_plane=ControlPlane(path=db))
         self.management = ManagementLayer(coordinator=self.coordinator, db_path=str(tmp_path / "mgmt.db"))
+        self.coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
         api_v1_app = create_api_v1_app(self.management, PresentationLayer(self.coordinator))
         app = FastAPI()
         app.mount("/api/v1", api_v1_app)

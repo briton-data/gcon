@@ -201,6 +201,9 @@ class TestCustomerView:
             "allowed_programs": plans.DEFAULT_PLAN_LIMITS["Pro"]["allowed_programs"],
             "max_runtime_seconds": plans.DEFAULT_PLAN_LIMITS["Pro"]["max_runtime_seconds"],
             "jobs_in_flight": 0,
+            "max_workers": 25,
+            "max_leased_workers": 4,
+            "leased_workers_held": 0,
         }
 
     def test_any_program_and_no_runtime_limit_show_as_null(self, env):

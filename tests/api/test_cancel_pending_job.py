@@ -26,6 +26,7 @@ def env(tmp_path):
     db = str(tmp_path / "cp.db")
     coordinator = GCONCoordinator(control_plane=ControlPlane(path=db))
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     client = TestClient(create_api_v1_app(management, PresentationLayer(coordinator)))
     yield client, coordinator, db
     coordinator.shutdown()

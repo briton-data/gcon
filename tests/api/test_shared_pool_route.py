@@ -58,3 +58,13 @@ def test_it_shows_what_the_operator_set_per_organization(env):
 def test_it_requires_authentication(env):
     client, _ = env
     assert client.get("/org/shared-pool").status_code == 401
+
+
+def test_it_says_the_pool_is_switched_off_and_where_to_go_instead(env):
+    client, coordinator = env
+    h, _ = _signup(client, "Acme", "a@acme.example")
+    off = client.get("/org/shared-pool", headers=h).json()
+    assert off["enabled"] is False and "POST /workers/leases" in off["description"]
+    coordinator.shared_pool_enabled = True                       # an operator switched it on
+    on = client.get("/org/shared-pool", headers=h).json()
+    assert on["enabled"] is True and "shared workers" in on["description"]

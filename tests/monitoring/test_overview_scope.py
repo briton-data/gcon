@@ -29,6 +29,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("GCON_OWNER_PASSWORD", "owner-pw-123")
     coordinator = GCONCoordinator(control_plane=ControlPlane(path=str(tmp_path / "cp.db")))
     server = WebServer(PresentationLayer(coordinator))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     with TestClient(server.app) as c:
         yield c, coordinator
     coordinator.shutdown()

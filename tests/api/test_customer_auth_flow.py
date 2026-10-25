@@ -34,6 +34,7 @@ def env(tmp_path, monkeypatch):
     control_plane = ControlPlane(path=str(tmp_path / "cp.db"))
     coordinator = GCONCoordinator(control_plane=control_plane)
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     presentation = PresentationLayer(coordinator)
     client = TestClient(create_api_v1_app(management, presentation))
     yield client, coordinator, management

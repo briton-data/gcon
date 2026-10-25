@@ -248,6 +248,7 @@ def api(tmp_path):
     cp = ControlPlane(path=str(tmp_path / "cp.db"))
     coordinator = GCONCoordinator(control_plane=cp)
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     keys = {}
     for name in ("acme", "globex"):
         org = management.create_organization(f"{name} Inc")

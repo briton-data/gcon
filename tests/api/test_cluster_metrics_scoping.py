@@ -21,6 +21,7 @@ def _h(secret):
 def world(tmp_path):
     coordinator = GCONCoordinator(control_plane=ControlPlane(path=str(tmp_path / "cp.db")))
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
+    coordinator.org_worker_gate_resolver = None   # this file is not about worker availability
     client = TestClient(create_api_v1_app(management, PresentationLayer(coordinator)))
     acme = management.signup_customer("Acme", "Ann", "ann@acme.example", "correct-horse-1")["api_key"]["secret"]
     beta = management.signup_customer("Beta", "Bob", "bob@beta.example", "correct-horse-2")["api_key"]["secret"]

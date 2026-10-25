@@ -50,6 +50,7 @@ def _wait_for(predicate, timeout=15.0):
 def coord(tmp_path):
     plane = ControlPlane(path=str(tmp_path / "cp.db"))
     c = GCONCoordinator(control_plane=plane)
+    c.shared_pool_enabled = True   # these tests are about the pool, which is switched off by default
     yield c
     c.shutdown()
     plane.close()
@@ -72,6 +73,23 @@ def test_an_org_job_with_no_worker_of_its_own_runs_on_the_pool(coord):
     assert coord.jobs["j1"]["node_id"] == "pool-1"
     assert coord.jobs["j1"]["execution_pool"] == "shared"
     assert [j for j in coord.get_jobs(org_id="acme") if j["job_id"] == "j1"][0]["execution_pool"] == "shared"
+
+
+def test_the_pool_is_off_unless_an_operator_turns_it_on(coord):
+    """Hosted workers are claimed through leases now; the pool fallback is switched off by default."""
+    assert GCONCoordinator(control_plane=None).shared_pool_enabled is False
+    coord.shared_pool_enabled = False
+    coord.control_plane.org_pool_settings.set_mode("acme", "full")      # even the widest mode does nothing
+    _pool_worker(coord)
+    _submit(coord, "j1")
+    assert _stays_pending(coord, "j1")
+
+
+def test_the_pool_switch_reads_the_environment(monkeypatch):
+    monkeypatch.setenv("GCON_SHARED_POOL", "on")
+    assert GCONCoordinator(control_plane=None).shared_pool_enabled is True
+    monkeypatch.setenv("GCON_SHARED_POOL", "off")
+    assert GCONCoordinator(control_plane=None).shared_pool_enabled is False
 
 
 def test_the_orgs_own_worker_is_preferred_over_the_pool(coord):
