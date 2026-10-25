@@ -61,6 +61,12 @@ class WorkerLeaseRepository:
         return [dict(r) for r in self.db.query(
             "SELECT * FROM worker_leases WHERE state = 'ended' ORDER BY ended_at DESC LIMIT ?", (int(limit),))]
 
+    def count_active_for_org(self, org_id: str) -> int:
+        """Leases that can run jobs right now (state 'active'); ones ending or being cleaned cannot."""
+        row = self.db.query_one(
+            "SELECT COUNT(*) AS n FROM worker_leases WHERE org_id = ? AND state = 'active'", (org_id,))
+        return int(row["n"]) if row else 0
+
     def count_open_for_org(self, org_id: str) -> int:
         row = self.db.query_one(
             "SELECT COUNT(*) AS n FROM worker_leases WHERE org_id = ? AND state != 'ended'", (org_id,))
