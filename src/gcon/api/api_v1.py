@@ -29,7 +29,9 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from gcon.cluster.coordinator import ConcurrentJobLimitError, NotLeaderError, PolicyRejectionError
+from gcon.cluster.coordinator import (
+    ConcurrentJobLimitError, NotLeaderError, PolicyRejectionError, WorkersRequiredError,
+)
 from gcon.cluster.worker_leases import LeaseError
 from gcon.management.rate_limit import LoginRateLimiter
 from gcon.management import plans as plans_mod
@@ -43,6 +45,18 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------
 # Response / request schemas (also drive the OpenAPI docs)
 # ---------------------------------------------------------------
+
+class WorkersRequiredOut(BaseModel):
+    """409 on submission: nothing could run this job, or a verified job lacks enough distinct workers."""
+    detail: str = Field(description="What is missing and what to do about it.")
+    code: str = Field(description="no_workers, or not_enough_workers_to_verify")
+    workers_have: int = Field(description="Workers you can use now: your own, plus hosted workers under an active lease.")
+    workers_needed: int = Field(description="1 for a job; the replica count for a verified job.")
+    max_leased_workers: int = Field(description="GCON-hosted workers your plan lets you hold (0 = none).")
+    leased_workers_held: int = Field(description="Hosted workers you hold now, including ones being released.")
+    request_workers: Optional[str] = Field(
+        default=None, description="The call that requests more, when your plan has room; otherwise null.")
+
 
 class LeaseRequestIn(BaseModel):
     count: int = Field(description="How many GCON-hosted workers to lease (all or none).", ge=1, le=50)
@@ -380,6 +394,13 @@ class PlanOut(BaseModel):
     max_runtime_seconds: Optional[int] = Field(
         description="Seconds a job may run before it is stopped; null = no limit.")
     jobs_in_flight: int = Field(description="Your jobs pending or running right now.")
+    max_workers: Optional[int] = Field(
+        description="Workers you host and enroll yourself that your plan allows at once; null = no limit.")
+    max_leased_workers: int = Field(
+        description="GCON-hosted workers your plan lets you hold at once. 0 means your plan includes none "
+                    "(it does NOT mean unlimited).")
+    leased_workers_held: int = Field(
+        description="GCON-hosted workers you hold now, including ones being released or cleaned (they still count).")
 
 
 class UsagePreviewOut(BaseModel):
@@ -954,9 +975,25 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         if org_id is None or presentation.coordinator.control_plane is None:
             raise HTTPException(status_code=400, detail="This key has no organization.")
         mode = presentation.coordinator.control_plane.org_pool_settings.get_mode(org_id)
-        return {"mode": mode, "description": _POOL_MODE_HELP[mode], "modes": _POOL_MODE_HELP}
+        enabled = bool(getattr(presentation.coordinator, "shared_pool_enabled", False))
+        description = _POOL_MODE_HELP[mode] if enabled else (
+            "GCON's shared worker pool is switched off. Request GCON-hosted workers with POST /workers/leases, "
+            "or enroll your own.")
+        return {"mode": mode, "enabled": enabled, "description": description, "modes": _POOL_MODE_HELP}
 
     # ---- GCON-hosted workers, leased to this organization ------------------------------------------------
+    @app.exception_handler(WorkersRequiredError)
+    async def _workers_required(request, exc):
+        # 409: the request is fine; the organization has not claimed (or does not have) workers to run it.
+        return JSONResponse(status_code=409, content=exc.body)
+
+    def _check_workers_for_workflow(org_id):
+        # The same resolver submit_job uses, so there is one rule (and one switch for tests that are not about it).
+        resolver = presentation.coordinator.org_worker_gate_resolver
+        refusal = resolver(org_id, 1) if (org_id and resolver is not None) else None
+        if refusal:
+            raise WorkersRequiredError(refusal)
+
     def _lease_manager():
         manager = getattr(presentation.coordinator, "worker_leases", None)
         if manager is None:
@@ -1267,7 +1304,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         response_model=JobSubmitResponse,
         tags=["Jobs"],
         summary="Submit a new job",
-        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 409: {"model": WorkersRequiredOut}},
     )
     def submit_job(
         payload: JobSubmitRequest,
@@ -1510,7 +1547,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         response_model=WorkflowSubmitResponse,
         tags=["Workflows"],
         summary="Submit a new workflow (DAG of jobs)",
-        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}},
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 409: {"model": WorkersRequiredOut}},
     )
     def submit_workflow(payload: WorkflowSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
         from gcon.workflow.workflow import Workflow, WorkflowJob
@@ -1549,6 +1586,8 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                         )
                     workflow.add_dependency(canonical[parent_label], canonical[job_in.job_id])
 
+            # After the workflow is known to be valid (a bad request is told so first); before anything is created.
+            _check_workers_for_workflow(getattr(owner, "organization_id", None) if owner else None)
             state = presentation.submit_workflow(workflow)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

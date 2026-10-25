@@ -96,6 +96,7 @@ class ManagementLayer:
             coordinator.org_job_rules_resolver = self._plan_job_rules_for_org
             coordinator.org_worker_cap_resolver = self._plan_worker_cap_for_org
             coordinator.org_leased_worker_cap_resolver = self._plan_leased_worker_cap_for_org
+            coordinator.org_worker_gate_resolver = self.worker_gate
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -1552,7 +1553,56 @@ class ManagementLayer:
             "allowed_programs": None if "*" in programs else programs,
             "max_runtime_seconds": limits["max_runtime_seconds"] or None,
             "jobs_in_flight": in_flight,
+            # Workers. `max_workers` is the customer's OWN workers (None = no limit). `max_leased_workers` is
+            # GCON-hosted workers it may hold: 0 means NONE (not "unlimited"), so it is returned as is.
+            "max_workers": limits["max_workers"] or None,
+            "max_leased_workers": limits["max_leased_workers"],
+            "leased_workers_held": self._leased_workers_held(org_id),
         }
+
+    def worker_gate(self, org_id, replicas=1):
+        """Decide, at submission, whether this organization has the workers to run a job that needs `replicas`
+        DISTINCT workers (1 for an ordinary job, N for a verified one). Returns None when it does. Otherwise a dict
+        the API sends back as a 409: what is missing, the plan's limit, what is held, and how to request more.
+
+        "Has workers" means workers it can ever use: its own (registered and not archived, online or not, so a
+        briefly offline worker queues the job instead of refusing it) plus GCON-hosted workers it holds under an
+        ACTIVE lease. Busy workers count: a busy worker means wait, not refuse. A system key (no organization) is
+        never gated."""
+        plane = getattr(self.coordinator, "control_plane", None)
+        if not org_id or plane is None:
+            return None
+        needed = max(1, replicas or 1)
+        have = plane.nodes.count_active_for_org(org_id) + plane.worker_leases.count_active_for_org(org_id)
+        if have >= needed:
+            return None
+        cap = self.get_org_limits(org_id)["max_leased_workers"]
+        held = plane.worker_leases.count_open_for_org(org_id)
+        room = max(0, cap - held)
+        if have == 0:
+            code, what = "no_workers", "This job cannot run: you have no workers."
+        else:
+            code = "not_enough_workers_to_verify"
+            what = f"Verification needs {needed} workers and you have {have}."
+        if room > 0:
+            ask = min(room, needed - have)
+            hint = (f"Your plan lets you hold up to {cap} GCON-hosted worker(s) and you hold {held}. "
+                    f"Request {ask} with POST /workers/leases, or enroll your own.")
+        elif cap > 0:
+            hint = (f"You already hold {held} of the {cap} GCON-hosted worker(s) your plan allows. Release one you "
+                    "do not need, enroll your own workers, or move to a larger plan.")
+        else:
+            hint = "Your plan does not include GCON-hosted workers. Enroll your own workers or move to a larger plan."
+        return {
+            "detail": f"{what} {hint}", "code": code,
+            "workers_have": have, "workers_needed": needed,
+            "max_leased_workers": cap, "leased_workers_held": held,
+            "request_workers": "POST /workers/leases" if room > 0 else None,
+        }
+
+    def _leased_workers_held(self, org_id):
+        plane = getattr(self.coordinator, "control_plane", None)
+        return plane.worker_leases.count_open_for_org(org_id) if plane is not None else 0
 
     # Customer-facing billing reads (GET /api/v1/billing/...). Every method
     # takes the caller's org_id and refuses to run without one: unlike

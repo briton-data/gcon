@@ -78,7 +78,7 @@ DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
     "Standard": {
         "requests_per_minute": 600, "max_concurrent_jobs": 50,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
-        "max_runtime_seconds": 3600, "max_workers": 5, "max_leased_workers": 0,
+        "max_runtime_seconds": 3600, "max_workers": 5, "max_leased_workers": 1,
     },
     "Pro": {
         "requests_per_minute": 3000, "max_concurrent_jobs": 200,
