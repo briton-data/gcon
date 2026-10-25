@@ -2415,11 +2415,11 @@ async function loadFleet() {
         body.innerHTML = fleet.workers.length ? fleet.workers.map(w => {
             const notes = w.state === "held" ? escapeHtml(w.held_reason || "")
                 : (w.why_unavailable || []).map(escapeHtml).join("<br>");
-            let action = "";
+            let action = `<button class="btn btn-sm btn-link p-0 me-2 fleet-history-btn" data-node-id="${escapeHtml(w.node_id)}" title="Every customer that has held this worker">History</button>`;
             if (w.state === "leased" || w.state === "ending") {
-                action = `<button class="btn btn-sm btn-outline-danger fleet-release-btn" data-lease-id="${escapeHtml(w.lease_id)}">Release</button>`;
+                action += `<button class="btn btn-sm btn-outline-danger fleet-release-btn" data-lease-id="${escapeHtml(w.lease_id)}">Release</button>`;
             } else if (w.state === "held") {
-                action = `<button class="btn btn-sm btn-outline-secondary fleet-clean-btn" data-node-id="${escapeHtml(w.node_id)}" ${w.connected ? "" : "disabled"} title="${w.connected ? "Ask the worker to clean itself" : "The worker must be connected to be cleaned"}">Clean</button>`;
+                action += `<button class="btn btn-sm btn-outline-secondary fleet-clean-btn" data-node-id="${escapeHtml(w.node_id)}" ${w.connected ? "" : "disabled"} title="${w.connected ? "Ask the worker to clean itself" : "The worker must be connected to be cleaned"}">Clean</button>`;
             }
             return `<tr>
                 <td>${escapeHtml(w.node_id)}</td>
@@ -2441,6 +2441,19 @@ async function loadFleet() {
             <td class="small">${escapeHtml(l.sanitize_result || "")}</td>
         </tr>`).join("") : `<tr><td colspan="6" class="text-center text-secondary">No leases yet.</td></tr>`;
 
+        body.querySelectorAll(".fleet-history-btn").forEach(btn => btn.addEventListener("click", async () => {
+            const box = document.getElementById("fleet-history");
+            try {
+                const rows = await fetchJson(`/management/fleet/${encodeURIComponent(btn.dataset.nodeId)}/leases`);
+                box.innerHTML = `<h6>${escapeHtml(btn.dataset.nodeId)}: every customer that has held it</h6>` + (rows.length
+                    ? `<table class="table gcon-table align-middle"><thead><tr><th>Organization</th><th>Started</th><th>Ended</th><th>Why</th><th>Clean-up</th></tr></thead><tbody>${rows.map(l => `<tr>
+                        <td>${escapeHtml(l.org_name || l.org_id)}</td><td>${escapeHtml(fmtWhen(l.started_at))}</td>
+                        <td>${l.ended_at ? escapeHtml(fmtWhen(l.ended_at)) : "still held"}</td>
+                        <td class="small">${escapeHtml((l.end_reason || "").replaceAll("_", " "))}</td>
+                        <td class="small">${escapeHtml(l.sanitize_result || "")}</td></tr>`).join("")}</tbody></table>`
+                    : `<div class="small text-secondary">Never leased.</div>`);
+            } catch (err) { showToast(err.message || "Failed to load the worker's history.", true); }
+        }));
         body.querySelectorAll(".fleet-release-btn").forEach(btn => btn.addEventListener("click", async () => {
             if (!confirm("Release this lease now? The worker finishes its running job, is cleaned, and returns to the pool.")) return;
             try {
@@ -2478,6 +2491,66 @@ async function createFleetToken() {
         await loadEnrollTokens();
     } catch (err) {
         showToast(err.message || "Failed to create the fleet token.", true);
+    }
+}
+
+// ---- Shared worker pool (Administration) ----
+async function loadSharedPool() {
+    const workersBody = document.getElementById("shared-pool-workers-body");
+    if (!workersBody) return;
+    try {
+        const pool = await fetchJson("/management/shared-pool");
+        const state = document.getElementById("shared-pool-state");
+        state.textContent = pool.enabled ? "ON" : "OFF";
+        state.className = "badge " + (pool.enabled ? "bg-warning text-dark" : "bg-secondary");
+        const sw = document.getElementById("shared-pool-switch-btn");
+        sw.disabled = false;
+        sw.textContent = pool.enabled ? "Turn off" : "Turn on";
+        sw.onclick = async () => {
+            const turningOn = !pool.enabled;
+            if (turningOn && !confirm("Turn the shared pool ON? Jobs of different customers can then run one after another on the same flagged worker, with nothing wiped between them.")) return;
+            try {
+                await fetchJson("/management/shared-pool", {
+                    method: "PUT", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: turningOn }),
+                });
+                showToast(`Shared pool turned ${turningOn ? "on" : "off"}.`, false);
+                await loadSharedPool();
+            } catch (err) { showToast(err.message || "Failed to change the shared pool.", true); }
+        };
+        workersBody.innerHTML = pool.workers.length ? pool.workers.map(w => `<tr>
+            <td>${escapeHtml(w.node_id)}</td>
+            <td>${statusBadge(w.status)}</td>
+            <td>${w.sandboxed ? "yes" : "no"}</td>
+            <td>${w.in_pool ? '<span class="badge bg-warning text-dark">in pool</span>' : "no"}</td>
+            <td><button class="btn btn-sm btn-outline-secondary shared-pool-flag-btn" data-node-id="${escapeHtml(w.node_id)}" data-enable="${w.in_pool ? "0" : "1"}">${w.in_pool ? "Remove" : "Add"}</button></td>
+        </tr>`).join("") : `<tr><td colspan="5" class="text-center text-secondary">No workers without an organization.</td></tr>`;
+        workersBody.querySelectorAll(".shared-pool-flag-btn").forEach(btn => btn.addEventListener("click", async () => {
+            try {
+                await fetchJson(`/management/nodes/${encodeURIComponent(btn.dataset.nodeId)}/shared-pool`, {
+                    method: "PUT", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: btn.dataset.enable === "1" }),
+                });
+                await loadSharedPool();
+            } catch (err) { showToast(err.message || "Failed to change the worker.", true); }
+        }));
+        const orgsBody = document.getElementById("shared-pool-orgs-body");
+        orgsBody.innerHTML = pool.organizations.length ? pool.organizations.map(o => `<tr>
+            <td>${escapeHtml(o.name)}</td>
+            <td><select class="form-select form-select-sm shared-pool-mode-select" data-org-id="${escapeHtml(o.org_id)}" style="max-width: 10rem;">
+                ${pool.modes.map(m => `<option value="${escapeHtml(m)}" ${m === o.mode ? "selected" : ""}>${escapeHtml(m)}</option>`).join("")}
+            </select></td></tr>`).join("") : `<tr><td colspan="2" class="text-center text-secondary">No organizations.</td></tr>`;
+        orgsBody.querySelectorAll(".shared-pool-mode-select").forEach(sel => sel.addEventListener("change", async () => {
+            try {
+                await fetchJson(`/management/organizations/${encodeURIComponent(sel.dataset.orgId)}/shared-pool`, {
+                    method: "PUT", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ mode: sel.value }),
+                });
+                showToast("Mode saved.", false);
+            } catch (err) { showToast(err.message || "Failed to save the mode.", true); await loadSharedPool(); }
+        }));
+    } catch (err) {
+        workersBody.innerHTML = `<tr><td colspan="5" class="text-center text-secondary">${escapeHtml(err.message || "Could not load the shared pool.")}</td></tr>`;
     }
 }
 
@@ -2552,7 +2625,7 @@ async function createEnrollToken() {
 }
 
 async function loadAdmin() {
-    await Promise.all([loadAdminConfig(), loadAdminNodes(), loadEnrollTokens(), loadFleet()]);
+    await Promise.all([loadAdminConfig(), loadAdminNodes(), loadEnrollTokens(), loadFleet(), loadSharedPool()]);
 }
 
 async function triggerScale(direction) {

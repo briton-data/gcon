@@ -554,6 +554,7 @@
                                 </tbody>
                             </table>
                         </div>
+                        <div id="fleet-history" class="mb-4"></div>
                         <h6>Recent leases</h6>
                         <div class="table-responsive mb-4">
                             <table class="table gcon-table align-middle">
@@ -578,6 +579,43 @@
                             <div class="col-md-2"><button class="btn btn-sm btn-primary w-100" id="fleet-token-create-btn">Create token</button></div>
                         </div>
                         <div class="alert alert-success d-none mt-3" id="fleet-token-result"></div>
+                    </div>
+                </div>
+
+                <div class="gcon-panel mt-4">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-people me-2"></i>Shared worker pool</h5>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-secondary" id="shared-pool-state">...</span>
+                            <button class="btn btn-sm btn-outline-light" id="shared-pool-switch-btn" disabled>...</button>
+                        </div>
+                    </div>
+                    <div class="gcon-panel-body">
+                        <div class="small text-secondary mb-3">
+                            The older way of sharing workers: when an organization has no free worker of its own, a job
+                            may run on a worker flagged here, according to the organization's mode. Consecutive jobs of
+                            different customers can run on the same machine, with nothing wiped between them. Leases
+                            (GCON hosted fleet, above) are the safer way and GCON-hosted workers are never part of this
+                            pool. While this switch is off, nothing is placed on a flagged worker, whatever is set below.
+                        </div>
+                        <h6>Workers that could be in the pool</h6>
+                        <div class="table-responsive mb-4">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Worker</th><th>Status</th><th>Sandbox</th><th>In pool</th><th></th></tr></thead>
+                                <tbody id="shared-pool-workers-body">
+                                    <tr><td colspan="5" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <h6>Each organization's mode</h6>
+                        <div class="table-responsive">
+                            <table class="table gcon-table align-middle">
+                                <thead><tr><th>Organization</th><th>Mode</th></tr></thead>
+                                <tbody id="shared-pool-orgs-body">
+                                    <tr><td colspan="2" class="text-center text-secondary">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
 
