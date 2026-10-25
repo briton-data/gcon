@@ -47,6 +47,16 @@ class NotLeaderError(RuntimeError):
     pass
 
 
+class WorkersRequiredError(RuntimeError):
+    """Raised by submit_job() when an organization has no worker that could ever run the job (or, for a verified
+    job, not enough distinct workers). `body` is what the public API returns with the 409: what is missing, the plan's
+    limit, what is held and how to request more. Only raised when ManagementLayer has wired the resolver."""
+
+    def __init__(self, body):
+        super().__init__(body["detail"])
+        self.body = body
+
+
 class ConcurrentJobLimitError(RuntimeError):
     """Raised by submit_job() when an organization already has as many jobs
     pending/running as it may (its plan's `max_concurrent_jobs`, or the
@@ -285,6 +295,13 @@ class GCONCoordinator:
         # Optional callable(org_id) -> the most workers the org's plan allows (0 = no limit), also set by
         # ManagementLayer. Enforced when a worker enrolls (see the Enroll handler in grpc_transport).
         self.org_worker_cap_resolver = None
+        # Optional callable(org_id, replicas) -> None, or the refusal dict, set by ManagementLayer: does this
+        # organization have the workers to run a job needing `replicas` distinct ones? Checked at submission.
+        self.org_worker_gate_resolver = None
+        # The shared pool (an organization's job falling back to an organization-less worker staff flagged) is
+        # SWITCHED OFF: hosted workers are claimed through leases instead (docs/WORKERS_AND_ENROLLMENT.md). The
+        # code stays so it can be turned back on (GCON_SHARED_POOL=on) until it is removed for good.
+        self.shared_pool_enabled = os.environ.get("GCON_SHARED_POOL", "off").strip().lower() in ("on", "1", "true", "yes")
         # Optional callable(org_id) -> how many GCON-hosted workers the org's plan lets it lease at once
         # (0 = the plan has no hosted workers), also set by ManagementLayer.
         self.org_leased_worker_cap_resolver = None
@@ -992,6 +1009,15 @@ class GCONCoordinator:
                     f"'{artifact_id}' -- register it first."
                 )
 
+        # Nothing could ever run this job: refuse it now, with what to do about it, instead of queueing it forever.
+        # After every validation above (an invalid request is told so first) and before the concurrency cap (a cap
+        # that says "wait for a job to finish" would mislead someone who has no worker). A workflow's jobs were
+        # admitted when the workflow was, so the engine's own submissions are not gated again.
+        if org_id is not None and workflow_id is None and self.org_worker_gate_resolver is not None:
+            refusal = self.org_worker_gate_resolver(org_id, (verify or {}).get("replicas", 2) if verify is not None else 1)
+            if refusal:
+                raise WorkersRequiredError(refusal)
+
         if org_id is not None:
             cap = self._concurrent_job_cap(org_id)
             if cap > 0:
@@ -1119,7 +1145,7 @@ class GCONCoordinator:
         any error reading the setting means no.
         """
         org_id = job.get("org_id")
-        if not org_id or self.control_plane is None:
+        if not self.shared_pool_enabled or not org_id or self.control_plane is None:
             return False
         try:
             mode = self.control_plane.org_pool_settings.get_mode(org_id)
