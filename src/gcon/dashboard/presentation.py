@@ -712,15 +712,68 @@ class PresentationLayer:
             for n in nodes
         ]
 
+        history = self.get_trust_history(limit=500)
+        replica = self.get_dashboard_metrics()["verification"]
         return {
             "trust": trust,
-            "history": self.get_trust_history(),
+            "history": history,
             "receipts_summary": receipts_summary,
             "verification_failures": failures,
             "node_trust": node_trust,
             "health": health,
             "verification_timeline": self.get_events(limit=30),
+            # What the page needs to EXPLAIN the score (additive; the keys above are unchanged).
+            "components": self._trust_components(trust, health, nodes),
+            "replica_verification": replica,
+            "affecting": self._trust_affecting(health, receipts_summary, replica),
+            "history_window": {
+                "samples": len(history),
+                "from": history[0]["timestamp"] if history else None,
+                "to": history[-1]["timestamp"] if history else None,
+                "persisted": False,     # kept in memory by the coordinator; empty after a restart
+            },
         }
+
+    def _trust_components(self, trust, health, nodes):
+        """The three parts of the trust score with their weights and what each is made of. A part that has nothing
+        to measure (no receipts, no workers) reports rate None, never a 100% that means nothing."""
+        service = self.coordinator.health_service
+        weights = {k: int(round(v * 100)) for k, v in service.TRUST_WEIGHTS.items()}
+        reasons = {r["check"]: r for r in health["reasons"]}
+        online = sum(1 for n in nodes if n["status"] != "offline")
+        total_receipts = trust["total_receipts"]
+        return {
+            "measured": bool(total_receipts or nodes),
+            "integrity": {
+                "weight": weights["integrity"], "verified": trust["verified_receipts"], "total": total_receipts,
+                "rate": trust["verification_rate"] if total_receipts else None,
+            },
+            "workers": {
+                "weight": weights["workers"], "online": online, "total": len(nodes),
+                "rate": trust["node_trust_rate"] if nodes else None,
+            },
+            "platform": {
+                "weight": weights["platform"], "rate": trust["operational_score"],
+                "checks": [reasons[k] for k in service.TRUST_PLATFORM_CHECKS if k in reasons],
+            },
+        }
+
+    @staticmethod
+    def _trust_affecting(health, receipts_summary, replica):
+        """What is pulling trust (or health) down right now, from the same data as everything else on the page."""
+        items = []
+        severity = "bad" if health["state"] == "critical" else "warn"
+        for r in health["reasons"]:
+            if not r["healthy"]:
+                items.append({"severity": severity, "key": r["check"], "text": f"{r['label']}: {r['detail']}"})
+        if replica["disputed"]:
+            items.append({"severity": "bad", "key": "disputed",
+                          "text": f"{replica['disputed']} job(s) where the replicas disagreed"})
+        if receipts_summary["unverified"]:
+            items.append({"severity": "warn", "key": "signatures",
+                          "text": f"{receipts_summary['unverified']} receipt signature(s) not confirmed yet "
+                                  "(some may just not have been checked yet)"})
+        return items
 
     # ------------------------------------------------------------------
     # Cluster Visualization

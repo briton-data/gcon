@@ -279,6 +279,11 @@ class HealthService:
     # Trust score
     # ------------------------------------------------------------
 
+    # How the trust score is made. One place, used by the formula below AND by the Trust Center page that explains it,
+    # so what the page says and what is computed cannot drift apart.
+    TRUST_WEIGHTS = {"integrity": 0.5, "workers": 0.3, "platform": 0.2}
+    TRUST_PLATFORM_CHECKS = ("coordinator", "scheduler", "storage")     # check_<name>() methods below
+
     def compute_trust(self, receipts=None, verified_count=None, total_count=None):
         """
         Compute an execution-trust score, distinct from operational
@@ -316,21 +321,16 @@ class HealthService:
         online = [n for n in nodes if n["status"] != "offline"]
         node_trust_rate = (len(online) / len(nodes) * 100) if nodes else 100.0
 
-        coordinator_check = self.check_coordinator()
-        scheduler_check = self.check_scheduler()
-        storage_check = self.check_storage()
-        operational_score = (
-            sum(
-                100 if c.healthy else 0
-                for c in (coordinator_check, scheduler_check, storage_check)
-            )
-            / 3
-        )
+        platform_checks = [getattr(self, f"check_{name}")() for name in self.TRUST_PLATFORM_CHECKS]
+        operational_score = sum(100 if c.healthy else 0 for c in platform_checks) / len(platform_checks)
 
         # Verification integrity carries the most weight for a trust
         # score, node reliability next, baseline operational health last.
+        weights = self.TRUST_WEIGHTS
         score = round(
-            verification_rate * 0.5 + node_trust_rate * 0.3 + operational_score * 0.2, 1
+            verification_rate * weights["integrity"]
+            + node_trust_rate * weights["workers"]
+            + operational_score * weights["platform"], 1
         )
 
         return {
