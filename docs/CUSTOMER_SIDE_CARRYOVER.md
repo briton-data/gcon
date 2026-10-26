@@ -219,6 +219,10 @@ get this `409`; the site should say their worker was released for being idle, no
 - Staff `GET /nodes` gained `connected`, `agent_version`, `outdated`, `sandboxed`, `shared_pool`, `serves`,
   `blockers`, `can_run_customer_jobs`, and the node summary gained `customer_ready`.
 - `GET /account/plan` gained `max_workers`, `max_leased_workers`, `leased_workers_held`.
+- Staff `GET /trust-center` gained `components` (the three parts of the trust score with weights, counts and, for
+  a part with nothing to measure, a null rate), `replica_verification`, `affecting` (what is pulling trust down now)
+  and `history_window`. Its existing keys are unchanged. This is a staff route; a customer-facing trust view should
+  read the same ideas from the customer API, not from here.
 - New tables: `fleet_nodes`, `worker_leases` (migration 18); `nodes.archived_at` (migration 17); `enroll_tokens.kind`.
 
 ### 11. Decisions made 2026-10-24 and their state
