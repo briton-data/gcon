@@ -210,74 +210,45 @@
             <!-- ================================================= -->
             <div class="gcon-tab d-none" id="tab-trust-center">
 
-                <div class="row g-4 mb-4">
-
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Trust Score</span>
-                                <span class="gcon-metric-icon" style="color:var(--violet); background:var(--violet-dim);">
-                                    <i class="bi bi-shield-check"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="tc-trust-score">--%</div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Verification Rate</span>
-                                <span class="gcon-metric-icon" style="color:var(--success); background:var(--success-dim);">
-                                    <i class="bi bi-patch-check"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="tc-verification-rate">--%</div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Node Trust Rate</span>
-                                <span class="gcon-metric-icon" style="color:var(--info); background:var(--info-dim);">
-                                    <i class="bi bi-hdd-network"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="tc-node-trust-rate">--%</div>
-                        </div>
-                    </div>
-
-                    <div class="col-lg-3 col-6">
-                        <div class="gcon-metric-card" style="cursor:default;">
-                            <div class="gcon-metric-top">
-                                <span class="gcon-metric-title">Verification Failures</span>
-                                <span class="gcon-metric-icon" style="color:var(--danger); background:var(--danger-dim);">
-                                    <i class="bi bi-shield-x"></i>
-                                </span>
-                            </div>
-                            <div class="gcon-metric-value" id="tc-verification-failures">--</div>
-                        </div>
-                    </div>
-
+                <div class="gcon-tc-note text-secondary mb-3">
+                    Can you believe what GCON produced? The score combines receipt integrity, the workers that are
+                    online and the health of the platform itself. Replica verification (jobs run on several workers
+                    and compared) is shown separately, because a valid signature is not the same as a verified result.
                 </div>
 
-                <div class="row mb-4 align-items-stretch">
+                <div class="row g-4 mb-4" id="tc-top">
+                    <div class="col-12 text-secondary">Loading...</div>
+                </div>
 
-                    <div class="col-lg-12">
+                <div class="gcon-panel mb-4">
+                    <div class="gcon-panel-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-patch-check me-2"></i>Replica verification</h5>
+                        <span class="small text-secondary">jobs submitted with verify</span>
+                    </div>
+                    <div class="gcon-panel-body" id="tc-replica"></div>
+                </div>
+
+                <div class="row g-4 align-items-stretch">
+                    <div class="col-lg-8">
                         <div class="gcon-panel h-100">
                             <div class="gcon-panel-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0"><i class="bi bi-graph-up me-2"></i>Trust Score History</h5>
-                                <span class="tag-live badge bg-success">Live</span>
+                                <h5 class="mb-0"><i class="bi bi-graph-up me-2"></i>Trust score over time</h5>
+                                <span class="small text-secondary" id="tc-window"></span>
                             </div>
                             <div class="gcon-panel-body">
-                                <div id="trust-history-chart" class="gcon-trust-history-chart">
+                                <div id="trust-history-chart" class="gcon-trust-line">
                                     <div class="text-secondary text-center py-4">Collecting samples…</div>
                                 </div>
+                                <div class="small text-secondary mt-2" id="tc-chart-hover">&nbsp;</div>
                             </div>
                         </div>
                     </div>
-
+                    <div class="col-lg-4">
+                        <div class="gcon-panel h-100">
+                            <div class="gcon-panel-header"><h5 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>What is affecting trust</h5></div>
+                            <div class="gcon-panel-body" id="tc-affecting"></div>
+                        </div>
+                    </div>
                 </div>
 
             </div>

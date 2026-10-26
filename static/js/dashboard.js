@@ -1829,40 +1829,149 @@ const REASON_TEXT = {
 // Trust Center
 // ---------------------------------------------------------------
 
+// ---- Trust Center ----
+// Where to go to fix each thing the page says is affecting trust (a navigation target, not data).
+const TC_TAB_FOR = { coordinator: "ha", scheduler: "scheduler", storage: "storage", node_registry: "cluster", workers: "cluster" };
+
+function tcRate(rate) { return rate === null || rate === undefined ? "--" : `${rate}%`; }
+
+function tcComponentCard(title, icon, weight, rate, line, extra) {
+    return `<div class="col-md-4"><div class="gcon-panel h-100 gcon-tc-card">
+        <span class="gcon-metric-title"><i class="bi ${icon} me-1"></i>${escapeHtml(title)}</span>
+        <span class="gcon-tc-weight">${escapeHtml(weight)}% of the score</span>
+        <div class="gcon-tc-rate ${rate === null || rate === undefined ? "gcon-tc-rate-none" : ""}">${escapeHtml(tcRate(rate))}</div>
+        <div class="small">${line}</div>
+        ${extra || ""}
+    </div></div>`;
+}
+
+function tcTrustChart(history) {
+    const W = 640, H = 190, L = 34, R = 8, T = 8, B = 22;
+    const n = history.length;
+    const x = i => n === 1 ? (L + W - R) / 2 : L + i * (W - L - R) / (n - 1);
+    const y = v => T + (100 - Math.max(0, Math.min(100, v))) * (H - T - B) / 100;
+    const pts = history.map((h, i) => `${x(i).toFixed(1)},${y(h.score).toFixed(1)}`);
+    const grid = [0, 50, 100].map(v => `<line class="gcon-tc-grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
+        <text class="gcon-tc-axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join("");
+    const t0 = new Date(history[0].timestamp).toLocaleTimeString();
+    const t1 = new Date(history[n - 1].timestamp).toLocaleTimeString();
+    // A dot wherever the score fell from the sample before it: the moments worth looking at.
+    const drops = history.map((h, i) => i > 0 && h.score < history[i - 1].score
+        ? `<circle class="gcon-tc-drop" cx="${x(i).toFixed(1)}" cy="${y(h.score).toFixed(1)}" r="3"/>` : "").join("");
+    const area = n > 1 ? `<polygon class="gcon-tc-area" points="${x(0)},${y(0)} ${pts.join(" ")} ${x(n - 1)},${y(0)}"/>` : "";
+    return `<svg viewBox="0 0 ${W} ${H}" class="gcon-tc-svg" preserveAspectRatio="none" role="img" aria-label="Trust score over time">
+        ${grid}${area}
+        ${n > 1 ? `<polyline class="gcon-tc-line" points="${pts.join(" ")}"/>` : `<circle class="gcon-tc-drop" cx="${x(0)}" cy="${y(history[0].score)}" r="3"/>`}
+        ${drops}
+        <line class="gcon-tc-guide" id="tc-guide" x1="0" x2="0" y1="${T}" y2="${H - B}" style="display:none"/>
+        <text class="gcon-tc-axis" x="${L}" y="${H - 6}" text-anchor="start">${escapeHtml(t0)}</text>
+        <text class="gcon-tc-axis" x="${W - R}" y="${H - 6}" text-anchor="end">${escapeHtml(t1)}</text>
+    </svg>`;
+}
+
 function renderTrustCenter(data) {
     if (!data) return;
     const trust = data.trust || {};
+    const comp = data.components || {};
+    const health = data.health || {};
+    const measured = !!comp.measured;
+    const integrity = comp.integrity || {}, workers = comp.workers || {}, platform = comp.platform || {};
 
-    setText("tc-trust-score", `${trust.trust_score ?? "--"}%`);
-    setText("tc-verification-rate", `${trust.verification_rate ?? "--"}%`);
-    setText("tc-node-trust-rate", `${trust.node_trust_rate ?? "--"}%`);
-    setText("tc-verification-failures", (data.verification_failures || []).length);
+    // ---- score + the three parts that make it ----
+    const tone = !measured ? "none" : health.state === "healthy" ? "ok" : health.state === "critical" ? "bad" : "warn";
+    const label = !measured ? "Nothing to measure yet" : (health.state || "").charAt(0).toUpperCase() + (health.state || "").slice(1);
+    const sentence = !measured
+        ? "There are no receipts and no workers yet, so there is nothing to score. The platform checks still apply."
+        : (health.reason || "");
+    const checks = (platform.checks || []).map(c => `<li class="${c.healthy ? "text-success" : "text-danger"}" title="${escapeHtml(c.detail)}">
+        <i class="bi ${c.healthy ? "bi-check-circle" : "bi-x-circle"} me-1"></i>${escapeHtml(c.label)}</li>`).join("");
+    const top = document.getElementById("tc-top");
+    if (top) {
+        top.innerHTML = `
+            <div class="col-lg-4"><div class="gcon-panel h-100 gcon-tc-card">
+                <span class="gcon-metric-title"><i class="bi bi-shield-check me-1"></i>Trust score</span>
+                <div class="${measured ? "gcon-tc-score" : "gcon-tc-score gcon-tc-score-none"}">${measured ? escapeHtml(`${trust.trust_score ?? "--"}%`) : "Not enough data yet"}</div>
+                <span class="gcon-tc-chip gcon-tc-chip-${tone}">${escapeHtml(label)}</span>
+                <div class="small text-secondary mt-2">${escapeHtml(sentence)}</div>
+            </div></div>
+            <div class="col-lg-8"><div class="row g-4 h-100">
+                ${tcComponentCard("Receipt integrity", "bi-patch-check", integrity.weight, integrity.rate,
+                    integrity.total ? `${escapeHtml(integrity.verified)} of ${escapeHtml(integrity.total)} signatures valid` : "No receipts yet",
+                    `<div class="small text-secondary mt-1">A valid signature shows a receipt was not altered. It does not show the work was correct: see replica verification.</div>`)}
+                ${tcComponentCard("Workers online", "bi-hdd-network", workers.weight, workers.rate,
+                    workers.total ? `${escapeHtml(workers.online)} of ${escapeHtml(workers.total)} workers online` : "No workers registered")}
+                ${tcComponentCard("Platform health", "bi-heart-pulse", platform.weight, platform.rate,
+                    "Coordinator, scheduler and storage", `<ul class="list-unstyled small mt-2 mb-0">${checks}</ul>`)}
+            </div></div>`;
+    }
 
-    // Trust score history — simple bar strip, one bar per sample.
+    // ---- replica verification (separate from signatures) ----
+    const rv = data.replica_verification || {};
+    const replica = document.getElementById("tc-replica");
+    if (replica) {
+        const asked = (rv.verified || 0) + (rv.disputed || 0) + (rv.awaiting || 0) + (rv.unavailable || 0);
+        const stat = (value, text, cls) => `<div class="col-6 col-md"><div class="gcon-tc-stat ${cls || ""}"><div class="gcon-tc-stat-n">${escapeHtml(value ?? 0)}</div><div class="small text-secondary">${escapeHtml(text)}</div></div></div>`;
+        replica.innerHTML = `<div class="row g-3">
+            ${stat(rv.verified, "verified: replicas agreed", rv.verified ? "gcon-tc-stat-ok" : "")}
+            ${stat(rv.disputed, "disputed: replicas disagreed", rv.disputed ? "gcon-tc-stat-bad" : "")}
+            ${stat(rv.awaiting, "awaiting replicas")}
+            ${stat(rv.unavailable, "no verdict")}
+            ${stat(rv.not_requested, "completed without verify")}
+        </div>
+        <div class="small text-secondary mt-3">${asked
+            ? "A dispute means copies of the same job produced different results. That is the failure to look into."
+            : "No job has asked for verification yet. Submit a job with verify to have it run on several workers and compared."}</div>`;
+    }
+
+    // ---- trust over time ----
     const chart = document.getElementById("trust-history-chart");
+    const history = data.history || [];
+    const win = data.history_window || {};
+    const winEl = document.getElementById("tc-window");
+    if (winEl) {
+        if (history.length > 1) {
+            const mins = Math.round((new Date(win.to) - new Date(win.from)) / 60000);
+            winEl.textContent = `${mins < 1 ? "under a minute" : `last ${mins} min`}, ${history.length} samples` +
+                (win.persisted === false ? ". Kept in memory: empty after a restart." : "");
+        } else {
+            winEl.textContent = "";
+        }
+    }
     if (chart) {
-        const history = data.history || [];
         if (history.length === 0) {
             chart.innerHTML = `<div class="text-secondary text-center py-4 w-100">Collecting samples…</div>`;
         } else {
-            chart.innerHTML = history.map(h => `
-                <div class="bar" style="height:${Math.max(2, h.score)}%"
-                     title="${escapeHtml(h.score)}% at ${new Date(h.timestamp).toLocaleTimeString()}"></div>
-            `).join("");
+            chart.innerHTML = tcTrustChart(history);
+            const svg = chart.querySelector("svg"), guide = chart.querySelector("#tc-guide");
+            const hover = document.getElementById("tc-chart-hover");
+            svg.addEventListener("mousemove", ev => {
+                const box = svg.getBoundingClientRect();
+                const frac = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
+                const i = Math.round(frac * (history.length - 1));
+                const gx = history.length === 1 ? 0 : 34 + i * (640 - 34 - 8) / (history.length - 1);
+                guide.setAttribute("x1", gx); guide.setAttribute("x2", gx); guide.style.display = "";
+                hover.textContent = `${history[i].score}% at ${new Date(history[i].timestamp).toLocaleTimeString()}`;
+            });
+            svg.addEventListener("mouseleave", () => { guide.style.display = "none"; hover.innerHTML = "&nbsp;"; });
         }
     }
 
-    // Signature validation summary lived here — removed as a
-    // confirmed duplicate of the Overview's Verify pillar (identical
-    // total/verified/unverified/rate fields, same receipts_summary
-    // source). Trust Score/Verification Rate/Node Trust Rate/
-    // Verification Failures/Trust History above are NOT duplicates —
-    // none of those appear in the pillars — so they stay.
-    // Verification Failures is set as the Trust Score card's fourth
-    // metric earlier in this function (tc-verification-failures) -
-    // this used to also update a badge (tc-failures-count) belonging
-    // to a per-item failures list panel that was removed last round;
-    // that badge no longer exists, so this was writing to nothing.
+    // ---- what is affecting trust ----
+    const box = document.getElementById("tc-affecting");
+    if (box) {
+        const items = data.affecting || [];
+        box.innerHTML = items.length
+            ? `<ul class="list-unstyled mb-0 gcon-tc-affecting">${items.map(it => {
+                const tab = TC_TAB_FOR[it.key];
+                return `<li class="gcon-tc-item"><span class="gcon-tc-dot gcon-tc-dot-${it.severity === "bad" ? "bad" : "warn"}"></span>
+                    <span>${escapeHtml(it.text)}${tab ? ` <a href="#" class="gcon-tc-link" data-tab-target="${escapeHtml(tab)}">Open</a>` : ""}</span></li>`;
+            }).join("")}</ul>`
+            : `<div class="text-success"><i class="bi bi-check-circle me-1"></i>Nothing. Every platform check passes and no signature or verification problem is open.</div>`;
+        box.querySelectorAll(".gcon-tc-link").forEach(a => a.addEventListener("click", e => {
+            e.preventDefault();
+            switchTab(a.dataset.tabTarget);
+        }));
+    }
 }
 
 async function loadTrustCenter() {

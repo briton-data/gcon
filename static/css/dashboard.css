@@ -1540,30 +1540,6 @@
 }
 
 /* ==========================================================
-   Trust Center — score history strip
-   ========================================================== */
-
-.gcon-trust-history-chart {
-    display: flex;
-    align-items: flex-end;
-    gap: 3px;
-    height: 160px;
-    padding: 4px 2px;
-}
-
-.gcon-trust-history-chart .bar {
-    flex: 1;
-    min-width: 3px;
-    border-radius: 2px 2px 0 0;
-    background: linear-gradient(180deg, var(--violet), var(--primary));
-    transition: opacity .15s ease;
-}
-
-.gcon-trust-history-chart .bar:hover {
-    opacity: .75;
-}
-
-/* ==========================================================
    Notification severity indicators
    ========================================================== */
 
@@ -2366,3 +2342,53 @@ a { text-decoration: none; }
 .gcon-profile-btn { display: inline-flex; align-items: center; padding: 2px 8px 2px 4px; }
 .gcon-profile-btn #navbar-user-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gcon-profile-menu { min-width: 220px; }
+
+/* ==========================================================
+   Trust Center (redesign): score, explained parts, line chart
+   Uses only the existing colour variables.
+   ========================================================== */
+
+.gcon-tc-note { max-width: 70ch; }
+.gcon-tc-card { display: flex; flex-direction: column; gap: 8px; }
+.gcon-tc-score { font-size: 3rem; font-weight: 700; line-height: 1.1; color: var(--text); }
+.gcon-tc-score-none { font-size: 1.5rem; color: var(--muted); }
+.gcon-tc-rate { font-size: 2rem; font-weight: 700; color: var(--text); }
+.gcon-tc-rate-none { color: var(--muted); }
+.gcon-tc-weight { font-size: .72rem; color: var(--muted); margin-top: -4px; }
+
+
+.gcon-tc-chip {
+    align-self: flex-start;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: .75rem;
+    font-weight: 600;
+    background: var(--surface-2);
+    color: var(--text-dim);
+}
+.gcon-tc-chip-ok   { background: var(--success-dim); color: var(--success); }
+.gcon-tc-chip-warn { background: var(--warning-dim); color: var(--warning); }
+.gcon-tc-chip-bad  { background: var(--danger-dim);  color: var(--danger); }
+
+.gcon-tc-stat { padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-2); height: 100%; }
+.gcon-tc-stat-n { font-size: 1.6rem; font-weight: 700; color: var(--text); }
+.gcon-tc-stat-ok  { border-color: var(--success); }
+.gcon-tc-stat-ok .gcon-tc-stat-n { color: var(--success); }
+.gcon-tc-stat-bad { border-color: var(--danger); }
+.gcon-tc-stat-bad .gcon-tc-stat-n { color: var(--danger); }
+
+.gcon-trust-line { width: 100%; }
+.gcon-tc-svg { width: 100%; height: 190px; display: block; }
+.gcon-tc-line  { fill: none; stroke: var(--primary); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.gcon-tc-area  { fill: var(--primary-dim); stroke: none; }
+.gcon-tc-grid  { stroke: var(--border-subtle); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gcon-tc-axis  { fill: var(--muted); font-size: 10px; }
+.gcon-tc-drop  { fill: var(--warning); }
+.gcon-tc-guide { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+
+.gcon-tc-affecting { display: flex; flex-direction: column; gap: 10px; }
+.gcon-tc-item { display: flex; gap: 10px; align-items: flex-start; font-size: .9rem; }
+.gcon-tc-dot { width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; flex: 0 0 auto; }
+.gcon-tc-dot-warn { background: var(--warning); }
+.gcon-tc-dot-bad  { background: var(--danger); }
+.gcon-tc-link { margin-left: 4px; font-size: .8rem; }
