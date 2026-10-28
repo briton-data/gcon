@@ -536,7 +536,7 @@ def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(
     api_headers = {"Authorization": f"Bearer {secret}"}
 
     r = requests.post(f"{real_cluster.base_url}/api/v1/jobs", headers=api_headers,
-                       json={"client_reference": "mp-restart-job-1", "command": "sleep 6 && echo done"}, timeout=5)
+                       json={"client_reference": "mp-restart-job-1", "command": 'python -c "import time; time.sleep(6); print(\'done\')"'}, timeout=5)
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]            # minted by GCON
 
