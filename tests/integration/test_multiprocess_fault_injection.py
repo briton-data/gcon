@@ -56,6 +56,19 @@ def _free_tcp_port() -> int:
         return s.getsockname()[1]
 
 
+def _free_port_pair() -> int:
+    """A free TCP port whose successor is free too: the coordinator's enroll port is always the gRPC port + 1."""
+    for _ in range(50):
+        port = _free_tcp_port()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port + 1))
+            return port
+        except OSError:
+            continue
+    raise RuntimeError("could not find two adjacent free TCP ports")
+
+
 def _wait_until(predicate, timeout=30.0, interval=0.1):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -355,7 +368,10 @@ class RealClusterProcesses:
         self.cert_dir = tmp_path / "certs"
         self.data_dir = tmp_path / "data"
         self.cert_dir.mkdir()
-        self.grpc_port = _free_tcp_port()
+        self.grpc_port = _free_port_pair()
+        self.enroll_port = self.grpc_port + 1
+        self.worker_cert_dir = tmp_path / "worker-certs"
+        self.customer_org_id = None
         self.dashboard_port = _free_tcp_port()
         self.base_url = f"http://127.0.0.1:{self.dashboard_port}"
         self.coordinator_proc = None
@@ -379,6 +395,10 @@ class RealClusterProcesses:
             "GCON_DASHBOARD_PORT": str(self.dashboard_port),
             "GCON_OWNER_EMAIL": OWNER_EMAIL,
             "GCON_OWNER_PASSWORD": OWNER_PASSWORD,
+            # Opens the enroll port, which is where per-organization tokens are checked. The worker in the
+            # restart test never presents this shared value (it yields organization-less workers); it
+            # enrolls with a token minted for the customer's own organization.
+            "GCON_ENROLL_TOKEN": "mp-test-shared-enroll-token",
         })
         return env
 
@@ -399,7 +419,17 @@ class RealClusterProcesses:
         )
         return self.coordinator_proc
 
-    def start_worker(self, log_name="worker.log", sandboxed=False):
+    def fetch_ca(self):
+        """The coordinator's public CA certificate and fingerprint, exactly as a customer's join command gets them."""
+        r = requests.get(f"{self.base_url}/api/v1/enroll/ca", timeout=5)
+        assert r.status_code == 200, f"the CA should be public once the coordinator is up: {r.status_code} {r.text}"
+        return r.json()
+
+    def start_worker(self, log_name="worker.log", sandboxed=False, enroll_token=None):
+        """Start the real worker process. With `enroll_token` (a token minted for one organization) it self-enrolls
+        into an empty cert dir of its own, verified against the coordinator's CA, and becomes that organization's own
+        worker. Without it, it uses the dev certificates generated into the shared cert dir (an organization-less
+        worker), which is what the two tests that submit straight to the coordinator rely on."""
         log_file = open(self.tmp_path / log_name, "w")
         env = os.environ.copy()
         if sandboxed:
@@ -418,13 +448,26 @@ class RealClusterProcesses:
             # time is not mistaken for a worker that never came up.
             image = env.get("GCON_JOB_DOCKER_IMAGE", "python:3.12-slim")
             subprocess.run(["docker", "pull", image], capture_output=True, timeout=300, check=False)
+        cert_dir = self.cert_dir
+        enroll_args = []
+        if enroll_token is not None:
+            ca = self.fetch_ca()
+            self.worker_cert_dir.mkdir(exist_ok=True)
+            cert_dir = self.worker_cert_dir
+            enroll_args = [
+                "--enroll-token", enroll_token,
+                "--enroll-address", f"localhost:{self.enroll_port}",
+                "--ca-cert-b64", ca["ca_cert_b64"],
+                "--ca-fingerprint", ca["sha256_fingerprint"],
+            ]
         self.worker_proc = subprocess.Popen(
             [
                 sys.executable, "scripts/run_worker.py",
                 "--node-id", "worker-restart-1",
                 "--coordinator", f"127.0.0.1:{self.grpc_port}",
-                "--cert-dir", str(self.cert_dir),
+                "--cert-dir", str(cert_dir),
                 "--log-level", "INFO",
+                *enroll_args,
             ],
             cwd=str(REPO_ROOT), env=env, stdout=log_file, stderr=subprocess.STDOUT,
         )
@@ -437,36 +480,43 @@ class RealClusterProcesses:
         except OSError:
             return "(no such log)"
 
-    def put_worker_in_shared_pool(self, node_id, timeout=150):
-        """
-        The public API only places a customer's job on that customer's own
-        workers or on a worker the operator has put in the shared pool. This
-        test's worker belongs to no organization, so the operator (the staff
-        Owner) flags it -- which only works once the real worker process has
-        registered, so this retries until it has. A sandboxed worker proves its
-        Docker sandbox before it registers, which can take a while on a cold
-        machine -- hence the long wait; if the worker process exits instead, or
-        never registers, the failure shows its log.
-        """
+    def mint_org_enroll_token(self, org_id):
+        """What the operator hands a customer so a worker can join that customer's organization (shown once)."""
         session = requests.Session()
         r = session.post(f"{self.base_url}/auth/login",
                           json={"email": OWNER_EMAIL, "password": OWNER_PASSWORD}, timeout=5)
         assert r.status_code == 200, f"real login should succeed: {r.status_code} {r.text}"
+        r = session.post(f"{self.base_url}/management/enroll-tokens",
+                          json={"org_id": org_id, "label": "restart test", "expires_in_hours": 1, "max_uses": 1},
+                          timeout=5)
+        assert r.status_code == 200, f"minting an organization enroll token should succeed: {r.status_code} {r.text}"
+        return r.json()["token"]
+
+    def wait_for_customer_worker(self, api_headers, node_id, timeout=150):
+        """
+        Wait until the customer's own API lists the worker as idle, i.e. it has enrolled, passed its Docker sandbox
+        check and registered under the customer's organization -- so the worker gate counts it. A sandboxed worker
+        proves its sandbox before it registers, which can take a while on a cold machine, hence the long wait; if
+        the worker process exits instead, or never shows up, the failure carries its log.
+        """
         deadline = time.monotonic() + timeout
         last = None
         while time.monotonic() < deadline:
             if self.worker_proc is not None and self.worker_proc.poll() is not None:
                 raise AssertionError(
                     f"the worker process exited (code {self.worker_proc.returncode}) before it registered -- "
-                    f"usually its Docker sandbox check failed.\n--- worker.log ---\n{self._log_tail('worker.log')}")
-            r = session.put(f"{self.base_url}/management/nodes/{node_id}/shared-pool",
-                             json={"enabled": True}, timeout=5)
+                    f"usually enrollment or its Docker sandbox check failed.\n--- worker.log ---\n{self._log_tail('worker.log')}")
+            r = requests.get(f"{self.base_url}/api/v1/nodes", headers=api_headers, timeout=5)
             if r.status_code == 200:
-                return
-            last = f"{r.status_code} {r.text}"
+                mine = [n for n in r.json() if n.get("node_id") == node_id]
+                last = mine[0] if mine else "not listed yet"
+                if mine and mine[0].get("status") == "idle":
+                    return
+            else:
+                last = f"{r.status_code} {r.text}"
             time.sleep(0.5)
         raise AssertionError(
-            f"the real worker process should have registered and joined the shared pool; last answer: {last}\n"
+            f"the worker should have enrolled into the customer's organization and gone idle; last seen: {last}\n"
             f"--- worker.log ---\n{self._log_tail('worker.log')}\n"
             f"--- coordinator-1.log ---\n{self._log_tail('coordinator-1.log')}")
 
@@ -478,6 +528,7 @@ class RealClusterProcesses:
             "email": "customer@chaos.example", "password": "correct-horse-1",
         }, timeout=10)
         assert r.status_code == 200, f"customer signup should succeed: {r.status_code} {r.text}"
+        self.customer_org_id = r.json()["organization"]["org_id"]
         return r.json()["api_key"]["secret"]
 
     def shutdown(self):
@@ -528,12 +579,15 @@ def test_sigkilling_the_real_coordinator_process_and_restarting_resumes_the_job(
     api_headers = None
 
     real_cluster.start_coordinator("coordinator-1.log")
-    real_cluster.start_worker(sandboxed=True)
-    # The real worker process registers with the real coordinator, then the
-    # operator puts it in the shared pool so a customer's job can run on it.
-    real_cluster.put_worker_in_shared_pool("worker-restart-1")
     secret = real_cluster.signup_customer_and_get_api_key()
     api_headers = {"Authorization": f"Bearer {secret}"}
+    # The customer runs its own worker, the way a real one does: the operator mints an enroll token for the
+    # customer's organization, and the real worker process enrolls with it (verified against the coordinator's CA)
+    # and registers as that organization's worker. The job gate only admits a job from an organization that has a
+    # worker of its own or a leased one, so this is what lets the submission below through.
+    token = real_cluster.mint_org_enroll_token(real_cluster.customer_org_id)
+    real_cluster.start_worker(sandboxed=True, enroll_token=token)
+    real_cluster.wait_for_customer_worker(api_headers, "worker-restart-1")
 
     r = requests.post(f"{real_cluster.base_url}/api/v1/jobs", headers=api_headers,
                        json={"client_reference": "mp-restart-job-1", "command": 'python -c "import time; time.sleep(6); print(\'done\')"'}, timeout=5)
