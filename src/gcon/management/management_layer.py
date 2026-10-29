@@ -1588,9 +1588,9 @@ class ManagementLayer:
             "allowed_programs": None if "*" in programs else programs,
             "max_runtime_seconds": limits["max_runtime_seconds"] or None,
             "jobs_in_flight": in_flight,
-            # Workers. `max_workers` is the customer's OWN workers (None = no limit). `max_leased_workers` is
+            # Workers. `max_workers` is the customer's OWN workers: 0 means NONE (that is what enrollment enforces), so it is returned as is. `max_leased_workers` is
             # GCON-hosted workers it may hold: 0 means NONE (not "unlimited"), so it is returned as is.
-            "max_workers": limits["max_workers"] or None,
+            "max_workers": limits["max_workers"],
             "max_leased_workers": limits["max_leased_workers"],
             "leased_workers_held": self._leased_workers_held(org_id),
         }

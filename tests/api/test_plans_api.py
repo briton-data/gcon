@@ -92,6 +92,14 @@ class TestAccountPlan:
         assert body["requests_per_minute"] is None            # 0 = no limit -> null
         assert body["max_concurrent_jobs"] == 9
 
+    def test_zero_own_workers_is_reported_as_none_not_unlimited(self, env):
+        # Enrollment treats max_workers 0 as "none"; the plan the customer sees must say the same.
+        client, _, management = env
+        org_id, h = signup(client)
+        management.update_organization(org_id, plan="Pro")
+        management.set_plan_limits("Pro", 600, 50, max_workers=0, actor=OWNER)
+        assert client.get("/account/plan", headers=h).json()["max_workers"] == 0
+
     def test_counts_only_the_callers_jobs_in_flight(self, env):
         client, _, _ = env
         _, acme = signup(client, "Acme", "a@acme.example")
