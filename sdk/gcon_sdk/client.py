@@ -350,6 +350,25 @@ class GconClient:
         return self._request("GET", "/account/plan")
 
     # ------------------------------------------------------------
+    # GCON-hosted workers (leases)
+    # ------------------------------------------------------------
+
+    def list_worker_leases(self) -> List[Dict[str, Any]]:
+        """GCON-hosted workers you hold or recently held (newest first)."""
+        return self._request("GET", "/workers/leases")
+
+    def request_workers(self, count: int = 1) -> List[Dict[str, Any]]:
+        """Lease `count` GCON-hosted workers. Raises GconAPIError: 403 if
+        your plan includes none or you are at its limit, 409 if not enough
+        are free right now."""
+        return self._request("POST", "/workers/leases", json={"count": count})
+
+    def release_worker(self, lease_id: str) -> Dict[str, Any]:
+        """Release a hosted worker: it finishes its current job, is cleaned
+        and goes back to GCON."""
+        return self._request("DELETE", f"/workers/leases/{lease_id}")
+
+    # ------------------------------------------------------------
     # Billing (read-only)
     # ------------------------------------------------------------
 

@@ -67,6 +67,11 @@ print(client.list_artifacts())
 # Your plan (Standard/Pro/Enterprise), its limits, and jobs in flight
 print(client.get_plan())
 
+# GCON-hosted workers: list, request (up to your plan), release
+print(client.list_worker_leases())
+leases = client.request_workers(1)
+client.release_worker(leases[0]["lease_id"])
+
 # Billing (read-only): price list, usage preview, issued invoices
 print(client.get_pricing())
 print(client.get_usage("2026-10-01", "2026-11-01"))   # or no arguments: this month
