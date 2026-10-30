@@ -204,6 +204,7 @@ class TestCustomerView:
             "max_workers": 25,
             "max_leased_workers": 4,
             "leased_workers_held": 0,
+            "verification": True,
         }
 
     def test_any_program_and_no_runtime_limit_show_as_null(self, env):

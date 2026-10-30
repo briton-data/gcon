@@ -75,6 +75,7 @@ class TestAccountPlan:
             "max_workers": 5,
             "max_leased_workers": 1,
             "leased_workers_held": 0,
+            "verification": False,
         }
 
     def test_a_customer_cannot_pick_their_plan_at_signup(self, env):

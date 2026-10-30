@@ -34,6 +34,7 @@ def api_setup(tmp_path):
 
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "mgmt.db"))
     org = management.create_organization("Acme Corp")
+    management.update_organization(org["org_id"], plan="Pro")   # verification is a Pro feature
     user = management.create_user(
         "Test User", "test@acme.example", role="Owner",
         organization_id=org["org_id"],

@@ -41,6 +41,8 @@ def client_under_strict_policy(tmp_path, monkeypatch):
     # tests/api/test_org_required.py.)
     signup = management.signup_customer("Acme", "Ann", "ann@acme.example", "correct-horse-1")
     key = signup["api_key"]
+    for o in management.get_organizations():
+        management.update_organization(o["org_id"], plan="Pro")   # verification is a Pro feature
 
     presentation = PresentationLayer(coordinator)
     app = create_api_v1_app(management, presentation)

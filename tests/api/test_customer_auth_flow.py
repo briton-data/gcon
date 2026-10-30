@@ -261,8 +261,9 @@ class TestJobFields:
         assert "boom-details" in (job["error"] or "")
 
     def test_verify_request_is_reported_back(self, env):
-        client, coordinator, _ = env
-        key, _ = self._setup(client, coordinator)
+        client, coordinator, management = env
+        key, acme = self._setup(client, coordinator)
+        management.update_organization(acme["organization"]["org_id"], plan="Pro")   # verification is a Pro feature
         r = client.post(
             "/jobs",
             json={"client_reference": "v-1", "command": "echo hi", "verify": {"replicas": 2, "tolerance": 0.05}},

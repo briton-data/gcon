@@ -122,6 +122,7 @@ class TestVerificationNeedsTwoWorkers:
     def test_one_worker_cannot_verify(self, env):
         client, coordinator, management = env
         acme, org_id = _signup(client, management)
+        management.update_organization(org_id, plan="Pro")   # verification is a Pro feature
         _own_worker(coordinator, org_id)
         r = client.post("/jobs", json=self.VERIFY, headers=acme)
         assert r.status_code == 409
@@ -132,6 +133,7 @@ class TestVerificationNeedsTwoWorkers:
     def test_two_workers_can(self, env):
         client, coordinator, management = env
         acme, org_id = _signup(client, management)
+        management.update_organization(org_id, plan="Pro")   # verification is a Pro feature
         _own_worker(coordinator, org_id, "own-1")
         _own_worker(coordinator, org_id, "own-2")
         assert client.post("/jobs", json=self.VERIFY, headers=acme).status_code == 200
@@ -139,10 +141,44 @@ class TestVerificationNeedsTwoWorkers:
     def test_the_number_asked_for_is_the_number_needed(self, env):
         client, coordinator, management = env
         acme, org_id = _signup(client, management)
+        management.update_organization(org_id, plan="Pro")   # verification is a Pro feature
         _own_worker(coordinator, org_id, "own-1")
         _own_worker(coordinator, org_id, "own-2")
         r = client.post("/jobs", json={**JOB, "verify": {"replicas": 3}}, headers=acme)
         assert r.status_code == 409 and r.json()["workers_needed"] == 3
+
+
+class TestVerificationIsAPlanFeature:
+    VERIFY = {**JOB, "verify": {"replicas": 2}}
+
+    def test_standard_cannot_verify_even_with_workers(self, env):
+        client, coordinator, management = env
+        acme, org_id = _signup(client, management)
+        _own_worker(coordinator, org_id, "own-1")
+        _own_worker(coordinator, org_id, "own-2")
+        r = client.post("/jobs", json=self.VERIFY, headers=acme)
+        assert r.status_code == 400 and "Verification is not included in your plan" in r.json()["detail"]
+
+    def test_a_plain_job_on_standard_is_unaffected(self, env):
+        client, coordinator, management = env
+        acme, org_id = _signup(client, management)
+        _own_worker(coordinator, org_id)
+        assert client.post("/jobs", json=JOB, headers=acme).status_code == 200
+
+    def test_the_plan_view_says_so(self, env):
+        client, _coordinator, management = env
+        acme, org_id = _signup(client, management)
+        assert client.get("/account/plan", headers=acme).json()["verification"] is False
+        management.update_organization(org_id, plan="Pro")
+        assert client.get("/account/plan", headers=acme).json()["verification"] is True
+
+    def test_staff_can_switch_it_on_for_a_plan(self, env):
+        client, coordinator, management = env
+        acme, org_id = _signup(client, management)
+        _own_worker(coordinator, org_id, "own-1")
+        _own_worker(coordinator, org_id, "own-2")
+        management.set_plan_limits("Standard", 600, 50, verification=True, actor=SimpleNamespace(name="Olive", role="Owner"))
+        assert client.post("/jobs", json=self.VERIFY, headers=acme).status_code == 200
 
 
 class TestValidationComesFirst:
@@ -153,7 +189,8 @@ class TestValidationComesFirst:
 
     def test_a_bad_verify_spec_is_a_400_not_a_409(self, env):
         client, _coordinator, management = env
-        acme, _ = _signup(client, management)
+        acme, org_id = _signup(client, management)
+        management.update_organization(org_id, plan="Pro")   # verification is a Pro feature
         assert client.post("/jobs", json={**JOB, "verify": {"replicas": 1}}, headers=acme).status_code == 400
 
     def test_a_bad_workflow_is_a_400_and_an_ordinary_one_without_workers_a_409(self, env):
