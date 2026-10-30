@@ -272,6 +272,7 @@ reverse Round 7 for that one place; it needs an explicit yes.
 | Submission `409` (8.1): show `detail`, **Request N workers and submit** when `request_workers` is set, otherwise links to Workers and plan; says so when the last hosted worker was released for being idle | Submit job | wired |
 | Workflow `409` | New workflow | shows `detail` plus a link to Workers (no request button) |
 | `GET /org/shared-pool` | Dashboard, job page | only used to word "nothing can run this job"; `enabled: false` counts as off. The Workers page no longer shows pool mode |
+| Verification is a plan feature (`verification` in `GET /account/plan`; Standard off, Pro and Enterprise on) | Submit job locks "Run and verify" with a note when it is off; Account plan shows the row; a verified job from a plan without it is refused with `400` | wired |
 | Verification with fewer than 2 workers | Submit job shows a note when "Run and verify" is picked and you have fewer than 2 workers; the option is not hidden because the site cannot see archived workers. The backend 409 is still the final check | wired (soft) |
 | `GET /enroll/ca`, run_worker command | removed from Workers: tokens are staff-issued, so the page now says to contact GCON | removed |
 | `GET /nodes/{id}/enrollment-history`, `/cluster`, `/metrics`, `/artifacts` | no caller on the site | not wired, no screen asked for |
