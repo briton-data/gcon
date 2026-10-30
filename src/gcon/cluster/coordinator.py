@@ -834,7 +834,7 @@ class GCONCoordinator:
     def _job_rules(self, org_id):
         """The organization's plan rules for its jobs. No resolver, no
         organization, or a failed lookup all mean no extra rules."""
-        none = {"allowed_programs": None, "max_runtime_seconds": 0}
+        none = {"allowed_programs": None, "max_runtime_seconds": 0, "verification": True}
         resolver = self.org_job_rules_resolver
         if resolver is None or org_id is None:
             return none
@@ -843,6 +843,7 @@ class GCONCoordinator:
             return {
                 "allowed_programs": rules.get("allowed_programs"),
                 "max_runtime_seconds": int(rules.get("max_runtime_seconds") or 0),
+                "verification": bool(rules.get("verification", True)),
             }
         except Exception as exc:
             self.telemetry.warning(
@@ -979,7 +980,10 @@ class GCONCoordinator:
         # (see gcon.execution.command_check). Organization-less submissions
         # (staff, internal) are not restricted.
         if org_id is not None:
-            check_program_allowed(command, self._job_rules(org_id)["allowed_programs"])
+            rules = self._job_rules(org_id)
+            check_program_allowed(command, rules["allowed_programs"])
+            if verify is not None and not rules["verification"]:
+                raise ValueError("Verification is not included in your plan. Upgrade to run a job on several workers and compare the results.")
 
         # Real, pre-dispatch assurance gate (see policy_engine.py's
         # module docstring) -- checks only what's knowable right now
