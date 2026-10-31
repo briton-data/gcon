@@ -65,7 +65,7 @@ log = logging.getLogger(__name__)
 
 PLAN_NAMES = ("Standard", "Pro", "Enterprise")
 DEFAULT_PLAN = "Standard"
-LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs", "allowed_programs", "max_runtime_seconds", "max_workers", "max_leased_workers", "verification")
+LIMIT_FIELDS = ("requests_per_minute", "max_concurrent_jobs", "allowed_programs", "max_runtime_seconds", "max_workers", "max_leased_workers", "verification", "free_allowance_cents")
 MAX_LIMIT_VALUE = 1_000_000
 MAX_RUNTIME_SECONDS = 30 * 24 * 3600
 MAX_PROGRAMS = 100
@@ -78,17 +78,17 @@ DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
     "Standard": {
         "requests_per_minute": 600, "max_concurrent_jobs": 50,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
-        "max_runtime_seconds": 3600, "max_workers": 5, "max_leased_workers": 1, "verification": False,
+        "max_runtime_seconds": 3600, "max_workers": 5, "max_leased_workers": 1, "verification": False, "free_allowance_cents": 500,
     },
     "Pro": {
         "requests_per_minute": 3000, "max_concurrent_jobs": 200,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo", "bash", "sh", "pip", "pip3"],
-        "max_runtime_seconds": 14400, "max_workers": 25, "max_leased_workers": 4, "verification": True,
+        "max_runtime_seconds": 14400, "max_workers": 25, "max_leased_workers": 4, "verification": True, "free_allowance_cents": 0,
     },
     "Enterprise": {
         "requests_per_minute": 12000, "max_concurrent_jobs": 1000,
         "allowed_programs": ["*"],
-        "max_runtime_seconds": 86400, "max_workers": 100, "max_leased_workers": 20, "verification": True,
+        "max_runtime_seconds": 86400, "max_workers": 100, "max_leased_workers": 20, "verification": True, "free_allowance_cents": 0,
     },
 }
 
@@ -150,6 +150,7 @@ def validate_limits(
     max_workers: Any = 0,
     max_leased_workers: Any = 0,
     verification: Any = False,
+    free_allowance_cents: Any = 0,
 ) -> Dict[str, Any]:
     """All four limits, cleaned. The numbers must be ints (0 = no limit; the
     request rate and job cap up to MAX_LIMIT_VALUE, the runtime up to 30 days);
@@ -170,6 +171,9 @@ def validate_limits(
     if not isinstance(verification, bool):
         raise ValueError("verification must be true or false.")
     clean["verification"] = verification
+    if isinstance(free_allowance_cents, bool) or not isinstance(free_allowance_cents, int) or not 0 <= free_allowance_cents <= MAX_LIMIT_VALUE:
+        raise ValueError(f"free_allowance_cents must be a whole number of cents from 0 to {MAX_LIMIT_VALUE} (0 means no free allowance).")
+    clean["free_allowance_cents"] = free_allowance_cents
     clean["allowed_programs"] = validate_programs(allowed_programs)
     return {field: clean[field] for field in LIMIT_FIELDS}
 
@@ -200,7 +204,7 @@ def load_plan_limits(settings: Any) -> Dict[str, Dict[str, int]]:
             table[plan] = validate_limits(
                 merged.get("requests_per_minute"), merged.get("max_concurrent_jobs"),
                 merged.get("allowed_programs"), merged.get("max_runtime_seconds"),
-                merged.get("max_workers"), merged.get("max_leased_workers"), merged.get("verification"),
+                merged.get("max_workers"), merged.get("max_leased_workers"), merged.get("verification"), merged.get("free_allowance_cents"),
             )
         except (ValueError, AttributeError, TypeError):
             log.error("Ignoring stored limits for plan %s (invalid); using its defaults.", plan)
@@ -218,6 +222,7 @@ def save_plan_limits(
     max_workers: Any = None,
     max_leased_workers: Any = None,
     verification: Any = None,
+    free_allowance_cents: Any = None,
 ) -> Dict[str, Any]:
     """Validate and store one tier's limits; the other tiers are kept as they
     are. `allowed_programs` / `max_runtime_seconds` / `max_workers` / `max_leased_workers` left as None keep that
@@ -233,6 +238,7 @@ def save_plan_limits(
         current["max_workers"] if max_workers is None else max_workers,
         current["max_leased_workers"] if max_leased_workers is None else max_leased_workers,
         current["verification"] if verification is None else verification,
+        current["free_allowance_cents"] if free_allowance_cents is None else free_allowance_cents,
     )
     table[plan] = values
     settings.set(SETTINGS_KEY, json.dumps(table), updated_by=updated_by)

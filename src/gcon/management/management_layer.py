@@ -1318,6 +1318,7 @@ class ManagementLayer:
         invoice = generate_invoice(
             self.coordinator.control_plane, org_id, period_start, period_end,
             receipt_validator=self._receipt_validator(),
+            allowance_cents=self._plan_job_rules_for_org(org_id)["free_allowance_cents"],
         )
         self.audit_logger.log("Admin", f"generated invoice for org '{org_id}'",
                                f"{period_start} to {period_end}")
@@ -1433,7 +1434,7 @@ class ManagementLayer:
 
     def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs,
                         allowed_programs=None, max_runtime_seconds=None, max_workers=None,
-                        max_leased_workers=None, verification=None, *, actor):
+                        max_leased_workers=None, verification=None, free_allowance_cents=None, *, actor):
         """Owner/Administrator only. Applies on the next request. Leaving
         `allowed_programs` / `max_runtime_seconds` as None keeps the tier's
         current value."""
@@ -1447,7 +1448,8 @@ class ManagementLayer:
         values = plans_mod.save_plan_limits(
             settings, plan, requests_per_minute, max_concurrent_jobs,
             allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers,
-            max_leased_workers=max_leased_workers, verification=verification)
+            max_leased_workers=max_leased_workers, verification=verification,
+            free_allowance_cents=free_allowance_cents)
         detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
@@ -1465,6 +1467,8 @@ class ManagementLayer:
             detail += f"; max hosted workers {previous['max_leased_workers']} -> {values['max_leased_workers']}"
         if values["verification"] != previous["verification"]:
             detail += f"; verification {previous['verification']} -> {values['verification']}"
+        if values["free_allowance_cents"] != previous["free_allowance_cents"]:
+            detail += f"; free allowance {previous['free_allowance_cents']} -> {values['free_allowance_cents']} cents"
         self.audit_logger.log(actor.name, detail, plan)
         return self.get_plans_overview()
 
@@ -1493,6 +1497,7 @@ class ManagementLayer:
             "max_workers": table[tier]["max_workers"],
             "max_leased_workers": table[tier]["max_leased_workers"],
             "verification": table[tier]["verification"],
+            "free_allowance_cents": table[tier]["free_allowance_cents"],
         }
 
     def get_plans_overview(self):
@@ -1571,6 +1576,7 @@ class ManagementLayer:
             "allowed_programs": list(limits["allowed_programs"]),
             "max_runtime_seconds": limits["max_runtime_seconds"],
             "verification": limits["verification"],
+            "free_allowance_cents": limits["free_allowance_cents"],
         }
 
     def get_customer_plan(self, org_id):
@@ -1598,6 +1604,7 @@ class ManagementLayer:
             "max_leased_workers": limits["max_leased_workers"],
             "leased_workers_held": self._leased_workers_held(org_id),
             "verification": limits["verification"],
+            "free_allowance_cents": limits["free_allowance_cents"],
         }
 
     def worker_gate(self, org_id, replicas=1):
@@ -1678,6 +1685,7 @@ class ManagementLayer:
             self.coordinator.control_plane, org_id,
             period_start=period_start, period_end=period_end,
             receipt_validator=self._receipt_validator(),
+            allowance_cents=self._plan_job_rules_for_org(org_id)["free_allowance_cents"],
         )
 
     # ------------------------------------------------------------------
