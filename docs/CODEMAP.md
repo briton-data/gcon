@@ -277,11 +277,11 @@ Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 
 
 ## Plan limits (starting values)
 
-| Plan | requests_per_minute | max_concurrent_jobs | allowed_programs | max_runtime_seconds | max_workers | max_leased_workers | verification |
-|---|---|---|---|---|---|---|---|
-| Standard (default) | 600 | 50 | ['python', 'python3', 'nvidia-smi', 'echo'] | 3600 | 5 | 1 | False |
-| Pro | 3000 | 200 | ['python', 'python3', 'nvidia-smi', 'echo', 'bash', 'sh', 'pip', 'pip3'] | 14400 | 25 | 4 | True |
-| Enterprise | 12000 | 1000 | ['*'] | 86400 | 100 | 20 | True |
+| Plan | requests_per_minute | max_concurrent_jobs | allowed_programs | max_runtime_seconds | max_workers | max_leased_workers | verification | free_allowance_cents |
+|---|---|---|---|---|---|---|---|---|
+| Standard (default) | 600 | 50 | ['python', 'python3', 'nvidia-smi', 'echo'] | 3600 | 5 | 1 | False | 500 |
+| Pro | 3000 | 200 | ['python', 'python3', 'nvidia-smi', 'echo', 'bash', 'sh', 'pip', 'pip3'] | 14400 | 25 | 4 | True | 0 |
+| Enterprise | 12000 | 1000 | ['*'] | 86400 | 100 | 20 | True | 0 |
 
 ## Events
 
@@ -417,7 +417,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 
 - `tests/` (2): `test_codemap_current.py`, `test_gcon.py`
 - `tests/api/` (30): `test_abuse_controls.py`, `test_account_routes.py`, `test_api_cors_retry_after.py`, `test_api_rate_limit.py`, `test_artifact_scoping.py`, `test_billing_routes.py`, `test_cancel_pending_job.py`, `test_clear_jobs.py`, `test_cluster_metrics_scoping.py`, `test_command_meaning.py`, `test_command_rules_api.py`, `test_customer_auth_flow.py`, `test_enroll_ca_route.py`, `test_job_and_receipt_filters.py`, `test_job_attempts_route.py`, `test_job_cancel_retry_org_isolation.py`, `test_job_submission_idempotency.py`, `test_node_enrollment_history.py`, `test_openapi_contract.py`, `test_org_required.py`, `test_password_reset_email.py`, `test_plans_api.py`, `test_policy_rejection_http.py`, `test_receipts_org_isolation.py`, `test_server_minted_job_ids.py`, `test_shared_pool_route.py`, `test_staff_plan_routes.py`, `test_verify_and_callback.py`, `test_worker_gate.py`, `test_worker_lease_routes.py`
-- `tests/billing/` (3): `test_billing_hardening.py`, `test_invoicing.py`, `test_invoicing_preview.py`
+- `tests/billing/` (4): `test_billing_hardening.py`, `test_free_allowance.py`, `test_invoicing.py`, `test_invoicing_preview.py`
 - `tests/cluster/` (22): `test_assurance_integration.py`, `test_coordinator_full.py`, `test_job_rules.py`, `test_job_runner_guard.py`, `test_job_verification.py`, `test_live_gpu_pipeline.py`, `test_max_job_attempts.py`, `test_org_isolation.py`, `test_quarantine.py`, `test_replicated_stale_attempt.py`, `test_restart_recovery.py`, `test_sandbox_boundary.py`, `test_sandbox_policy.py`, `test_scheduler_log_flood.py`, `test_scheduler_no_eligible_node.py`, `test_shared_pool.py`, `test_submission_policy_gate.py`, `test_telemetry_lifecycle.py`, `test_untrusted_input_cannot_break_dispatch.py`, `test_worker_leases.py`, `test_worker_lost_mid_job.py`, `test_workflow_orchestration.py`
 - `tests/dashboard/` (1): `test_verify_pillar_metrics.py`
 - `tests/execution/` (13): `test_assurance.py`, `test_attestation_pinning.py`, `test_command_check.py`, `test_docker_executor.py`, `test_docker_hardening.py`, `test_docker_run_isolation.py`, `test_gpu_sampling.py`, `test_job_run_as_user.py`, `test_output_cap.py`, `test_replication_compare.py`, `test_sanitize_host.py`, `test_worker_identity.py`, `test_worker_script_secrets.py`
