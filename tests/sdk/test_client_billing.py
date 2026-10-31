@@ -38,7 +38,8 @@ def test_get_usage_with_and_without_a_period(live_server):
 
     usage = client.get_usage("2026-01-01", "2026-02-01")
     assert usage["usage"]["job_count"] == 1
-    assert usage["amount_cents"] > 0
+    # Inside a Standard plan's free monthly allowance: the usage is counted, the credit shows, nothing is owed.
+    assert usage["line_items"][-1]["description"] == "Free monthly allowance" and usage["amount_cents"] == 0
 
     current = client.get_usage()
     assert current["period_start"].endswith("-01T00:00:00+00:00")

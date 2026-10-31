@@ -136,6 +136,39 @@ class TestOrganizationRoutes:
         assert r.json()["limits"] == plans.DEFAULT_PLAN_LIMITS["Standard"]
 
 
+class TestStaffCanChangeVerificationAndTheAllowance:
+    def test_put_saves_both_and_get_shows_them(self, stack):
+        server, _ = stack
+        client = login(server)
+        before = {p["plan"]: p for p in client.get("/management/plans").json()["plans"]}
+        assert before["Standard"]["verification"] is False and before["Standard"]["free_allowance_cents"] == 500
+        r = client.put("/management/plans/Standard", json={
+            "requests_per_minute": 600, "max_concurrent_jobs": 50, "verification": True, "free_allowance_cents": 1250})
+        assert r.status_code == 200, r.text
+        after = {p["plan"]: p for p in client.get("/management/plans").json()["plans"]}
+        assert after["Standard"]["verification"] is True and after["Standard"]["free_allowance_cents"] == 1250
+        assert after["Pro"]["verification"] is True and after["Pro"]["free_allowance_cents"] == 0     # untouched
+
+    def test_leaving_them_out_keeps_what_was_there(self, stack):
+        server, _ = stack
+        client = login(server)
+        client.put("/management/plans/Standard", json={"requests_per_minute": 100, "max_concurrent_jobs": 5})
+        std = {p["plan"]: p for p in client.get("/management/plans").json()["plans"]}["Standard"]
+        assert std["verification"] is False and std["free_allowance_cents"] == 500
+
+    def test_a_bad_allowance_is_a_400(self, stack):
+        server, _ = stack
+        client = login(server)
+        for bad in (-1, 2.5, "5", True):
+            r = client.put("/management/plans/Standard", json={"requests_per_minute": 1, "max_concurrent_jobs": 1, "free_allowance_cents": bad})
+            assert r.status_code == 400, bad
+
+    def test_the_page_has_the_two_columns(self, stack):
+        server, _ = stack
+        html = login(server).get("/").text
+        assert "<th>Verification</th>" in html and "<th>Free monthly allowance ($)</th>" in html
+
+
 class TestDashboardPage:
     def test_the_page_has_the_plans_card_and_only_the_three_plans(self, stack):
         server, _ = stack
