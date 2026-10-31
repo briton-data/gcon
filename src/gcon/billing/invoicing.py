@@ -356,6 +356,17 @@ def with_rounding_adjustment(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
                      "unit_price_cents": 0, "amount_cents": diff, "exact_cents": float(diff)}]
 
 
+def with_free_allowance(items: List[Dict[str, Any]], allowance_cents: int) -> List[Dict[str, Any]]:
+    """A plan's free monthly allowance: a credit line that takes up to `allowance_cents` off what the usage costs,
+    never below zero. It is its own visible line, so the lines still add up to the total."""
+    total = sum(item["amount_cents"] for item in items)
+    credit = min(int(allowance_cents or 0), total)
+    if credit <= 0:
+        return items
+    return items + [{"description": "Free monthly allowance", "quantity": 1, "unit": "credit",
+                     "unit_price_cents": 0, "amount_cents": -credit, "exact_cents": float(-credit)}]
+
+
 # ---------------------------------------------------------------
 # Billing periods
 # ---------------------------------------------------------------
@@ -386,6 +397,7 @@ def normalize_period(
 def _period_content(
     control_plane: ControlPlane, org_id: str, start_iso: str, end_iso: str, pricing: PricingConfig,
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    allowance_cents: int = 0,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Usage and line items for one org and period. The ONE place that computes them, used by both the
     preview and the invoice, so the two can never disagree."""
@@ -396,7 +408,7 @@ def _period_content(
                             _node_orgs(control_plane) if jobs else {})
     excluded = {**measured.pop("excluded"), **rejected}
     usage = {**measured, **compute_receipt_usage_totals(valid_receipts), "excluded": excluded}
-    return usage, with_rounding_adjustment(build_line_items(usage, pricing))
+    return usage, with_free_allowance(with_rounding_adjustment(build_line_items(usage, pricing)), allowance_cents)
 
 
 def generate_invoice(
@@ -409,6 +421,7 @@ def generate_invoice(
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
     now: Optional[datetime] = None,
     skip_empty: bool = False,
+    allowance_cents: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """
     Idempotent: re-calling this for a period that already has an invoice returns the existing invoice
@@ -422,7 +435,7 @@ def generate_invoice(
     """
     start_iso, end_iso = normalize_period(period_start, period_end, now=now)
     pricing = pricing or load_pricing(control_plane)
-    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, allowance_cents)
     if skip_empty and not line_items:
         return None
     if any(usage["excluded"].values()):
@@ -535,6 +548,7 @@ def preview_usage(
     pricing: Optional[PricingConfig] = None,
     now: Optional[datetime] = None,
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    allowance_cents: int = 0,
 ) -> Dict[str, Any]:
     """
     What an invoice for this org and period would contain right now, computed
@@ -565,7 +579,7 @@ def preview_usage(
 
     pricing = pricing or load_pricing(control_plane)
     start_iso, end_iso = start.isoformat(), end.isoformat()
-    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, allowance_cents)
     return {
         "period_start": start_iso,
         "period_end": end_iso,

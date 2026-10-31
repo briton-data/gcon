@@ -73,6 +73,12 @@ class BillingAutomation:
         self._running = False
         self._next_due: Optional[float] = None
 
+    def _allowance_for(self, org_id: str) -> int:
+        """The org's plan's free monthly allowance in cents (0 when no plan rules are attached). A failure here
+        fails this org's invoice, which is retried next run, rather than billing without the allowance."""
+        resolver = getattr(self.c, "org_job_rules_resolver", None)
+        return int((resolver(org_id) or {}).get("free_allowance_cents", 0) or 0) if resolver else 0
+
     # ------------------------------------------------------------ settings
     @property
     def enabled(self) -> bool:
@@ -180,7 +186,7 @@ class BillingAutomation:
                             summary["already_invoiced"] += 1
                         else:
                             invoice = generate_invoice(plane, org_id, s_iso, e_iso, receipt_validator=validator,
-                                                       now=now, skip_empty=True)
+                                                       now=now, skip_empty=True, allowance_cents=self._allowance_for(org_id))
                             if invoice is None:
                                 continue
                             summary["generated"] += 1
