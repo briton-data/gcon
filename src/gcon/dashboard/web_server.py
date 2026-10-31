@@ -713,6 +713,8 @@ class WebServer:
                     payload.get("max_runtime_seconds"),
                     payload.get("max_workers"),
                     payload.get("max_leased_workers"),
+                    payload.get("verification"),
+                    payload.get("free_allowance_cents"),
                     actor=user,
                 )
             except PermissionError as e:

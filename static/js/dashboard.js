@@ -3391,6 +3391,8 @@ async function loadPlansPanel() {
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-runtime" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_runtime_seconds)}" style="max-width: 9rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-workers" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_workers)}" style="max-width: 7rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-leased" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_leased_workers)}" style="max-width: 7rem;" title="GCON-hosted workers the plan may lease at once (0 = none)"></td>
+                <td><div class="form-check form-switch"><input type="checkbox" class="form-check-input plan-verify" data-plan="${escapeHtml(p.plan)}" ${p.verification ? "checked" : ""} title="Whether the plan may run a job on several workers and compare the results"></div></td>
+                <td><input type="number" min="0" step="0.01" class="form-control form-control-sm plan-allowance" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((Number(p.free_allowance_cents || 0) / 100).toFixed(2))}" style="max-width: 7rem;" title="Usage included free each month, in dollars. It comes off the invoice. 0 = none"></td>
                 <td><input type="text" class="form-control form-control-sm plan-programs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((p.allowed_programs || []).join(", "))}" style="min-width: 14rem;"></td>
                 <td>${escapeHtml(p.organizations)}</td>
                 <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
@@ -3405,6 +3407,8 @@ async function loadPlansPanel() {
                 const runtime = body.querySelector(`.plan-runtime[data-plan="${plan}"]`).value.trim();
                 const workers = body.querySelector(`.plan-workers[data-plan="${plan}"]`).value.trim();
                 const leased = body.querySelector(`.plan-leased[data-plan="${plan}"]`).value.trim();
+                const verification = body.querySelector(`.plan-verify[data-plan="${plan}"]`).checked;
+                const allowance = body.querySelector(`.plan-allowance[data-plan="${plan}"]`).value.trim();
                 const programs = body.querySelector(`.plan-programs[data-plan="${plan}"]`).value
                     .split(",").map(x => x.trim()).filter(x => x.length > 0);
                 if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime) || !/^\d+$/.test(workers) || !/^\d+$/.test(leased)) {
@@ -3413,6 +3417,10 @@ async function loadPlansPanel() {
                 }
                 if (programs.length === 0) {
                     showToast("List at least one allowed program, or * for any.", true);
+                    return;
+                }
+                if (!/^\d+(\.\d{1,2})?$/.test(allowance)) {
+                    showToast("The free monthly allowance is dollars and cents, like 5 or 5.50 (0 = none).", true);
                     return;
                 }
                 try {
@@ -3425,6 +3433,8 @@ async function loadPlansPanel() {
                             max_runtime_seconds: parseInt(runtime, 10),
                             max_workers: parseInt(workers, 10),
                             max_leased_workers: parseInt(leased, 10),
+                            verification: verification,
+                            free_allowance_cents: Math.round(parseFloat(allowance) * 100),
                             allowed_programs: programs,
                         }),
                     });
