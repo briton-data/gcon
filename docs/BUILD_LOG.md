@@ -21,7 +21,7 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 | VIP / load balancer in front of coordinators | deployment work, outside the code; see "Running two coordinators" |
 | Password-reset email | no SMTP provider yet (`GCON_SMTP_*` unset), so reset links are not delivered |
 | Persisting the coordinator CA | needs a volume; workers re-enroll after every redeploy |
-| Real payment provider | Stripe is a stub; the mock provider marks invoices paid without moving money |
+| Real payment provider | Stripe is a stub. Until it is built, invoicing is by hand: the default provider issues an invoice (status open) and staff record the payment with Mark paid. The mock provider (`GCON_PAYMENT_PROVIDER=mock`) marks invoices paid without moving money and is for development only |
 | Customer-created worker enroll tokens | tokens are issued by GCON staff; the Workers page says so |
 | Customer roles | customer accounts have no roles, so customer self-serve pool-mode changes stay off |
 | Assurance counters across restarts | the Assure counters reset when the coordinator restarts |

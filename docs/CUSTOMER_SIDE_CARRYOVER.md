@@ -277,3 +277,5 @@ reverse Round 7 for that one place; it needs an explicit yes.
 | `GET /enroll/ca`, run_worker command | removed from Workers: tokens are staff-issued, so the page now says to contact GCON | removed |
 | `GET /nodes/{id}/enrollment-history`, `/cluster`, `/metrics`, `/artifacts` | no caller on the site | not wired, no screen asked for |
 | Hosted-worker calls in the Python SDK | `list_worker_leases()`, `request_workers(count)`, `release_worker(lease_id)` | added |
+| Plan fee and included usage (`monthly_fee_cents`, `included_usage_cents` in `GET /account/plan`; staff edit both per plan on the Plans screen) | Account plan rows; the usage preview and each invoice show a "<Plan> plan, monthly fee" line and an "Included usage" credit that only offsets usage. No fee for the month a customer joins, and none for a period that is not one whole calendar month | wired |
+| Invoices are issued by hand (`GCON_PAYMENT_PROVIDER` unset or `manual`): Finalize makes an invoice `open`; staff Mark paid records the reference and makes it `paid` | Customer Billing shows Open, then Paid | wired |
