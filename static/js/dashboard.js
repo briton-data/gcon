@@ -3392,7 +3392,8 @@ async function loadPlansPanel() {
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-workers" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_workers)}" style="max-width: 7rem;"></td>
                 <td><input type="number" min="0" step="1" class="form-control form-control-sm plan-leased" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml(p.max_leased_workers)}" style="max-width: 7rem;" title="GCON-hosted workers the plan may lease at once (0 = none)"></td>
                 <td><div class="form-check form-switch"><input type="checkbox" class="form-check-input plan-verify" data-plan="${escapeHtml(p.plan)}" ${p.verification ? "checked" : ""} title="Whether the plan may run a job on several workers and compare the results"></div></td>
-                <td><input type="number" min="0" step="0.01" class="form-control form-control-sm plan-allowance" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((Number(p.free_allowance_cents || 0) / 100).toFixed(2))}" style="max-width: 7rem;" title="Usage included free each month, in dollars. It comes off the invoice. 0 = none"></td>
+                <td><input type="number" min="0" step="0.01" class="form-control form-control-sm plan-allowance" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((Number(p.included_usage_cents || 0) / 100).toFixed(2))}" style="max-width: 7rem;" title="Usage this plan includes each month, in dollars. It comes off the usage on the invoice. 0 = none"></td>
+                <td><input type="number" min="0" step="0.01" class="form-control form-control-sm plan-fee" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((Number(p.monthly_fee_cents || 0) / 100).toFixed(2))}" style="max-width: 7rem;" title="What the plan costs each month, in dollars, on the monthly invoice (not for the month a customer joins). 0 = no fee"></td>
                 <td><input type="text" class="form-control form-control-sm plan-programs" data-plan="${escapeHtml(p.plan)}" value="${escapeHtml((p.allowed_programs || []).join(", "))}" style="min-width: 14rem;"></td>
                 <td>${escapeHtml(p.organizations)}</td>
                 <td><button class="btn btn-sm btn-outline-light plan-save-btn" data-plan="${escapeHtml(p.plan)}">Save</button></td>
@@ -3409,6 +3410,7 @@ async function loadPlansPanel() {
                 const leased = body.querySelector(`.plan-leased[data-plan="${plan}"]`).value.trim();
                 const verification = body.querySelector(`.plan-verify[data-plan="${plan}"]`).checked;
                 const allowance = body.querySelector(`.plan-allowance[data-plan="${plan}"]`).value.trim();
+                const fee = body.querySelector(`.plan-fee[data-plan="${plan}"]`).value.trim();
                 const programs = body.querySelector(`.plan-programs[data-plan="${plan}"]`).value
                     .split(",").map(x => x.trim()).filter(x => x.length > 0);
                 if (!/^\d+$/.test(rpm) || !/^\d+$/.test(jobs) || !/^\d+$/.test(runtime) || !/^\d+$/.test(workers) || !/^\d+$/.test(leased)) {
@@ -3419,8 +3421,8 @@ async function loadPlansPanel() {
                     showToast("List at least one allowed program, or * for any.", true);
                     return;
                 }
-                if (!/^\d+(\.\d{1,2})?$/.test(allowance)) {
-                    showToast("The free monthly allowance is dollars and cents, like 5 or 5.50 (0 = none).", true);
+                if (!/^\d+(\.\d{1,2})?$/.test(allowance) || !/^\d+(\.\d{1,2})?$/.test(fee)) {
+                    showToast("The included usage and the monthly fee are dollars and cents, like 5 or 49.50 (0 = none).", true);
                     return;
                 }
                 try {
@@ -3434,7 +3436,8 @@ async function loadPlansPanel() {
                             max_workers: parseInt(workers, 10),
                             max_leased_workers: parseInt(leased, 10),
                             verification: verification,
-                            free_allowance_cents: Math.round(parseFloat(allowance) * 100),
+                            included_usage_cents: Math.round(parseFloat(allowance) * 100),
+                            monthly_fee_cents: Math.round(parseFloat(fee) * 100),
                             allowed_programs: programs,
                         }),
                     });
@@ -4292,7 +4295,7 @@ function renderBillingStatus() {
         ? badge(true, "On", "", "warning", "")
         : `<span class="badge bg-secondary">Off</span> <span class="text-secondary small">drafts wait for review</span>`;
     document.getElementById("billing-provider").innerHTML = st.payment_provider
-        ? `<span class="badge bg-${st.moves_real_money ? "success" : "warning"}">${escapeHtml(st.payment_provider)}</span>` : "--";
+        ? `<span class="badge bg-${st.moves_real_money ? "success" : st.payment_provider === "manual" ? "info" : "warning"}">${escapeHtml(st.payment_provider)}</span>` : "--";
     setText("billing-next-run", st.enabled && st.next_run_at ? billingFmtDate(st.next_run_at) : (st.enabled ? "soon" : "--"));
 
     const last = st.last_run;
@@ -4301,7 +4304,7 @@ function renderBillingStatus() {
         lastEl.textContent = "never";
     } else {
         const parts = [`${last.generated} created`, `${last.already_invoiced} already invoiced`];
-        if (last.finalized) parts.push(`${last.finalized} charged`);
+        if (last.finalized) parts.push(`${last.finalized} ${st.payment_provider === "manual" ? "issued" : "charged"}`);
         if (last.overlap_skipped) parts.push(`${last.overlap_skipped} skipped (overlap)`);
         if (last.failed) parts.push(`${last.failed} failed`);
         lastEl.innerHTML = `${escapeHtml(billingFmtDate(last.finished_at || last.started_at))} <span class="text-secondary small">(${escapeHtml(last.trigger)}; ${escapeHtml((last.months || []).join(", "))}) — ${escapeHtml(parts.join(", "))}</span>`;
@@ -4312,7 +4315,9 @@ function renderBillingStatus() {
         warn.textContent = `The "${st.payment_provider}" payment provider is selected but not configured, so charging an invoice will fail until it is.`;
         warn.classList.remove("d-none");
     } else if (!st.moves_real_money) {
-        warn.textContent = "The mock payment provider is in use: an invoice marked paid here has not moved any money. Configure a real provider before relying on paid status.";
+        warn.textContent = st.payment_provider === "manual"
+            ? "Invoicing by hand: finalizing issues an invoice and nothing is charged. Send it to the customer, then use Mark paid when the payment arrives."
+            : "The mock payment provider is in use: an invoice marked paid here has not moved any money. Configure a real provider before relying on paid status.";
         warn.classList.remove("d-none");
     } else {
         warn.classList.add("d-none");
@@ -4391,6 +4396,7 @@ function renderBillingInvoices() {
                 <td class="text-nowrap">
                     <button class="btn btn-sm btn-outline-secondary invoice-view-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Details</button>
                     ${inv.status === "draft" ? `<button class="btn btn-sm btn-outline-primary invoice-finalize-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Finalize</button>` : ""}
+                    ${inv.status === "open" || inv.status === "failed" ? `<button class="btn btn-sm btn-outline-success invoice-paid-btn" data-invoice-id="${escapeHtml(inv.invoice_id)}">Mark paid</button>` : ""}
                 </td>
             </tr>${detail}`;
     }).join("");
@@ -4513,12 +4519,29 @@ async function setupBillingTab() {
             document.querySelector(`.billing-detail-row[data-detail-for="${CSS.escape(view.dataset.invoiceId)}"]`)?.classList.toggle("d-none");
             return;
         }
+        const paid = event.target.closest(".invoice-paid-btn");
+        if (paid) {
+            const reference = prompt("Payment reference (for example a bank transfer or cheque number):");
+            if (reference === null) return;
+            paid.disabled = true;
+            try {
+                await fetchJson(`/management/billing/invoices/${paid.dataset.invoiceId}/mark-paid`, {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reference }),
+                });
+                showToast("Invoice marked paid.");
+                await loadBillingTab();
+            } catch (err) {
+                showToast(err.message || "Could not mark the invoice paid.", true);
+                paid.disabled = false;
+            }
+            return;
+        }
         const fin = event.target.closest(".invoice-finalize-btn");
         if (!fin) return;
         fin.disabled = true;
         try {
             const out = await fetchJson(`/management/billing/invoices/${fin.dataset.invoiceId}/finalize`, { method: "POST" });
-            showToast(out.status === "paid" ? "Invoice finalized." : `Invoice ${out.status}${out.provider_error ? `: ${out.provider_error}` : "."}`, out.status !== "paid");
+            showToast(out.status === "paid" ? "Invoice finalized." : out.status === "open" ? "Invoice issued. It stays open until you record the payment." : `Invoice ${out.status}${out.provider_error ? `: ${out.provider_error}` : "."}`, out.status !== "paid" && out.status !== "open");
             await loadBillingTab();
         } catch (err) {
             console.error("Failed to finalize invoice:", err);

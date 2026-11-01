@@ -714,7 +714,8 @@ class WebServer:
                     payload.get("max_workers"),
                     payload.get("max_leased_workers"),
                     payload.get("verification"),
-                    payload.get("free_allowance_cents"),
+                    payload.get("included_usage_cents"),
+                    payload.get("monthly_fee_cents"),
                     actor=user,
                 )
             except PermissionError as e:
@@ -1113,6 +1114,14 @@ class WebServer:
                                    user=Depends(self.require_permission("Manage cluster"))):
             try:
                 return self.management.finalize_invoice_now(invoice_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.post("/management/billing/invoices/{invoice_id}/mark-paid")
+        def mgmt_mark_invoice_paid(invoice_id: str, payload: dict = None,
+                                    user=Depends(self.require_permission("Manage cluster"))):
+            try:
+                return self.management.record_invoice_payment(invoice_id, (payload or {}).get("reference"))
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
