@@ -94,6 +94,7 @@ class ManagementLayer:
         if coordinator is not None:
             coordinator.org_job_cap_resolver = self._plan_job_cap_for_org
             coordinator.org_job_rules_resolver = self._plan_job_rules_for_org
+            coordinator.billing_terms = self       # invoice_terms / subscription_org_ids, for the monthly invoicing run
             coordinator.org_worker_cap_resolver = self._plan_worker_cap_for_org
             coordinator.org_leased_worker_cap_resolver = self._plan_leased_worker_cap_for_org
             coordinator.org_worker_gate_resolver = self.worker_gate
@@ -1318,7 +1319,7 @@ class ManagementLayer:
         invoice = generate_invoice(
             self.coordinator.control_plane, org_id, period_start, period_end,
             receipt_validator=self._receipt_validator(),
-            allowance_cents=self._plan_job_rules_for_org(org_id)["free_allowance_cents"],
+            terms=lambda start, end: self.invoice_terms(org_id, start, end),
         )
         self.audit_logger.log("Admin", f"generated invoice for org '{org_id}'",
                                f"{period_start} to {period_end}")
@@ -1417,6 +1418,39 @@ class ManagementLayer:
         self.audit_logger.log("Admin", f"finalized invoice '{invoice_id}'", invoice.get("status", ""))
         return invoice
 
+    def record_invoice_payment(self, invoice_id, reference):
+        """Staff record that an issued invoice was paid outside GCON (bank transfer, cheque...). Needs the payment reference."""
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise ValueError("No control plane available.")
+        from gcon.billing.invoicing import record_manual_payment
+        invoice = record_manual_payment(self.coordinator.control_plane, invoice_id, reference)
+        self.audit_logger.log("Admin", f"recorded payment for invoice '{invoice_id}'", invoice.get("provider_charge_id", ""))
+        return invoice
+
+    # What an organization's plan adds to an invoice for a period. The monthly invoicing run and every staff or customer
+    # preview ask here, so the same rules apply everywhere.
+    def invoice_terms(self, org_id, period_start, period_end):
+        """{"included_usage_cents", "fee_cents", "fee_label"} for this org and period. The monthly fee is charged only for a
+        whole calendar month in which the org was already a customer on its first day: the month it joins in has no fee."""
+        from gcon.billing.invoicing import is_calendar_month, _parse_instant
+        try:
+            org = self.org_registry.get_organization(org_id)
+        except ValueError:      # not (or no longer) in the registry, for example a deleted account's last invoice: its usage is
+            org = None          # billed on the default plan's included usage, and no fee
+        tier = plans_mod.plan_for_limits(org.plan if org else None)
+        plan = self.get_plan_limits()[tier]
+        fee = 0
+        if org is not None and plan["monthly_fee_cents"] > 0 and is_calendar_month(period_start, period_end):
+            joined = org.created_at if org.created_at.tzinfo else org.created_at.replace(tzinfo=UTC)
+            if joined <= _parse_instant(period_start, "period_start"):
+                fee = plan["monthly_fee_cents"]
+        return {"included_usage_cents": plan["included_usage_cents"], "fee_cents": fee, "fee_label": f"{tier} plan, monthly fee"}
+
+    def subscription_org_ids(self, period_start, period_end):
+        """Organizations that owe a plan fee for this period, whether or not they ran any jobs."""
+        return [org.org_id for org in self.org_registry.list_organizations()
+                if self.invoice_terms(org.org_id, period_start, period_end)["fee_cents"] > 0]
+
     # ------------------------------------------------------------
     # Plans (Standard / Pro / Enterprise): see gcon.management.plans
     # ------------------------------------------------------------
@@ -1434,7 +1468,8 @@ class ManagementLayer:
 
     def set_plan_limits(self, plan, requests_per_minute, max_concurrent_jobs,
                         allowed_programs=None, max_runtime_seconds=None, max_workers=None,
-                        max_leased_workers=None, verification=None, free_allowance_cents=None, *, actor):
+                        max_leased_workers=None, verification=None, included_usage_cents=None,
+                         monthly_fee_cents=None, *, actor):
         """Owner/Administrator only. Applies on the next request. Leaving
         `allowed_programs` / `max_runtime_seconds` as None keeps the tier's
         current value."""
@@ -1449,7 +1484,7 @@ class ManagementLayer:
             settings, plan, requests_per_minute, max_concurrent_jobs,
             allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers,
             max_leased_workers=max_leased_workers, verification=verification,
-            free_allowance_cents=free_allowance_cents)
+            included_usage_cents=included_usage_cents, monthly_fee_cents=monthly_fee_cents)
         detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
@@ -1467,8 +1502,10 @@ class ManagementLayer:
             detail += f"; max hosted workers {previous['max_leased_workers']} -> {values['max_leased_workers']}"
         if values["verification"] != previous["verification"]:
             detail += f"; verification {previous['verification']} -> {values['verification']}"
-        if values["free_allowance_cents"] != previous["free_allowance_cents"]:
-            detail += f"; free allowance {previous['free_allowance_cents']} -> {values['free_allowance_cents']} cents"
+        if values["included_usage_cents"] != previous["included_usage_cents"]:
+            detail += f"; included usage {previous['included_usage_cents']} -> {values['included_usage_cents']} cents"
+        if values["monthly_fee_cents"] != previous["monthly_fee_cents"]:
+            detail += f"; monthly fee {previous['monthly_fee_cents']} -> {values['monthly_fee_cents']} cents"
         self.audit_logger.log(actor.name, detail, plan)
         return self.get_plans_overview()
 
@@ -1497,7 +1534,8 @@ class ManagementLayer:
             "max_workers": table[tier]["max_workers"],
             "max_leased_workers": table[tier]["max_leased_workers"],
             "verification": table[tier]["verification"],
-            "free_allowance_cents": table[tier]["free_allowance_cents"],
+            "included_usage_cents": table[tier]["included_usage_cents"],
+            "monthly_fee_cents": table[tier]["monthly_fee_cents"],
         }
 
     def get_plans_overview(self):
@@ -1576,7 +1614,7 @@ class ManagementLayer:
             "allowed_programs": list(limits["allowed_programs"]),
             "max_runtime_seconds": limits["max_runtime_seconds"],
             "verification": limits["verification"],
-            "free_allowance_cents": limits["free_allowance_cents"],
+            "included_usage_cents": limits["included_usage_cents"],
         }
 
     def get_customer_plan(self, org_id):
@@ -1604,7 +1642,8 @@ class ManagementLayer:
             "max_leased_workers": limits["max_leased_workers"],
             "leased_workers_held": self._leased_workers_held(org_id),
             "verification": limits["verification"],
-            "free_allowance_cents": limits["free_allowance_cents"],
+            "included_usage_cents": limits["included_usage_cents"],
+            "monthly_fee_cents": limits["monthly_fee_cents"],
         }
 
     def worker_gate(self, org_id, replicas=1):
@@ -1685,7 +1724,7 @@ class ManagementLayer:
             self.coordinator.control_plane, org_id,
             period_start=period_start, period_end=period_end,
             receipt_validator=self._receipt_validator(),
-            allowance_cents=self._plan_job_rules_for_org(org_id)["free_allowance_cents"],
+            terms=lambda start, end: self.invoice_terms(org_id, start, end),
         )
 
     # ------------------------------------------------------------------

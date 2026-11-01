@@ -404,8 +404,10 @@ class PlanOut(BaseModel):
         description="GCON-hosted workers you hold now, including ones being released or cleaned (they still count).")
     verification: bool = Field(
         description="Whether your plan lets you run a job on several workers and compare the results.")
-    free_allowance_cents: int = Field(
-        description="Usage your plan includes free each month, in cents. It shows as a credit line on your invoice and usage preview. 0 means none.")
+    included_usage_cents: int = Field(
+        description="Usage your plan includes each month, in cents. It shows as a credit line on your invoice and usage preview. 0 means none.")
+    monthly_fee_cents: int = Field(
+        description="What your plan costs each month, in cents, charged on the monthly invoice (not for the month you join). 0 means no fee.")
 
 
 class UsagePreviewOut(BaseModel):
