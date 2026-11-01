@@ -205,7 +205,8 @@ class TestCustomerView:
             "max_leased_workers": 4,
             "leased_workers_held": 0,
             "verification": True,
-            "free_allowance_cents": 0,
+            "included_usage_cents": 0,
+            "monthly_fee_cents": 0,
         }
 
     def test_any_program_and_no_runtime_limit_show_as_null(self, env):

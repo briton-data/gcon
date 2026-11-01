@@ -76,7 +76,8 @@ class TestAccountPlan:
             "max_leased_workers": 1,
             "leased_workers_held": 0,
             "verification": False,
-            "free_allowance_cents": 500,
+            "included_usage_cents": 500,
+            "monthly_fee_cents": 0,
         }
 
     def test_a_customer_cannot_pick_their_plan_at_signup(self, env):

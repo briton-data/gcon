@@ -101,8 +101,8 @@ class TestUsage:
         assert body["usage"]["job_count"] == 1
         assert body["usage"]["compute_seconds"] == 1000.0
         assert body["amount_cents"] == sum(i["amount_cents"] for i in body["line_items"])
-        # 1000 s of compute is well inside a Standard plan's free monthly allowance, which shows as its own credit line.
-        assert body["line_items"][-1]["description"] == "Free monthly allowance" and body["amount_cents"] == 0
+        # 1000 s of compute is well inside a Standard plan's included usage, which shows as its own credit line.
+        assert body["line_items"][-1]["description"] == "Included usage" and body["amount_cents"] == 0
         assert body["period_start"] == "2026-01-01T00:00:00+00:00"
 
     def test_default_period_needs_no_parameters(self, env):

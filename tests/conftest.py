@@ -21,6 +21,13 @@ def _trusted_sandbox_policy_for_tests(monkeypatch):
     monkeypatch.setenv("GCON_SANDBOX_POLICY", "trusted")
 
 
+@pytest.fixture(autouse=True)
+def _mock_payment_provider_for_tests(monkeypatch):
+    """Production defaults to invoicing by hand (invoices are issued, not charged). The payment tests exercise the mock
+    provider, so the suite selects it; tests of the default itself remove the variable (see tests/billing/test_invoice_by_hand.py)."""
+    monkeypatch.setenv("GCON_PAYMENT_PROVIDER", "mock")
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
