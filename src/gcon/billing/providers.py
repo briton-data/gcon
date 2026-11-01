@@ -6,6 +6,8 @@ so this module ships:
 
   * `PaymentProvider` -- the abstract interface `finalize_invoice`
     (billing/api_v1 route) calls.
+  * `ManualInvoiceProvider` -- invoicing by hand, and the default. Nothing is charged: finalizing an invoice
+    issues it (status `open`) and staff record the payment when it arrives (invoicing.record_manual_payment).
   * `MockPaymentProvider` -- a real, working implementation with no
     external dependency: it "charges" by deterministically succeeding
     or failing (configurable) and recording the attempt, useful for
@@ -53,6 +55,17 @@ class PaymentProvider(Protocol):
         reserved for the provider itself being unusable (e.g. not
         configured)."""
         ...
+
+
+class ManualInvoiceProvider:
+    """Invoicing by hand. `finalize_invoice` sees `issues_only` and issues the invoice instead of charging anything,
+    so an invoice is never shown as paid until staff record a real payment."""
+
+    name = "manual"
+    issues_only = True
+
+    def charge(self, invoice: Dict[str, Any], org_billing_ref: Optional[str]) -> ChargeResult:
+        raise PaymentProviderNotConfigured("Invoices are issued by hand; record the payment instead of charging.")
 
 
 class MockPaymentProvider:
@@ -136,12 +149,13 @@ class StripePaymentProvider:
 
 
 def get_configured_provider() -> PaymentProvider:
-    """`GCON_PAYMENT_PROVIDER` selects the provider; defaults to the
-    mock so `finalize_invoice` always has something usable without
-    any setup. Set to "stripe" only once real credentials and the
-    customer-id mapping (see StripePaymentProvider's docstring)
-    actually exist."""
-    choice = os.environ.get("GCON_PAYMENT_PROVIDER", "mock").strip().lower()
+    """`GCON_PAYMENT_PROVIDER` selects the provider. The default (and anything unrecognised) is invoicing by hand:
+    an invoice is issued and stays open until staff record a payment, so nothing is ever marked paid by accident.
+    "mock" pretends every charge succeeds (development and tests only). "stripe" only once real credentials and the
+    customer-id mapping (see StripePaymentProvider's docstring) actually exist."""
+    choice = os.environ.get("GCON_PAYMENT_PROVIDER", "manual").strip().lower()
     if choice == "stripe":
         return StripePaymentProvider()
-    return MockPaymentProvider()
+    if choice == "mock":
+        return MockPaymentProvider()
+    return ManualInvoiceProvider()

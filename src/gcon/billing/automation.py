@@ -73,11 +73,11 @@ class BillingAutomation:
         self._running = False
         self._next_due: Optional[float] = None
 
-    def _allowance_for(self, org_id: str) -> int:
-        """The org's plan's free monthly allowance in cents (0 when no plan rules are attached). A failure here
-        fails this org's invoice, which is retried next run, rather than billing without the allowance."""
-        resolver = getattr(self.c, "org_job_rules_resolver", None)
-        return int((resolver(org_id) or {}).get("free_allowance_cents", 0) or 0) if resolver else 0
+    def _terms(self):
+        """What the organizations' plans add to an invoice (the management layer: included usage and the monthly fee),
+        or None when no plan rules are attached. A failure while resolving them fails that organization's invoice, which
+        is retried on the next run, rather than billing without them."""
+        return getattr(self.c, "billing_terms", None)
 
     # ------------------------------------------------------------ settings
     @property
@@ -149,7 +149,7 @@ class BillingAutomation:
     # ------------------------------------------------------------ the run
     def run_once(self, now: Optional[datetime] = None, months: Optional[int] = None,
                  trigger: str = "manual", finalize: Optional[bool] = None) -> Dict[str, Any]:
-        """Invoice every complete month in the catch-up window for every organization with usage in it.
+        """Invoice every complete month in the catch-up window for every organization with usage in it or a monthly plan fee.
         Returns (and remembers) a summary. Raises ValueError if a run is already in progress."""
         plane = self._plane()
         if plane is None:
@@ -178,15 +178,19 @@ class BillingAutomation:
                 orgs = plane.db.query(
                     "SELECT DISTINCT org_id FROM jobs WHERE org_id IS NOT NULL AND status = 'completed' "
                     "AND completed_at >= ? AND completed_at < ?", (s_iso, e_iso))
-                for row in orgs:
-                    org_id = row["org_id"]
+                terms_source = self._terms()
+                org_ids = [row["org_id"] for row in orgs]
+                if terms_source is not None:        # a customer on a plan with a monthly fee is invoiced even with no jobs
+                    org_ids += [o for o in terms_source.subscription_org_ids(s_iso, e_iso) if o not in org_ids]
+                for org_id in org_ids:
                     try:
                         invoice = plane.invoices.get_for_period(org_id, s_iso, e_iso)
                         if invoice is not None:
                             summary["already_invoiced"] += 1
                         else:
                             invoice = generate_invoice(plane, org_id, s_iso, e_iso, receipt_validator=validator,
-                                                       now=now, skip_empty=True, allowance_cents=self._allowance_for(org_id))
+                                                       now=now, skip_empty=True,
+                                                       terms=(lambda a, b, o=org_id: terms_source.invoice_terms(o, a, b)) if terms_source else None)
                             if invoice is None:
                                 continue
                             summary["generated"] += 1
@@ -213,9 +217,9 @@ class BillingAutomation:
         try:
             from gcon.billing.providers import get_configured_provider
             provider_name = getattr(get_configured_provider(), "name", None)
-            real_money = provider_name not in (None, "mock")
+            real_money = provider_name not in (None, "mock", "manual")
         except Exception as e:                      # e.g. a provider selected but not configured
-            provider_name = os.environ.get("GCON_PAYMENT_PROVIDER", "mock")
+            provider_name = os.environ.get("GCON_PAYMENT_PROVIDER", "manual")
             provider_ready = False
         next_run = None
         if self.enabled and self._next_due is not None:

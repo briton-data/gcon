@@ -356,15 +356,31 @@ def with_rounding_adjustment(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
                      "unit_price_cents": 0, "amount_cents": diff, "exact_cents": float(diff)}]
 
 
-def with_free_allowance(items: List[Dict[str, Any]], allowance_cents: int) -> List[Dict[str, Any]]:
-    """A plan's free monthly allowance: a credit line that takes up to `allowance_cents` off what the usage costs,
+def with_included_usage(items: List[Dict[str, Any]], included_cents: int) -> List[Dict[str, Any]]:
+    """A plan's included usage: a credit line that takes up to `included_cents` off what the usage costs,
     never below zero. It is its own visible line, so the lines still add up to the total."""
     total = sum(item["amount_cents"] for item in items)
-    credit = min(int(allowance_cents or 0), total)
+    credit = min(int(included_cents or 0), total)
     if credit <= 0:
         return items
-    return items + [{"description": "Free monthly allowance", "quantity": 1, "unit": "credit",
+    return items + [{"description": "Included usage", "quantity": 1, "unit": "credit",
                      "unit_price_cents": 0, "amount_cents": -credit, "exact_cents": float(-credit)}]
+
+
+def with_plan_fee(items: List[Dict[str, Any]], fee_cents: int, label: str) -> List[Dict[str, Any]]:
+    """The plan's monthly fee as the first line. Added AFTER the included-usage credit, so that credit only ever
+    offsets usage and never the fee."""
+    if fee_cents <= 0:
+        return items
+    return [{"description": label, "quantity": 1, "unit": "month", "unit_price_cents": fee_cents,
+             "amount_cents": fee_cents, "exact_cents": float(fee_cents)}] + items
+
+
+def is_calendar_month(start_iso: str, end_iso: str) -> bool:
+    """True when the period is exactly one whole UTC calendar month (the only period a monthly fee is charged for)."""
+    start, end = _parse_instant(start_iso, "period_start"), _parse_instant(end_iso, "period_end")
+    first_of_next = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
+    return start == start.replace(day=1, hour=0, minute=0, second=0, microsecond=0) and end == first_of_next
 
 
 # ---------------------------------------------------------------
@@ -397,10 +413,11 @@ def normalize_period(
 def _period_content(
     control_plane: ControlPlane, org_id: str, start_iso: str, end_iso: str, pricing: PricingConfig,
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
-    allowance_cents: int = 0,
+    terms: Optional[Callable[[str, str], Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Usage and line items for one org and period. The ONE place that computes them, used by both the
-    preview and the invoice, so the two can never disagree."""
+    preview and the invoice, so the two can never disagree. `terms(start_iso, end_iso)` is what the org's plan
+    adds for this period: {"included_usage_cents", "fee_cents", "fee_label"} (none given = a plain usage bill)."""
     jobs = _jobs_for_period(control_plane, org_id, start_iso, end_iso)
     receipts = _receipts_for_period(control_plane, org_id, start_iso, end_iso)
     valid_receipts, rejected = validate_receipts(receipts, receipt_validator)
@@ -408,7 +425,9 @@ def _period_content(
                             _node_orgs(control_plane) if jobs else {})
     excluded = {**measured.pop("excluded"), **rejected}
     usage = {**measured, **compute_receipt_usage_totals(valid_receipts), "excluded": excluded}
-    return usage, with_free_allowance(with_rounding_adjustment(build_line_items(usage, pricing)), allowance_cents)
+    plan = terms(start_iso, end_iso) if terms else {}
+    items = with_included_usage(with_rounding_adjustment(build_line_items(usage, pricing)), plan.get("included_usage_cents", 0))
+    return usage, with_plan_fee(items, plan.get("fee_cents", 0), plan.get("fee_label", "Plan fee"))
 
 
 def generate_invoice(
@@ -421,7 +440,7 @@ def generate_invoice(
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
     now: Optional[datetime] = None,
     skip_empty: bool = False,
-    allowance_cents: int = 0,
+    terms: Optional[Callable[[str, str], Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Idempotent: re-calling this for a period that already has an invoice returns the existing invoice
@@ -435,7 +454,7 @@ def generate_invoice(
     """
     start_iso, end_iso = normalize_period(period_start, period_end, now=now)
     pricing = pricing or load_pricing(control_plane)
-    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, allowance_cents)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, terms)
     if skip_empty and not line_items:
         return None
     if any(usage["excluded"].values()):
@@ -491,6 +510,9 @@ def finalize_invoice(
         return control_plane.invoices.mark_status(invoice_id, "paid", provider="none")
 
     provider = provider or get_configured_provider()
+    if getattr(provider, "issues_only", False):
+        # Invoicing by hand: nothing is charged. The invoice is issued and stays open until staff record the payment.
+        return control_plane.invoices.mark_status(invoice_id, "open", provider=provider.name)
     result = provider.charge(invoice, org_billing_ref)
     if result.success:
         return control_plane.invoices.mark_status(
@@ -500,6 +522,20 @@ def finalize_invoice(
     return control_plane.invoices.mark_status(
         invoice_id, "failed", provider=result.provider, provider_error=result.error,
     )
+
+
+def record_manual_payment(control_plane: ControlPlane, invoice_id: str, reference: str) -> Dict[str, Any]:
+    """Staff record that an issued (`open`) invoice was paid outside GCON (bank transfer, cheque...). The reference is
+    kept with the invoice. A draft cannot be marked paid (issue it first) and a paid one is already settled."""
+    invoice = control_plane.invoices.get(invoice_id)
+    if invoice is None:
+        raise ValueError(f"No invoice '{invoice_id}'")
+    if invoice["status"] not in ("open", "failed"):
+        raise ValueError(f"Only an issued (open) invoice can be marked paid; this one is {invoice['status']}.")
+    reference = (reference or "").strip()
+    if not reference:
+        raise ValueError("Enter the payment reference, for example a bank transfer or cheque number.")
+    return control_plane.invoices.mark_status(invoice_id, "paid", provider="manual", provider_charge_id=reference[:200])
 
 
 # ---------------------------------------------------------------
@@ -548,7 +584,7 @@ def preview_usage(
     pricing: Optional[PricingConfig] = None,
     now: Optional[datetime] = None,
     receipt_validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
-    allowance_cents: int = 0,
+    terms: Optional[Callable[[str, str], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     What an invoice for this org and period would contain right now, computed
@@ -579,7 +615,7 @@ def preview_usage(
 
     pricing = pricing or load_pricing(control_plane)
     start_iso, end_iso = start.isoformat(), end.isoformat()
-    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, allowance_cents)
+    usage, line_items = _period_content(control_plane, org_id, start_iso, end_iso, pricing, receipt_validator, terms)
     return {
         "period_start": start_iso,
         "period_end": end_iso,
