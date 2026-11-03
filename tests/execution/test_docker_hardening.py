@@ -313,3 +313,22 @@ class TestWindowsHostPaths:
     def test_paths_outside_the_directory_are_rejected(self, directory, report):
         with pytest.raises(ValueError, match="not under host_temp_dir"):
             build_docker_run_command("j", "x", "img", directory, usage_report_path=report)
+
+
+class TestDefaultMemoryCap:
+    """With no operator setting, a job container still gets a memory cap (a share of the machine, never a fixed figure)."""
+
+    def test_unset_means_ninety_percent_of_this_machines_ram(self, tmp_path):
+        from gcon.execution.docker_executor import default_memory_limit
+        meminfo = tmp_path / "meminfo"
+        meminfo.write_text("MemTotal:       16384000 kB\nMemFree:  100 kB\n")
+        assert default_memory_limit(str(meminfo)) == "14400m"
+
+    def test_unreadable_ram_size_means_no_default_rather_than_a_guess(self, tmp_path):
+        from gcon.execution.docker_executor import default_memory_limit
+        assert default_memory_limit(str(tmp_path / "missing")) is None
+
+    def test_what_the_operator_sets_wins_and_none_turns_it_off(self):
+        from gcon.execution.docker_executor import resolve_memory_limit
+        assert resolve_memory_limit("2g") == "2g"
+        assert resolve_memory_limit("none") is None and resolve_memory_limit("0") is None
