@@ -54,6 +54,30 @@ logger = logging.getLogger(__name__)
 
 CONTAINER_MOUNT = "/gcon_io"
 
+
+def default_memory_limit(meminfo_path: str = "/proc/meminfo", fraction: float = 0.9) -> Optional[str]:
+    """The memory cap a job container gets when the operator sets none: 90% of this machine's RAM. A runaway job then hits
+    Docker's own limit and is killed, instead of taking the worker, the Docker daemon or the whole host down with it. It is a
+    share of the machine, not a fixed figure, so it never starves a legitimate large job (a model loading into RAM) on a big
+    machine. None where the RAM size cannot be read (not Linux)."""
+    try:
+        with open(meminfo_path) as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return f"{int(int(line.split()[1]) * fraction / 1024)}m"      # MemTotal is in kB
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def resolve_memory_limit(configured: Optional[str]) -> Optional[str]:
+    """GCON_JOB_DOCKER_MEMORY_LIMIT as set by the operator (for example "2g"); unset means the default above, and "none" or
+    "0" means no cap at all."""
+    value = (configured or "").strip()
+    if not value:
+        return default_memory_limit()
+    return None if value.lower() in ("none", "0", "unlimited") else value
+
 # Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*.
 # job_id has no such constraint anywhere else in GCON (it's just a
 # caller-supplied string key), so this sanitizes rather than assumes.

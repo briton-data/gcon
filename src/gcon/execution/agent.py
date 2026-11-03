@@ -122,7 +122,8 @@ class GCONAgent:
             )
             self.execution_backend = "subprocess"
         self.docker_image = os.environ.get("GCON_JOB_DOCKER_IMAGE", "python:3.12-slim")
-        self.docker_memory_limit = os.environ.get("GCON_JOB_DOCKER_MEMORY_LIMIT")  # e.g. "2g"
+        # e.g. "2g". Unset: 90% of this machine's RAM, so a runaway job cannot take the worker down ("none" turns the cap off).
+        self.docker_memory_limit = docker_executor.resolve_memory_limit(os.environ.get("GCON_JOB_DOCKER_MEMORY_LIMIT"))
         self.docker_cpu_limit = os.environ.get("GCON_JOB_DOCKER_CPU_LIMIT")  # e.g. "1.5"
         # No network by default ("none"). Docker's own default bridge gives a
         # job outbound internet and, on a cloud host, the instance-metadata
