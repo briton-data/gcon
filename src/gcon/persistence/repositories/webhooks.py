@@ -130,9 +130,14 @@ class WebhookRepository:
         )
         return self._delivery_to_dict(row)
 
-    def due_deliveries(self, now_iso: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def due_deliveries(self, now_iso: str, limit: int = 50, on_unreadable=None) -> List[Dict[str, Any]]:
         """Pending or previously-failed deliveries whose next retry
-        time has arrived, oldest first."""
+        time has arrived, oldest first.
+
+        A delivery whose signing secret can no longer be decrypted (the secrets key was lost or
+        changed) can never be sent. It is marked failed on its own, with the reason, and left out; it
+        must not make this whole call raise, which would stop every other delivery too. If given,
+        `on_unreadable(delivery_without_secret)` is called for each so the caller can announce it."""
         rows = self.db.query(
             """
             SELECT * FROM webhook_deliveries
@@ -141,7 +146,24 @@ class WebhookRepository:
             """,
             (now_iso, limit),
         )
-        return [self._delivery_to_dict(r) for r in rows]
+        due: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                due.append(self._delivery_to_dict(row))
+            except secret_box.SecretDecryptionError:
+                reason = "signing secret could not be decrypted (the secrets key was lost or changed)"
+                logger.error("webhook delivery %s failed for good: %s", row["delivery_id"], reason)
+                self.db.execute(
+                    "UPDATE webhook_deliveries SET status = 'failed', last_error = ?, next_attempt_at = NULL, "
+                    "last_attempt_at = ? WHERE delivery_id = ?",
+                    (reason, datetime.now(UTC).isoformat(), row["delivery_id"]),
+                )
+                if on_unreadable is not None:
+                    unreadable = dict(row)
+                    unreadable.pop("secret", None)
+                    unreadable["last_error"] = reason
+                    on_unreadable(unreadable)
+        return due
 
     def record_attempt(
         self,

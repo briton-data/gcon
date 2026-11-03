@@ -155,10 +155,26 @@ class WebhookDispatcher:
 
     def drain_due(self) -> int:
         now_iso = datetime.now(UTC).isoformat()
-        due = self.control_plane.webhooks.due_deliveries(now_iso, limit=50)
+        due = self.control_plane.webhooks.due_deliveries(now_iso, limit=50, on_unreadable=self._announce_unreadable)
         for delivery in due:
             self._attempt(delivery)
         return len(due)
+
+    def _announce_unreadable(self, delivery: Dict[str, Any]) -> None:
+        """A delivery that could not be decrypted was failed by the repository; tell the same place as any other give-up."""
+        if self.event_bus is None:
+            return
+        from gcon.events.event import Event
+        from gcon.events.event_types import EventType
+        self.event_bus.publish(Event(
+            event_type=EventType.WEBHOOK_DELIVERY_FAILED,
+            source="WebhookDispatcher",
+            payload={
+                "delivery_id": delivery["delivery_id"], "url": delivery["url"],
+                "attempt_count": delivery.get("attempt_count", 0), "error": delivery["last_error"],
+                "job_id": delivery.get("job_id"),
+            },
+        ))
 
     def _attempt(self, delivery: Dict[str, Any]) -> None:
         body = json.dumps(delivery["payload"]).encode()

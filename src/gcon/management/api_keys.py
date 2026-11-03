@@ -33,10 +33,12 @@ in the pure in-memory version of this file:
 import hashlib
 import logging
 import secrets
+import threading
 from datetime import datetime, UTC, timedelta
 from uuid import uuid4
 
 from ..storage.database import Database, dumps, loads
+from .write_throttle import WriteThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,9 @@ class APIKeyManager:
     def __init__(self, db: Database = None):
         self.db = db or Database(":memory:")
         self.keys = {}
+        # Usage counters are exact in memory but reach disk at most once per interval per key.
+        self._usage_throttle = WriteThrottle()
+        self._usage_lock = threading.Lock()
         # secret_hash -> APIKey, so authentication is one dict lookup
         # instead of scanning every key. Keyed by the hash, not the
         # secret: the raw secret is never held here.
@@ -257,14 +262,23 @@ class APIKeyManager:
 
     def mark_used(self, key):
         """
-        Record key usage. Pulled out of APIKey.mark_used() and into
-        the manager so the increment + persist happen atomically
-        under the write lock — the previous unguarded
-        `self.usage_count += 1` lost increments under concurrent
-        authentication against the same key.
+        Record key usage. The increment is atomic under a lock (the old unguarded
+        `self.usage_count += 1` lost increments under concurrent authentication), and the
+        counters are exact in memory. Writing them to disk is throttled (see write_throttle.py):
+        the first use is written at once, then at most once per interval.
         """
-        with self.db.transaction():
+        with self._usage_lock:
             key.last_used_at = datetime.now(UTC)
             key.usage_count += 1
+        if self._usage_throttle.due(key.key_id):
             self._persist(key)
         return key
+
+    def revoke_keys_for_owner(self, owner_user_id):
+        """Revoke every still-active key owned by `owner_user_id`. Returns how many."""
+        revoked = 0
+        for key in list(self.keys.values()):
+            if key.owner_user_id == owner_user_id and key.status != "Revoked":
+                self.revoke_key(key.key_id)
+                revoked += 1
+        return revoked

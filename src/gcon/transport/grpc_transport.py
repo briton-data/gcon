@@ -30,6 +30,7 @@ itself opened, without polling.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import queue
@@ -239,6 +240,57 @@ class NodeSession:
             self.pending_results.clear()
 
 
+class _EnrollThrottle:
+    """Sliding one-minute window of Enroll attempts, per source address and overall.
+
+    The enroll port takes no client certificate, so anyone who can reach it can call it. Without a limit
+    each refused attempt still costs a database write (the audit row) and a thread from a small pool.
+    Memory is bounded: idle sources are dropped once the table grows. A limit of 0 turns that limit off.
+    """
+
+    _WINDOW_SECONDS = 60.0
+    _MAX_SOURCES = 5000
+
+    def __init__(self, per_source: int, overall: int):
+        self.per_source = per_source
+        self.overall = overall
+        self._by_source: Dict[str, "collections.deque[float]"] = {}
+        self._all: "collections.deque[float]" = collections.deque()
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "_EnrollThrottle":
+        def _read(name: str, default: int) -> int:
+            try:
+                return max(0, int(os.environ.get(name, default)))
+            except ValueError:
+                return default
+        return cls(_read("GCON_ENROLL_RATE_PER_SOURCE", 60), _read("GCON_ENROLL_RATE_OVERALL", 1200))
+
+    def allow(self, source: Optional[str]) -> bool:
+        now = time.monotonic()
+        cutoff = now - self._WINDOW_SECONDS
+        key = source or "unknown"
+        with self._lock:
+            while self._all and self._all[0] < cutoff:
+                self._all.popleft()
+            if self.overall and len(self._all) >= self.overall:
+                return False
+            hits = self._by_source.get(key)
+            if hits is None:
+                if len(self._by_source) >= self._MAX_SOURCES:
+                    for k in [k for k, d in self._by_source.items() if not d or d[-1] < cutoff]:
+                        del self._by_source[k]
+                hits = self._by_source[key] = collections.deque()
+            while hits and hits[0] < cutoff:
+                hits.popleft()
+            if self.per_source and len(hits) >= self.per_source:
+                return False
+            hits.append(now)
+            self._all.append(now)
+            return True
+
+
 class AgentControlServicer(pb_grpc.AgentControlServicer):
     def __init__(
         self,
@@ -260,6 +312,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         self.on_sanitize_result = None
         self._sessions: Dict[str, NodeSession] = {}
         self._lock = threading.RLock()
+        self._enroll_throttle = _EnrollThrottle.from_env()
 
     # -------------------------------------------------------- registration
     def Register(self, request, context):
@@ -417,6 +470,9 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         # per-org tokens via scripts/create_enroll_token.py instead of
         # relying on this.
         source_ip = _peer_address(context)
+        # Before any database or crypto work: this port is reachable without a certificate.
+        if not self._enroll_throttle.allow(source_ip):
+            return pb.EnrollResponse(accepted=False, reason="too many enrollment attempts; try again in a minute")
         org_id = None
         enroll_token_id = None
         # A fleet token enrolls a GCON-hosted worker: NO organization (a fleet token stores a marker where an
@@ -548,16 +604,29 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
     def Control(self, request_iterator, context):
         state = {"node_id": None, "session": None}
         stop = threading.Event()
+        # Who the TLS handshake says is on the other end of this stream. A
+        # session token proves a Register happened; it does not prove this
+        # connection belongs to that node.
+        stream_peer_cn = _peer_common_name(context)
 
         def reader():
             try:
                 for envelope in request_iterator:
                     if state["session"] is None:
                         session = self._sessions.get(envelope.node_id)
-                        if session is None or session.session_token != envelope.session_token:
+                        if session is None or not secrets.compare_digest(
+                            session.session_token.encode(), envelope.session_token.encode()
+                        ):
                             logger.warning(
                                 "Rejecting Control stream for unknown/invalid session: %s",
                                 envelope.node_id,
+                            )
+                            stop.set()
+                            return
+                        if stream_peer_cn is None or stream_peer_cn != session.node_id:
+                            logger.warning(
+                                "Rejecting Control stream for node '%s': the certificate presented "
+                                "belongs to '%s'", envelope.node_id, stream_peer_cn,
                             )
                             stop.set()
                             return
@@ -565,6 +634,15 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                         state["session"] = session
                         session.connected.set()
                         self.control_plane.nodes.set_status(envelope.node_id, "idle")
+                    elif envelope.node_id != state["node_id"]:
+                        # This stream was authenticated as one node. Speaking for another
+                        # one (heartbeats, results, shutdown notices) is hostile: end it.
+                        logger.warning(
+                            "Control stream for node '%s' sent a message as '%s'; closing it",
+                            state["node_id"], envelope.node_id,
+                        )
+                        stop.set()
+                        return
 
                     self._handle_agent_envelope(state["session"], envelope)
             except grpc.RpcError:
@@ -624,6 +702,8 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
 
     def _handle_agent_envelope(self, session: NodeSession, envelope) -> None:
         kind = envelope.WhichOneof("payload")
+        # Identity comes from the authenticated session, never from the message body.
+        node_id = session.node_id
         if kind == "heartbeat":
             hb = envelope.heartbeat
             # `record()`'s return value only tells us whether this exact
@@ -640,17 +720,17 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             # sequence climbed back past the old session's high-water
             # mark) despite heartbeating normally the whole time.
             self.control_plane.heartbeats.record(
-                node_id=envelope.node_id,
+                node_id=node_id,
                 sequence=hb.sequence,
                 status=hb.status,
                 cpu_percent=hb.cpu_percent,
                 memory_percent=hb.memory_percent,
                 running_jobs=hb.running_jobs,
             )
-            self.control_plane.nodes.set_status(envelope.node_id, hb.status)
+            self.control_plane.nodes.set_status(node_id, hb.status)
             if self.on_heartbeat:
                 self.on_heartbeat(
-                    envelope.node_id,
+                    node_id,
                     {
                         "status": hb.status,
                         "cpu_percent": hb.cpu_percent,
@@ -677,6 +757,13 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             attempt = self.control_plane.job_attempts.get_by_request_id(
                 jr.request_message_id
             )
+            if attempt is not None and attempt.get("node_id") != node_id:
+                # A node can only report on attempts that were dispatched to it.
+                logger.warning(
+                    "node '%s' sent a result for request_message_id=%s which belongs to node '%s'; ignoring",
+                    node_id, jr.request_message_id, attempt.get("node_id"),
+                )
+                attempt = None
             if attempt is not None:
                 self.control_plane.job_attempts.set_status(
                     attempt["attempt_id"],
@@ -698,7 +785,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         elif kind == "shutdown_notice":
             self.control_plane.cluster_events.record(
                 "NODE_SHUTDOWN_NOTICE",
-                node_id=envelope.node_id,
+                node_id=node_id,
                 payload={"reason": envelope.shutdown_notice.reason},
             )
 
@@ -839,8 +926,12 @@ class GrpcTransport(Transport):
         # self-enrollment doesn't get an unauthenticated port opened
         # on their coordinator for nothing.
         if _enroll_token():
+            # Bounded: at most 32 enroll calls in flight (the rest are refused at once rather than
+            # queued), and a request over 64 KB is refused before it is read -- a CSR is a few KB.
             self._enroll_server = grpc.server(
                 futures.ThreadPoolExecutor(max_workers=4),
+                maximum_concurrent_rpcs=32,
+                options=[("grpc.max_receive_message_length", 64 * 1024)],
             )
             pb_grpc.add_AgentControlServicer_to_server(self.servicer, self._enroll_server)
             enroll_port = getattr(self.config, "grpc_enroll_port", self.config.grpc_port + 1)

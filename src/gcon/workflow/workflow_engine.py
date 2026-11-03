@@ -53,6 +53,10 @@ class WorkflowEngine:
     # half-submitted workflow is much worse than a clear rejection.
         self._check_no_collisions(workflow)
 
+    # Every step must be acceptable to the organization's plan now: a step that is not
+    # refuses the whole workflow here, instead of failing it after the earlier steps ran.
+        self.coordinator.check_workflow_jobs_acceptable(workflow.jobs.values(), workflow.org_id)
+
     # Create runtime state (carrying real ownership metadata from the
     # submitted Workflow through to the state summary exposed by
     # get_workflows())

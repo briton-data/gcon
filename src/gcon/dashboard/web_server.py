@@ -1,6 +1,9 @@
 import json
+import logging
 import os
 import asyncio
+import threading
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.templating import Jinja2Templates
 from fastapi import Request, Cookie, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 
 from gcon.management.management_layer import ManagementLayer
@@ -18,6 +22,8 @@ from gcon.management.rate_limit import LoginRateLimiter
 from gcon.api.api_v1 import create_api_v1_app
 from gcon.config import describe_persistence, resolve_tls_cert_dir
 from gcon.dashboard.security_headers import SecurityHeadersMiddleware, env_flag
+
+logger = logging.getLogger(__name__)
 
 
 # Opt-in only: `request.client.host` is the actual TCP peer, which is
@@ -41,6 +47,12 @@ to external clients.
 """
 
 
+class StaffLoginIn(BaseModel):
+    """What the staff login accepts. Declaring it (instead of reading a raw dict) makes a missing or non-text field a 422"""
+    email: str
+    password: str
+
+
 class WebServer:
     """
     Web server for the GCON dashboard.
@@ -56,6 +68,8 @@ class WebServer:
         self.presentation = presentation
         self.management = ManagementLayer(coordinator=presentation.coordinator)
         self.login_rate_limiter = LoginRateLimiter(db=self.management.db)
+        self._ws_open = {}                       # user_id -> sockets open now, see _ws_acquire
+        self._ws_lock = threading.Lock()
         self.app = FastAPI(title="GCON Dashboard")
         self.app.add_middleware(SecurityHeadersMiddleware)
 
@@ -92,6 +106,72 @@ class WebServer:
                 expose_headers=["Retry-After"],
             )
         self.app.mount("/api/v1", self.api_v1_app)
+
+    @staticmethod
+    def _session_cookie_is_secure(request: Request):
+        """Mark the session cookie Secure when the browser reached us over HTTPS: either this server is told to serve
+        HTTPS itself (GCON_FORCE_HTTPS) or a proxy that ends TLS says so (Railway sends X-Forwarded-Proto: https). Behind
+        such a proxy this server sees plain HTTP, so the request's own scheme cannot be used."""
+        forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        return env_flag("GCON_FORCE_HTTPS") or forwarded == "https"
+
+    # ---- live socket (/ws) helpers ----
+
+    @staticmethod
+    def _ws_origin_allowed(origin, host):
+        """A socket opened by a browser page carries that page's Origin. Accept the dashboard's own origin
+        (same host as the request) and any origin listed in GCON_API_CORS_ORIGINS. No Origin header at
+        all means the client is not a browser page, which is accepted (it still needs the login cookie)."""
+        if not origin:
+            return True
+        listed = [o.strip().rstrip("/") for o in os.environ.get("GCON_API_CORS_ORIGINS", "").split(",") if o.strip()]
+        if origin.rstrip("/") in listed:
+            return True
+        return bool(host) and urlsplit(origin).netloc.lower() == host.lower()
+
+    def _ws_acquire(self, user_id):
+        """Take one of the user's live-socket slots (GCON_WS_MAX_PER_USER, default 5). False when none is left."""
+        try:
+            limit = max(1, int(os.environ.get("GCON_WS_MAX_PER_USER", 5)))
+        except ValueError:
+            limit = 5
+        with self._ws_lock:
+            if self._ws_open.get(user_id, 0) >= limit:
+                return False
+            self._ws_open[user_id] = self._ws_open.get(user_id, 0) + 1
+            return True
+
+    def _ws_release(self, user_id):
+        with self._ws_lock:
+            left = self._ws_open.get(user_id, 0) - 1
+            if left > 0:
+                self._ws_open[user_id] = left
+            else:
+                self._ws_open.pop(user_id, None)
+
+    def _build_live_payload(self):
+        """Everything one live update carries. Synchronous and heavy, so it is run in a worker thread."""
+        health = self.presentation.get_cluster_health()
+        trust = self.presentation.get_trust_score()
+        return {
+            "cluster": self.presentation.get_cluster_state(),
+            "nodes": self.presentation.get_nodes(),
+            "jobs": self.presentation.get_jobs(),
+            "events": self.presentation.get_events(),
+            "health": health,
+            "trust": trust,
+            "metrics": self.presentation.get_dashboard_metrics(),
+            "hero": self.presentation.get_hero_status(health, trust),
+            "system_metrics": self.presentation.get_system_metrics(),
+            "global_status": self.presentation.get_global_status(health),
+            "node_summary": self.presentation.get_node_summary(),
+            "receipts_summary": self.presentation.get_receipts_summary(),
+            "storage_summary": self.presentation.get_storage_summary(health),
+            "critical_alerts": self.presentation.get_critical_alerts(health),
+            "execution_timeline": self.presentation.get_execution_timeline(),
+            "companies": self.management.get_org_usage_summary(),
+            "notif_unread_by_severity": self.management.get_unread_notification_count_by_severity(),
+        }
 
     def _client_ip(self, request: Request):
         """
@@ -469,6 +549,12 @@ class WebServer:
   
         @self.app.websocket("/ws")
         async def ws_live(websocket: WebSocket):
+            # A browser sends the visitor's login cookie on a socket opened by ANY page that can reach
+            # this host, so the page's origin is checked too. Clients that are not browsers send no
+            # Origin; they still need the login cookie.
+            if not self._ws_origin_allowed(websocket.headers.get("origin"), websocket.headers.get("host")):
+                await websocket.close(code=4403)
+                return
             session_token = websocket.cookies.get(
             SESSION_COOKIE_NAME
 )
@@ -479,9 +565,15 @@ class WebServer:
             if not self.management.user_has_permission(user, "View monitoring"):
                 await websocket.close(code=4403)
                 return
+            # Each open socket recomputes and pushes the whole dashboard every 2 seconds, so one login
+            # may only hold a few open at once (several tabs are fine).
+            slot_user_id = user.user_id
+            if not self._ws_acquire(slot_user_id):
+                await websocket.close(code=4429)
+                return
 
-            await websocket.accept()
             try:
+                await websocket.accept()
                 while True:
                     # The login is re-checked every cycle, not just at connect:
                     # logging out, a force-logout, an expired session, a
@@ -494,31 +586,21 @@ class WebServer:
                         await websocket.close(code=4403)
                         return
 
-                    health = self.presentation.get_cluster_health()
-                    trust = self.presentation.get_trust_score()
-                    payload = {
-                        "cluster": self.presentation.get_cluster_state(),
-                        "nodes": self.presentation.get_nodes(),
-                        "jobs": self.presentation.get_jobs(),
-                        "events": self.presentation.get_events(),
-                        "health": health,
-                        "trust": trust,
-                        "metrics": self.presentation.get_dashboard_metrics(),
-                        "hero": self.presentation.get_hero_status(health, trust),
-                        "system_metrics": self.presentation.get_system_metrics(),
-                        "global_status": self.presentation.get_global_status(health),
-                        "node_summary": self.presentation.get_node_summary(),
-                        "receipts_summary": self.presentation.get_receipts_summary(),
-                        "storage_summary": self.presentation.get_storage_summary(health),
-                        "critical_alerts": self.presentation.get_critical_alerts(health),
-                        "execution_timeline": self.presentation.get_execution_timeline(),
-                        "companies": self.management.get_org_usage_summary(),
-                        "notif_unread_by_severity": self.management.get_unread_notification_count_by_severity(),
-                    }
+                    # Building the update reads the whole cluster; it runs in a worker thread so that it
+                    # does not hold up every other request while it does.
+                    payload = await asyncio.to_thread(self._build_live_payload)
                     await websocket.send_json(jsonable_encoder(payload))
                     await asyncio.sleep(2)
             except WebSocketDisconnect:
                 pass
+            except Exception:
+                logger.exception("live socket for user %s ended by an error", slot_user_id)
+                try:
+                    await websocket.close(code=1011)
+                except Exception:
+                    pass
+            finally:
+                self._ws_release(slot_user_id)
 
         # ---- Management: Users ----
 
@@ -1387,8 +1469,8 @@ class WebServer:
 
 
         @self.app.post("/auth/login")
-        def auth_login(payload: dict, request: Request, response: Response):
-            email = payload.get("email")
+        def auth_login(payload: StaffLoginIn, request: Request, response: Response):
+            email = payload.email
             client_ip = self._client_ip(request)
 
             try:
@@ -1399,7 +1481,7 @@ class WebServer:
             try:
                 token, user = self.management.login(
                     email,
-                    payload["password"],
+                    payload.password,
         )
             except ValueError as e:
                 self.login_rate_limiter.record_failure(email, client_ip)
@@ -1412,7 +1494,7 @@ class WebServer:
                 value=token,
                 httponly=True,
                 samesite="lax",
-                secure=env_flag("GCON_FORCE_HTTPS"),
+                secure=self._session_cookie_is_secure(request),
                 max_age=60 * 60 * 24,
     )
 

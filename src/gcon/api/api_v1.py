@@ -1170,6 +1170,12 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         responses={401: {"model": ErrorOut}},
     )
     def get_health(auth=Depends(require_scope("View monitoring", tenant=False))):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if org_id is not None:
+            # Own workers and jobs only (see get_cluster above): the platform-wide health carries
+            # every customer's counts and GCON's internal detail.
+            return jsonable_encoder(presentation.get_org_health(org_id))
         return jsonable_encoder(presentation.get_cluster_health())
 
     @app.get(
@@ -1260,7 +1266,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     )
     def list_jobs(
         status: Optional[str] = None,
-        limit: Optional[int] = None,
+        limit: Optional[int] = Query(None, ge=1, le=500),
         client_reference: Optional[str] = None,
         auth=Depends(require_scope("View monitoring")),
     ):
@@ -1298,9 +1304,9 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     def get_job(job_id: str, auth=Depends(require_scope("View monitoring"))):
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        for job in presentation.get_jobs(org_id=org_id):
-            if job["job_id"] == job_id:
-                return jsonable_encoder(job)
+        job = presentation.get_job(job_id, org_id)      # one direct lookup (memory, else the database), not a scan
+        if job is not None:
+            return jsonable_encoder(job)
         # Same reasoning as get_node: identical 404 for "doesn't
         # exist" and "belongs to a different company" so the error
         # can't be used to probe for other companies' job ids.
@@ -1472,7 +1478,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # this can't be used to probe which job_ids exist elsewhere.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+        if presentation.get_job(job_id, org_id) is None:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
         try:
             result = presentation.cancel_job(job_id)
@@ -1495,7 +1501,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # ids exist elsewhere in the cluster.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+        if presentation.get_job(job_id, org_id) is None:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
         return jsonable_encoder(presentation.get_job_attempts(job_id))
 
@@ -1512,7 +1518,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # written correctly from the start this time.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        if not any(j["job_id"] == job_id for j in presentation.get_jobs(org_id=org_id)):
+        if presentation.get_job(job_id, org_id) is None:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
         try:
             result = presentation.retry_job(job_id)
@@ -1633,7 +1639,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     )
     def list_receipts(
         verified: Optional[bool] = None,
-        limit: Optional[int] = None,
+        limit: Optional[int] = Query(None, ge=1, le=500),
         auth=Depends(require_scope("View monitoring")),
     ):
         # Same org-scoping as list_nodes/list_jobs above -- this
@@ -1662,6 +1668,9 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         items, _total = presentation.get_receipts_page(
             verified=verified, org_id=org_id, limit=limit or 50, offset=0,
         )
+        for item in items:
+            # The same id GET /receipts/{id} and a job's receipt_id use (the database row's own id is a different one).
+            item["receipt_id"] = item.pop("payload_receipt_id", None) or item["receipt_id"]
         return jsonable_encoder(items)
 
     @app.get(
@@ -1681,11 +1690,9 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         # on that method to.
         owner = auth["owner"]
         org_id = getattr(owner, "organization_id", None) if owner else None
-        own_receipt_ids = {r["receipt_id"] for r in presentation.get_receipts(org_id=org_id)}
-        if receipt_id not in own_receipt_ids:
-            raise HTTPException(status_code=404, detail=f"Receipt '{receipt_id}' not found.")
-        detail = presentation.get_receipt_detail(receipt_id)
-        if detail is None:
+        detail = presentation.get_receipt_detail(receipt_id, org_id=org_id)
+        # Ownership is the job's: the receipt must belong to a job of the caller's organization.
+        if detail is None or (org_id is not None and presentation.get_job(detail.get("job_id"), org_id) is None):
             raise HTTPException(status_code=404, detail=f"Receipt '{receipt_id}' not found.")
         return jsonable_encoder(detail)
 
@@ -1716,7 +1723,7 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         job_id: Optional[str] = None,
         node_id: Optional[str] = None,
         since: Optional[str] = None,
-        limit: int = 200,
+        limit: int = Query(200, ge=1, le=500),
         auth=Depends(require_scope("View monitoring")),
     ):
         # Same org-scoping as list_receipts/list_jobs above - a

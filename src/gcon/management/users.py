@@ -13,6 +13,7 @@ crash or redeploy no longer erases every account.
 """
 
 import re
+import threading
 from datetime import datetime, UTC
 from uuid import uuid4
 
@@ -129,6 +130,7 @@ class UserRegistry:
     def __init__(self, db: Database = None):
         self.db = db or Database(":memory:")
         self.users = {}
+        self._stat_lock = threading.Lock()
         for row in self.db.query("SELECT * FROM users"):
             user = User._from_row(row)
             self.users[user.user_id] = user
@@ -233,18 +235,25 @@ class UserRegistry:
         self._persist(user)
         return user
 
-    def increment_stat(self, user_id, stat_name, amount=1):
+    def increment_stat(self, user_id, stat_name, amount=1, persist=True):
         """
-        Atomically increment one of a user's `stats` counters and
-        persist the result. Replaces call sites that used to do
-        `user.stats["x"] += 1` directly (e.g. authenticate_api_key's
-        `owner.stats["api_requests"] += 1`), which was an unguarded
-        read-modify-write — the same lost-update shape stress_test2.py
-        found in the audit log and notification center.
+        Atomically increment one of a user's `stats` counters and persist the result. Replaces
+        call sites that used to do `user.stats["x"] += 1` directly (e.g. authenticate_api_key's
+        `owner.stats["api_requests"] += 1`), which was an unguarded read-modify-write -- the same
+        lost-update shape stress_test2.py found in the audit log and notification center.
+
+        persist=False updates the in-memory counter only (still atomic); the next persisted
+        write of the row carries it. Used for per-request counters (see write_throttle.py).
         """
+        if not persist:
+            with self._stat_lock:
+                user = self.get_user(user_id)
+                user.stats[stat_name] = user.stats.get(stat_name, 0) + amount
+            return user
         with self.db.transaction():
-            user = self.get_user(user_id)
-            user.stats[stat_name] = user.stats.get(stat_name, 0) + amount
+            with self._stat_lock:
+                user = self.get_user(user_id)
+                user.stats[stat_name] = user.stats.get(stat_name, 0) + amount
             self._persist(user)
         return user
 

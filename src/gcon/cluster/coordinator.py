@@ -114,6 +114,8 @@ def _validate_requires(requires):
                 raise ValueError(f"requires.{key} must be a non-negative number (got {value!r}).")
 
 
+_NOT_GIVEN = object()      # "no value passed" (None is a real receipt value)
+
 class GCONCoordinator:
     """
     Coordinates GCON agents, job execution, and receipt management.
@@ -850,6 +852,24 @@ class GCONCoordinator:
                 f"Could not resolve the job rules for org '{org_id}': {exc!r}"
             )
             return none
+
+    def check_workflow_jobs_acceptable(self, jobs, org_id):
+        """Refuse a whole workflow whose steps could never be accepted, BEFORE any of it is registered or run.
+
+        submit_job() checks one job's command (its shape, and the organization's allowed programs) when that job is
+        submitted, and a workflow's later steps are only submitted once earlier ones finish, so a step the plan does not
+        allow used to fail the workflow midway, after the steps before it had run. This applies the same two checks to every
+        step up front. Raises ValueError naming the first step that fails. Only what can be known now is checked: a
+        concurrent-job cap is about what is running later, and is still handled as each step is submitted."""
+        rules = self._job_rules(org_id)
+        for job in jobs:
+            try:
+                check_command_shape(job.command)
+                if org_id is not None:
+                    check_program_allowed(job.command, rules["allowed_programs"])
+            except ValueError as exc:
+                label = (getattr(job, "metadata", None) or {}).get("client_reference") or job.job_id
+                raise ValueError(f"Job '{label}': {exc}") from None
 
     def _job_timeout_seconds(self, job):
         """Seconds the worker may run this job before killing it (the plan's
@@ -3217,7 +3237,7 @@ class GCONCoordinator:
             "org_id": row.get("org_id"),
         }
 
-    def _load_receipt_from_control_plane(self, job_id=None, receipt_id=None):
+    def _load_receipt_from_control_plane(self, job_id=None, receipt_id=None, org_id=None):
         """
         Cold-path fallback for a receipt evicted from self.receipts
         (see _evict_completed_if_over_capacity), or from before this
@@ -3238,6 +3258,9 @@ class GCONCoordinator:
             if job_id is not None:
                 rows = self.control_plane.receipts.list_for_job(job_id)
                 return rows[-1]["payload"] if rows else None
+            if org_id is not None:      # a customer's lookup: only their own receipts are read
+                row = self.control_plane.receipts.find_for_org_by_payload_id(receipt_id, org_id)
+                return row["payload"] if row else None
             for row in self.control_plane.receipts.list_all():
                 if row["payload"].get("receipt_id") == receipt_id:
                     return row["payload"]
@@ -3696,6 +3719,9 @@ class GCONCoordinator:
         refused, same as before.
         """
         if job_id not in self.jobs:
+            row = self._load_job_from_control_plane(job_id)
+            if row is not None:         # dropped from memory, so it finished long ago
+                raise ValueError(f"Job '{job_id}' is not pending or running (status: {row['status']}).")
             raise ValueError(f"Job '{job_id}' does not exist.")
 
         job = self.jobs[job_id]
@@ -3935,6 +3961,8 @@ class GCONCoordinator:
         with self.jobs_lock:
             job = self.jobs.get(job_id)
             if job is None:
+                if self._load_job_from_control_plane(job_id) is not None:
+                    raise ValueError(f"Job '{job_id}' finished long ago and is no longer held for retry. Submit it again.")
                 raise ValueError(f"Job '{job_id}' does not exist.")
             if job["status"] not in ("failed", "pending"):
                 raise ValueError(
@@ -4525,72 +4553,92 @@ class GCONCoordinator:
                 continue
             if status is not None and job["status"] != status:
                 continue
-            receipt = self.receipts.get(job_id)
-            result = job.get("result") or {}
-            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
-            # Raw stdout: hashed into the receipt's output_hash (a
-            # verification proof, not a readable result) but never
-            # otherwise surfaced -- fine for jobs where only the side
-            # effect mattered, useless for a job whose entire point is
-            # a computed answer (e.g. an ML prediction). Capped at 8KB
-            # so one runaway job can't bloat every /jobs response;
-            # full output is still in job["result"] in-process.
-            stdout = result.get("stdout")
-            output = None
-            if stdout is not None:
-                output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
-            jobs.append({
-                "job_id": job_id,
-                "status": job["status"],
-                "node_id": job.get("node_id"),
-                "created_at": job.get("created_at"),
-                "completed_at": job.get("completed_at"),
-                "receipt_id": receipt.get("receipt_id", job_id) if receipt else None,
-                "artifacts": len(job.get("artifacts", [])),
-                "created_by": job.get("created_by"),
-                "workflow_id": job.get("workflow_id"),
-                "org_id": job.get("org_id"),
-                "client_reference": job.get("client_reference"),
-                # Automatically measured wall-clock runtime for this
-                # job (GCONAgent.execute_job), None until it finishes.
-                # This is the real, always-available "compute usage"
-                # signal -- distinct from the opt-in "usage" below,
-                # which only exists if the job's own command chose to
-                # report something (e.g. LLM token counts).
-                "runtime_seconds": result.get("runtime_seconds"),
-                # Opt-in usage report a job's own command wrote to
-                # GCON_USAGE_REPORT_PATH (see GCONAgent.execute_job) --
-                # None if the job hasn't finished yet, ran on a node
-                # too old to capture it, or (most commonly) the job's
-                # command didn't write one. Never fabricated.
-                "usage": metrics.get("usage"),
-                "output": output,
-                # How this job was configured at submission (see
-                # submit_job) -- previously stored on the job but
-                # never returned, so a customer had no way to see
-                # which capabilities they had actually asked for.
-                "kind": job.get("kind", "command"),
-                "requires": job.get("requires"),
-                "verify": job.get("verify"),
-                # 'shared' if an organization's job ran on the shared worker
-                # pool, 'dedicated' if on one of its own workers, None for a
-                # job with no org or not yet placed.
-                "execution_pool": job.get("execution_pool"),
-                # Replicated-execution verdict (None for a job that
-                # wasn't replicated) -- whether the replicas agreed.
-                "verification": self._job_verification(job),
-                # Why a non-successful job ended the way it did. The
-                # agent reports this under "error" (timeout / exception)
-                # or, for the dispatch-failure path, "message"; a
-                # command that simply exited non-zero has neither, so
-                # fall back to its stderr. Capped like "output" so one
-                # runaway job can't bloat every /jobs response.
-                "error": self._job_error_text(job, result),
-                "return_code": result.get("return_code"),
-            })
+            jobs.append(self._job_summary(job_id, job))
             if limit is not None and len(jobs) >= limit:
                 break
         return jobs
+
+    def get_job_for_org(self, job_id, org_id=None):
+        """One job by id, without scanning every job: from memory when it is still there, otherwise from the control plane
+        (a finished job is dropped from memory past _max_jobs_in_memory, and after a restart only live ones are reloaded).
+        None when there is no such job or it belongs to another organization (`org_id=None` means any, as for staff)."""
+        with self.jobs_lock:
+            job = self.jobs.get(job_id)
+        receipt = _NOT_GIVEN
+        if job is None:
+            job = self._load_job_from_control_plane(job_id)
+            receipt = self._load_receipt_from_control_plane(job_id=job_id) if job is not None else None
+        if job is None or (org_id is not None and job.get("org_id") != org_id):
+            return None
+        return self._job_summary(job_id, job, receipt)
+
+    def _job_summary(self, job_id, job, receipt=_NOT_GIVEN):
+        """One job as the dashboard and the customer API show it. `receipt` defaults to the in-memory one; a job read
+        back from the database passes the receipt it found there (or None)."""
+        if receipt is _NOT_GIVEN:
+            receipt = self.receipts.get(job_id)
+        result = job.get("result") or {}
+        metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        # Raw stdout: hashed into the receipt's output_hash (a
+        # verification proof, not a readable result) but never
+        # otherwise surfaced -- fine for jobs where only the side
+        # effect mattered, useless for a job whose entire point is
+        # a computed answer (e.g. an ML prediction). Capped at 8KB
+        # so one runaway job can't bloat every /jobs response;
+        # full output is still in job["result"] in-process.
+        stdout = result.get("stdout")
+        output = None
+        if stdout is not None:
+            output = stdout if len(stdout) <= 8192 else stdout[:8192] + "... (truncated)"
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "node_id": job.get("node_id"),
+            "created_at": job.get("created_at"),
+            "completed_at": job.get("completed_at"),
+            "receipt_id": receipt.get("receipt_id", job_id) if receipt else None,
+            "artifacts": len(job.get("artifacts", [])),
+            "created_by": job.get("created_by"),
+            "workflow_id": job.get("workflow_id"),
+            "org_id": job.get("org_id"),
+            "client_reference": job.get("client_reference"),
+            # Automatically measured wall-clock runtime for this
+            # job (GCONAgent.execute_job), None until it finishes.
+            # This is the real, always-available "compute usage"
+            # signal -- distinct from the opt-in "usage" below,
+            # which only exists if the job's own command chose to
+            # report something (e.g. LLM token counts).
+            "runtime_seconds": result.get("runtime_seconds"),
+            # Opt-in usage report a job's own command wrote to
+            # GCON_USAGE_REPORT_PATH (see GCONAgent.execute_job) --
+            # None if the job hasn't finished yet, ran on a node
+            # too old to capture it, or (most commonly) the job's
+            # command didn't write one. Never fabricated.
+            "usage": metrics.get("usage"),
+            "output": output,
+            # How this job was configured at submission (see
+            # submit_job) -- previously stored on the job but
+            # never returned, so a customer had no way to see
+            # which capabilities they had actually asked for.
+            "kind": job.get("kind", "command"),
+            "requires": job.get("requires"),
+            "verify": job.get("verify"),
+            # 'shared' if an organization's job ran on the shared worker
+            # pool, 'dedicated' if on one of its own workers, None for a
+            # job with no org or not yet placed.
+            "execution_pool": job.get("execution_pool"),
+            # Replicated-execution verdict (None for a job that
+            # wasn't replicated) -- whether the replicas agreed.
+            "verification": self._job_verification(job),
+            # Why a non-successful job ended the way it did. The
+            # agent reports this under "error" (timeout / exception)
+            # or, for the dispatch-failure path, "message"; a
+            # command that simply exited non-zero has neither, so
+            # fall back to its stderr. Capped like "output" so one
+            # runaway job can't bloat every /jobs response.
+            "error": self._job_error_text(job, result),
+            "return_code": result.get("return_code"),
+        }
 
     @staticmethod
     def _job_error_text(job, result):
@@ -4759,6 +4807,7 @@ class GCONCoordinator:
                 payload = row.get("payload") or {}
                 items.append({
                     "receipt_id": row["receipt_id"],
+                    "payload_receipt_id": (row.get("payload") or {}).get("receipt_id"),   # the id a job and GET /receipts/{id} use
                     "job_id": row["job_id"],
                     "node_id": row.get("node_id"),
                     "created_at": row.get("uploaded_at"),
@@ -4941,7 +4990,7 @@ class GCONCoordinator:
                 })
         return artifacts
 
-    def get_receipt_detail(self, receipt_id):
+    def get_receipt_detail(self, receipt_id, org_id=None):
         """
         Return the full record for a single receipt, for the Receipt
         Explorer: proof (hash/signature/timestamp/metrics), live
@@ -4961,7 +5010,7 @@ class GCONCoordinator:
                 break
 
         if receipt is None:
-            receipt = self._load_receipt_from_control_plane(receipt_id=receipt_id)
+            receipt = self._load_receipt_from_control_plane(receipt_id=receipt_id, org_id=org_id)
 
         if receipt is None:
             return None

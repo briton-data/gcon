@@ -340,6 +340,19 @@ class PresentationLayer:
         """
         return self.coordinator.get_cluster_health()
     
+    def get_org_health(self, org_id):
+        """One organization's slice of get_cluster_health(): the overall state, and counts of its own workers
+        and jobs only. The platform-wide version carries every customer's job counts and GCON's own internal
+        detail (queue, storage, node registry, the reasons behind the score), none of which a customer should
+        learn from a health check."""
+        health = self.coordinator.get_cluster_health()
+        own = self.get_org_cluster_state(org_id)
+        return {
+            "state": health["state"],
+            "computed_at": health["computed_at"],
+            "metrics": {key: own[key] for key in ("total_nodes", "running_jobs", "completed_jobs", "failed_jobs")},
+        }
+
     def get_health_details(self):
         """
         Return detailed health information.
@@ -854,13 +867,18 @@ class PresentationLayer:
             verified=verified, search=search, org_id=org_id, limit=limit, offset=offset,
         )
 
-    def get_receipt_detail(self, receipt_id):
+    def get_receipt_detail(self, receipt_id, org_id=None):
         """
         Return the full record for one receipt (proof, live
         verification, execution details, artifacts) for the Receipt
-        Explorer's detail view.
+        Explorer's detail view. `org_id` (a customer's lookup) keeps a
+        database fallback to that organization's own receipts.
         """
-        return self.coordinator.get_receipt_detail(receipt_id)
+        return self.coordinator.get_receipt_detail(receipt_id, org_id=org_id)
+
+    def get_job(self, job_id, org_id=None):
+        """One job by id (memory, else the database), or None; see coordinator.get_job_for_org."""
+        return self.coordinator.get_job_for_org(job_id, org_id)
 
     def get_execution_detail(self, job_id):
         """

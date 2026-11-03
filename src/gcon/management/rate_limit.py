@@ -35,12 +35,17 @@ ever seen. The DB-backed path is bounded the same way by pruning old
 every check()/record_attempt() call.
 """
 
+import os
 import threading
 from datetime import datetime, UTC, timedelta
 
 MAX_ATTEMPTS = 5
 WINDOW_MINUTES = 15
 LOCKOUT_MINUTES = 15
+# Per ACCOUNT, counting failures from every client address together. The per-(email, address) limit above stops one
+# address; without this one, guessing a single account's password from many addresses is never stopped. Higher, so a
+# user who mistypes a few times is not caught by it. GCON_LOGIN_ACCOUNT_MAX_ATTEMPTS overrides it (0 turns it off).
+ACCOUNT_MAX_ATTEMPTS = 20
 
 # In-memory-mode eviction tuning: sweep whenever either dict grows
 # past this many *distinct* keys, or every EVICT_EVERY_N_CALLS calls,
@@ -52,8 +57,14 @@ EVICT_EVERY_N_CALLS = 500
 
 class LoginRateLimiter:
     def __init__(self, max_attempts=MAX_ATTEMPTS, window_minutes=WINDOW_MINUTES,
-                 lockout_minutes=LOCKOUT_MINUTES, db=None):
+                 lockout_minutes=LOCKOUT_MINUTES, db=None, account_max_attempts=None):
         self.max_attempts = max_attempts
+        if account_max_attempts is None:
+            try:
+                account_max_attempts = int(os.environ.get("GCON_LOGIN_ACCOUNT_MAX_ATTEMPTS", ACCOUNT_MAX_ATTEMPTS))
+            except ValueError:
+                account_max_attempts = ACCOUNT_MAX_ATTEMPTS
+        self.account_max_attempts = max(0, account_max_attempts)
         self.window = timedelta(minutes=window_minutes)
         self.lockout = timedelta(minutes=lockout_minutes)
         self.db = db
@@ -66,6 +77,12 @@ class LoginRateLimiter:
     def _key(email, client_ip):
         return f"{(email or '').strip().lower()}|{client_ip or 'unknown'}"
 
+    @staticmethod
+    def _account_key(email):
+        """The one counter for the whole account, across every address (no address is ever "*"). It shares the
+        `email|` prefix, so the admin unlock and "is locked" views cover it with no change."""
+        return f"{(email or '').strip().lower()}|*"
+
     # ------------------------------------------------------------
     # Public API (unchanged signatures)
     # ------------------------------------------------------------
@@ -77,11 +94,14 @@ class LoginRateLimiter:
         guarded action (verifying a password, creating an API key,
         ...).
         """
-        key = self._key(email, client_ip)
-        if self.db is not None:
-            self._check_db(key)
-        else:
-            self._check_memory(key)
+        keys = [self._key(email, client_ip)]
+        if self.account_max_attempts:
+            keys.append(self._account_key(email))
+        for key in keys:
+            if self.db is not None:
+                self._check_db(key)
+            else:
+                self._check_memory(key)
 
     def record_failure(self, email, client_ip=None):
         """Call after a failed attempt (wrong password, etc). Locks
@@ -98,22 +118,25 @@ class LoginRateLimiter:
         request volume (API-key creation), every call should count,
         not just unsuccessful ones.
         """
-        key = self._key(email, client_ip)
-        if self.db is not None:
-            self._record_attempt_db(key)
-        else:
-            self._record_attempt_memory(key)
+        counters = [(self._key(email, client_ip), self.max_attempts)]
+        if self.account_max_attempts:
+            counters.append((self._account_key(email), self.account_max_attempts))
+        for key, limit in counters:
+            if self.db is not None:
+                self._record_attempt_db(key, limit)
+            else:
+                self._record_attempt_memory(key, limit)
 
     def record_success(self, email, client_ip=None):
         """Call after a successful attempt to clear any prior failures."""
-        key = self._key(email, client_ip)
-        if self.db is not None:
-            self.db.execute("DELETE FROM login_attempts WHERE key = ?", (key,))
-            self.db.execute("DELETE FROM login_lockouts WHERE key = ?", (key,))
-        else:
-            with self._lock:
-                self._attempts.pop(key, None)
-                self._locked_until.pop(key, None)
+        for key in (self._key(email, client_ip), self._account_key(email)):
+            if self.db is not None:
+                self.db.execute("DELETE FROM login_attempts WHERE key = ?", (key,))
+                self.db.execute("DELETE FROM login_lockouts WHERE key = ?", (key,))
+            else:
+                with self._lock:
+                    self._attempts.pop(key, None)
+                    self._locked_until.pop(key, None)
 
     # ------------------------------------------------------------
     # Admin override
@@ -191,13 +214,14 @@ class LoginRateLimiter:
                 del self._locked_until[key]
                 self._attempts.pop(key, None)
 
-    def _record_attempt_memory(self, key):
+    def _record_attempt_memory(self, key, limit=None):
+        limit = limit or self.max_attempts
         now = datetime.now(UTC)
         with self._lock:
             attempts = [t for t in self._attempts.get(key, []) if now - t < self.window]
             attempts.append(now)
             self._attempts[key] = attempts
-            if len(attempts) >= self.max_attempts:
+            if len(attempts) >= limit:
                 self._locked_until[key] = now + self.lockout
             self._maybe_evict_locked()
 
@@ -244,7 +268,8 @@ class LoginRateLimiter:
             self.db.execute("DELETE FROM login_lockouts WHERE key = ?", (key,))
             self.db.execute("DELETE FROM login_attempts WHERE key = ?", (key,))
 
-    def _record_attempt_db(self, key):
+    def _record_attempt_db(self, key, limit=None):
+        limit = limit or self.max_attempts
         now = datetime.now(UTC)
         cutoff = (now - self.window).isoformat()
         with self.db.transaction() as conn:
@@ -259,7 +284,7 @@ class LoginRateLimiter:
             count = conn.execute(
                 "SELECT COUNT(*) AS c FROM login_attempts WHERE key = ?", (key,)
             ).fetchone()["c"]
-            if count >= self.max_attempts:
+            if count >= limit:
                 locked_until = (now + self.lockout).isoformat()
                 conn.execute(
                     "INSERT INTO login_lockouts (key, locked_until) VALUES (?, ?) "

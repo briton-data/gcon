@@ -24,11 +24,12 @@ from datetime import datetime, UTC, timedelta
 from . import plans as plans_mod
 from . import rbac
 from . import request_limiter
-from .auth import SessionManager, ResetTokenManager, CustomerSessionManager, CustomerResetTokenManager
+from .auth import SessionManager, ResetTokenManager, CustomerSessionManager, CustomerResetTokenManager, decoy_password_check
 from .users import UserRegistry, bootstrap_owner_account, mask_email
 from .organizations import OrganizationRegistry
 from .customers import CustomerUserRegistry, _CustomerOwnerView
 from .api_keys import APIKeyManager
+from .write_throttle import WriteThrottle
 from .audit_log import AuditLogger
 
 from gcon.monitoring.notifications import NotificationCenter
@@ -79,6 +80,7 @@ class ManagementLayer:
         self.user_registry = UserRegistry(db=self.db)
         self.org_registry = OrganizationRegistry(db=self.db)
         self.api_key_manager = APIKeyManager(db=self.db)
+        self._usage_throttle = WriteThrottle()  # per-user request-count writes, see write_throttle.py
         self.audit_logger = AuditLogger(db=self.db)
         self.notification_center = NotificationCenter(db=self.db)
         self.session_manager = SessionManager(db=self.db)
@@ -280,15 +282,26 @@ class ManagementLayer:
             if customer is not None:
                 owner = _CustomerOwnerView(customer)
 
-        if owner is not None and owner.status != "Active":
+        # A key must belong to someone who still exists. A deleted owner's keys are revoked when
+        # the account is deleted (delete_user / delete_customer_account); this also refuses any
+        # key left behind by another route rather than letting it authenticate owner-less.
+        if owner is None:
+            raise ValueError("Invalid or expired API key.")
+
+        if owner.status != "Active":
             raise ValueError("Invalid or expired API key.")
 
         self.api_key_manager.mark_used(key)
+        # Per-request counters: exact in memory, written to disk at most once per interval
+        # per user (see write_throttle.py) instead of one fsync'd write per request.
+        write_now = self._usage_throttle.due(owner.user_id)
         if isinstance(owner, _CustomerOwnerView):
-            self.customer_registry.users[owner.user_id].last_active = datetime.now(UTC)
-            self.customer_registry._persist(self.customer_registry.users[owner.user_id])
-        elif owner is not None:
-            self.user_registry.increment_stat(owner.user_id, "api_requests")
+            customer = self.customer_registry.users[owner.user_id]
+            customer.last_active = datetime.now(UTC)
+            if write_now:
+                self.customer_registry._persist(customer)
+        else:
+            self.user_registry.increment_stat(owner.user_id, "api_requests", persist=write_now)
 
         return key, owner   
     
@@ -659,6 +672,9 @@ class ManagementLayer:
         user = self.user_registry.get_user(user_id)
         self._guard_owner(actor, user)
         name = user.name
+        # Their credentials go with them: keys would otherwise keep working, and sessions stay signed in.
+        self.api_key_manager.revoke_keys_for_owner(user_id)
+        self.session_manager.destroy_all_for_user(user_id)
         self.user_registry.delete_user(user_id)
         self.org_registry.remove_user_everywhere(user_id)
         self.audit_logger.log("Admin", "deleted user", name)
@@ -738,7 +754,8 @@ class ManagementLayer:
         """
         user = self.user_registry.get_user_by_email(email)
 
-        if not user or not user.check_password(password):
+        password_ok = user.check_password(password) if user else decoy_password_check(password)
+        if not password_ok:
             # Masked: the typed value is untrusted (it is sometimes a password
             # pasted into the wrong box) and an address is personal data.
             self.audit_logger.log(mask_email(email) or "unknown", "failed login attempt")
@@ -1431,20 +1448,36 @@ class ManagementLayer:
     # preview ask here, so the same rules apply everywhere.
     def invoice_terms(self, org_id, period_start, period_end):
         """{"included_usage_cents", "fee_cents", "fee_label"} for this org and period. The monthly fee is charged only for a
-        whole calendar month in which the org was already a customer on its first day: the month it joins in has no fee."""
+        whole calendar month in which the org was already a customer on its first day: the month it joins in has no fee.
+
+        Which plan, and what that plan charged, is what applied when the period STARTED (see gcon.billing.terms_history),
+        not what is current when the invoice is made: moving an organization to another plan, or editing a price, after a
+        month has closed does not change that month."""
+        from gcon.billing import terms_history
         from gcon.billing.invoicing import is_calendar_month, _parse_instant
         try:
             org = self.org_registry.get_organization(org_id)
         except ValueError:      # not (or no longer) in the registry, for example a deleted account's last invoice: its usage is
             org = None          # billed on the default plan's included usage, and no fee
-        tier = plans_mod.plan_for_limits(org.plan if org else None)
-        plan = self.get_plan_limits()[tier]
+        started = _parse_instant(period_start, "period_start")
+        settings = self._plan_settings()
+        label = terms_history.value_at(settings, f"org_plan:{org_id}", started, org.plan if org else None)
+        tier = plans_mod.plan_for_limits(label)
+        current_limits = self.get_plan_limits()
+        prices = terms_history.value_at(settings, "plan_prices", started, self._plan_prices(current_limits))
+        price = prices.get(tier) or self._plan_prices(current_limits)[tier]
         fee = 0
-        if org is not None and plan["monthly_fee_cents"] > 0 and is_calendar_month(period_start, period_end):
+        if org is not None and price["monthly_fee_cents"] > 0 and is_calendar_month(period_start, period_end):
             joined = org.created_at if org.created_at.tzinfo else org.created_at.replace(tzinfo=UTC)
-            if joined <= _parse_instant(period_start, "period_start"):
-                fee = plan["monthly_fee_cents"]
-        return {"included_usage_cents": plan["included_usage_cents"], "fee_cents": fee, "fee_label": f"{tier} plan, monthly fee"}
+            if joined <= started:
+                fee = price["monthly_fee_cents"]
+        return {"included_usage_cents": price["included_usage_cents"], "fee_cents": fee, "fee_label": f"{tier} plan, monthly fee"}
+
+    @staticmethod
+    def _plan_prices(limits):
+        """Just what a plan charges, from a full limits table: the part of a plan that billing history keeps."""
+        return {tier: {"monthly_fee_cents": values["monthly_fee_cents"], "included_usage_cents": values["included_usage_cents"]}
+                for tier, values in limits.items()}
 
     def subscription_org_ids(self, period_start, period_end):
         """Organizations that owe a plan fee for this period, whether or not they ran any jobs."""
@@ -1479,12 +1512,15 @@ class ManagementLayer:
         if settings is None:
             raise ValueError("Plan limits need a coordinator with a control plane.")
         plan = plans_mod.canonical_plan(plan)
+        prices_before = self._plan_prices(self.get_plan_limits())
         previous = self.get_plan_limits()[plan]
         values = plans_mod.save_plan_limits(
             settings, plan, requests_per_minute, max_concurrent_jobs,
             allowed_programs, max_runtime_seconds, updated_by=actor.name, max_workers=max_workers,
             max_leased_workers=max_leased_workers, verification=verification,
             included_usage_cents=included_usage_cents, monthly_fee_cents=monthly_fee_cents)
+        from gcon.billing import terms_history
+        terms_history.record_change(settings, "plan_prices", prices_before, self._plan_prices(self.get_plan_limits()))
         detail = (
             f"changed {plan} plan limits {previous['requests_per_minute']}/min, "
             f"{previous['max_concurrent_jobs']} jobs -> {values['requests_per_minute']}/min, "
@@ -1889,6 +1925,8 @@ class ManagementLayer:
         org = self.org_registry.update_organization(org_id, **fields)
         self.audit_logger.log("Admin", "updated organization", org.name)
         if org.plan != previous_plan:
+            from gcon.billing import terms_history
+            terms_history.record_change(self._plan_settings(), f"org_plan:{org_id}", previous_plan, org.plan)
             self.audit_logger.log(
                 "Admin", f"changed plan {previous_plan} -> {org.plan} for organization", org.name)
         return self.get_organization(org.org_id)
