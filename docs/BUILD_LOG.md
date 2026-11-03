@@ -20,13 +20,56 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 |---|---|
 | VIP / load balancer in front of coordinators | deployment work, outside the code; see "Running two coordinators" |
 | Password-reset email | no SMTP provider yet (`GCON_SMTP_*` unset), so reset links are not delivered |
-| Persisting the coordinator CA | needs a volume; workers re-enroll after every redeploy |
+| Persisting the coordinator CA | built (2026-10-16); it only works once a Railway volume is attached, see "Before the fleet goes live". Without one, workers must re-enroll after every redeploy |
 | Real payment provider | Stripe is a stub. Until it is built, invoicing is by hand: the default provider issues an invoice (status open) and staff record the payment with Mark paid. The mock provider (`GCON_PAYMENT_PROVIDER=mock`) marks invoices paid without moving money and is for development only |
 | Customer-created worker enroll tokens | tokens are issued by GCON staff; the Workers page says so |
 | Customer roles | customer accounts have no roles, so customer self-serve pool-mode changes stay off |
 | Assurance counters across restarts | the Assure counters reset when the coordinator restarts |
 | Artifact persistence | the artifact registry is in memory |
 | Cryptographic proof (ZK/TEE) | not implemented; receipts are HMAC + per-node Ed25519 signatures |
+
+## Before the fleet goes live (owner checklist, 2026-11-01)
+
+Status on 2026-11-01: Railway was down, so none of the latest commits (plan fee and included usage, invoicing by hand, Pro-only verification, Workers page, new docs) are deployed yet. Do these when it is back.
+
+**Railway service variables (coordinator)**
+
+| Setting | Value | Why |
+|---|---|---|
+| `GCON_GRPC_MAX_WORKERS` | `1200` | Each connected worker holds one server thread for as long as it is connected. The default `256` is a hard ceiling: measured with 320 workers, exactly 256 connected and 64 never did. 700 workers need about 1,400 threads and about 210 MB |
+| Railway volume | attach one | Databases, certificate authority and signing key follow it automatically. Check `GET /management/persistence` (staff login) or look for the red "Data is not persistent" banner. Without it every redeploy wipes organizations, API keys, invoices and the CA, and all workers are rejected |
+| `GCON_PAYMENT_PROVIDER` | leave unset (or `manual`) | Invoicing by hand: Finalize issues an invoice (status open), staff use Mark paid with a payment reference. `mock` is for development only because it marks invoices paid without any payment |
+| `GCON_AUTOSCALE_ENABLED` | leave unset | The AutoScaler is a demo. It creates fake in-process workers inside the coordinator process. It does not provision machines. Growing the hosted fleet today means adding machines by hand and enrolling them with the fleet token |
+| `GCON_TRUSTED_PROXY_IP_HEADER` | `X-Real-IP` | Railway's proxy sits in front of the coordinator, so without this every visitor looks like the same address to the login limiter and one person's wrong passwords lock everyone out of that account. Railway's documentation says its edge sets `X-Real-IP` to the client address; use that one rather than `X-Forwarded-For`, which community reports disagree about (whether a client-supplied value can pass through). Check it after the deploy, see "Check the client address after the deploy" |
+
+**Check the client address after the deploy** (needs `GCON_TRUSTED_PROXY_IP_HEADER` set and a redeploy; use a made-up email so no real account is touched)
+
+1. From your computer, send 5 wrong logins: `for i in 1 2 3 4 5; do curl -s -o /dev/null -w "%{http_code}\n" -X POST https://YOUR-HOST/auth/login -H "Content-Type: application/json" -d '{"email":"probe@example.invalid","password":"x"}'; done` (expect 401 each time).
+2. Send a sixth one from the same computer while claiming to be someone else: add `-H "X-Real-IP: 198.51.100.9" -H "X-Forwarded-For: 198.51.100.9"`. It must be **429**. A 401 means a header you control is being believed, so the limiter can be dodged: do not go live.
+3. From a different network (a phone on mobile data), send the same request without extra headers. It must be **401**. A 429 means every visitor still looks like one address, so the header is not being read: check the variable name, that the service was redeployed, and what the proxy really sends.
+4. Wait 15 minutes (or restart) so the made-up address is released.
+
+Separately from the address, an account is also locked after 20 wrong passwords in 15 minutes counted across all addresses (`GCON_LOGIN_ACCOUNT_MAX_ATTEMPTS`; 0 turns it off). A staff user can unlock it from the Users screen like any other lockout.
+
+**Hosted worker machines (Docker backend)**
+
+- `GCON_JOB_DOCKER_IMAGE`: the default is `python:3.12-slim`, which has no CUDA and no ML libraries. Set it to an image with CUDA and the libraries your customers need.
+- `GCON_JOB_DOCKER_GPUS`: set it (for example `all`) on GPU machines. They need the NVIDIA container toolkit.
+- Job containers have no network by default (`GCON_JOB_DOCKER_NETWORK=none`). A job cannot `pip install`, `git clone` or download model weights. Put what jobs need into the image, or decide deliberately to allow a network.
+- The Docker backend has not been run end to end in the build sandbox (no Docker there). Run one real GPU job on the first hosted machine before opening the fleet to customers.
+
+**Measured capacity (2026-10-31, one shared CPU, localhost)**
+
+- 582 workers connected at once with the pool at 1024: 1,172 threads, 173 MB, about 22% of one core for heartbeats.
+- Benchmark: 700 simulated workers, 20 customers, 50 jobs a second: all 2,500 jobs completed, queue wait p99 330 ms, end to end p99 1.06 s, no stuck jobs. The first thing to strain is the SQLite write lock. Move to Postgres (`GCON_CONTROL_PLANE_DATABASE_URL`, already built) when running a second coordinator or past roughly 50 sustained jobs a second.
+- Not measured: all 700 reconnecting after a coordinator restart, and real workers over Railway's network.
+
+**Housekeeping**
+
+- No automated backups. Use Railway volume backups. Do not copy the live SQLite files with `tar` while the coordinator runs.
+- Worker certificates last 825 days and nothing warns before they expire. Add a reminder for about two years after the first enrollment. The CA lasts 10 years.
+- Delete the old `certs/` and `certs-from-railway/` folders from your computer (old CA and worker keys from earlier deploys; they are git-ignored, not in the repository).
+- Decision still open: build Stripe subscriptions so customers can pay without a hand-sent invoice.
 
 ## v1 contract freeze: checklist (2026-10-16)
 
@@ -39,6 +82,7 @@ Freeze means: v1 only gets additive changes; anything breaking goes to `/api/v2`
 - [x] `docs/DEPLOYMENT.md` said Postgres is not wired; corrected (2026-10-16)
 - [x] Postgres billing: `GET /billing/invoices*` failed (`ORDER BY rowid`) and fractional `unit_price_cents` was stored as 0. Fixed by migration 16 (exact `unit_price`, `position`); tested on PostgreSQL 16 (2026-10-16)
 - [x] Production persistence: databases, certificate authority and signing key now follow an attached Railway volume automatically; startup warning and a dashboard banner when they don't (2026-10-16). **Still to do by you: attach the volume**
+- [x] Review fixes (2026-11-01), each reproduced before it was fixed: (1) a customer's finished jobs and receipts no longer 404 once the coordinator has dropped them from memory, and lookups are direct instead of scanning every job; `GET /receipts?limit=N` now returns the same receipt ids that `GET /receipts/{id}` opens; (2) the staff session cookie is Secure behind Railway's TLS proxy (`X-Forwarded-Proto`), so `GCON_FORCE_HTTPS` stays unset; (3) an unknown email costs the same login time as a real one (staff and customers), and a missing or non-text staff password is a 422, not a 500; (4) `limit` on `/jobs`, `/receipts` and `/telemetry/events` must be 1 to 500 (the default listing is unchanged, because the Evidence and Activity pages rely on it); (5) job containers get a memory cap by default (90% of the machine's RAM, `GCON_JOB_DOCKER_MEMORY_LIMIT` to change it). No default CPU cap: Docker refuses `--cpus` above the host's cores.
 
 **Decide now (cheap while additive, costly later)**
 - [ ] List routes return bare arrays with no paging beyond `limit`
