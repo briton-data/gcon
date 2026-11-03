@@ -85,5 +85,7 @@ class TestOwnerlessKeys:
         user = management.create_user("Temp", "temp@gcon.example", role="Owner", organization_id=None)
         key = management.create_api_key("temp", user["user_id"], scopes=SCOPES)["secret"]
         management.delete_user(user["user_id"])
-        assert client.get("/jobs", headers=_h(key)).status_code == 403
-        assert client.post(f"/jobs/{job_id}/cancel", headers=_h(key)).status_code == 403
+        # Deleting the user revokes their keys, so the key is refused as an invalid key (401) before any
+        # route is reached. (It used to stay valid and be refused only on customer routes, with 403.)
+        assert client.get("/jobs", headers=_h(key)).status_code == 401
+        assert client.post(f"/jobs/{job_id}/cancel", headers=_h(key)).status_code == 401

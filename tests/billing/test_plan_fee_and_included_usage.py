@@ -11,6 +11,7 @@ from gcon.billing.pricing import PricingConfig
 from gcon.cluster.coordinator import GCONCoordinator
 from gcon.management.management_layer import ManagementLayer
 from gcon.persistence.control_plane import ControlPlane
+from tests.support.billing_history import backdate_plan_prices
 
 OWNER = SimpleNamespace(name="Olive", role="Owner")
 START, END = "2026-01-01T00:00:00+00:00", "2026-02-01T00:00:00+00:00"
@@ -32,6 +33,7 @@ def stack(tmp_path):
     coordinator = GCONCoordinator(control_plane=ControlPlane(path=str(tmp_path / "cp.db")))
     management = ManagementLayer(coordinator=coordinator, db_path=str(tmp_path / "m.db"))
     management.set_plan_limits("Pro", 600, 50, included_usage_cents=2000, monthly_fee_cents=4900, actor=OWNER)
+    backdate_plan_prices(management)      # these prices have been in place for the months the tests bill
     yield coordinator, management
     coordinator.shutdown()
 
