@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
@@ -119,6 +120,24 @@ class ReceiptRepository:
             "SELECT * FROM receipts WHERE job_id = ? ORDER BY uploaded_at", (job_id,)
         )
         return [self._row_to_dict(r) for r in rows]
+
+    def find_for_org_by_payload_id(self, payload_receipt_id: str, org_id: str) -> Optional[Dict[str, Any]]:
+        """The receipt whose own id (the `receipt_id` inside its payload, which is what a job's receipt_id refers to; the
+        row's `receipt_id` is a different, database-minted id) is `payload_receipt_id`, among ONE organization's receipts.
+        The query narrows to that organization and to rows that mention the id, so a customer's lookup never reads the
+        whole table. None if there is no match or the id is not the plain token a receipt id always is."""
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{1,100}", payload_receipt_id or ""):
+            return None
+        rows = self.db.query(
+            "SELECT r.* FROM receipts r JOIN jobs j ON j.job_id = r.job_id "
+            "WHERE j.org_id = ? AND r.payload_json LIKE ? ORDER BY r.uploaded_at DESC",
+            (org_id, f'%"receipt_id": "{payload_receipt_id}"%'),
+        )
+        for row in rows:
+            found = self._row_to_dict(row)
+            if found["payload"].get("receipt_id") == payload_receipt_id:       # LIKE treats _ as a wildcard: confirm exactly
+                return found
+        return None
 
     def search_paginated(
         self, verified: bool = None, search: str = None, org_id: str = None,
