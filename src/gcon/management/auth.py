@@ -106,6 +106,20 @@ def verify_password(password, stored_hash):
     return hmac.compare_digest(digest.hex(), expected_hex)
 
 
+_DECOY_HASH = None
+
+
+def decoy_password_check(password):
+    """Spend the time a real password check takes, for a login with no account behind it, and return False. Without this an
+    unknown email is refused in under a millisecond while a real one takes ~80 ms, which tells an attacker which addresses
+    have accounts."""
+    global _DECOY_HASH
+    if _DECOY_HASH is None:
+        _DECOY_HASH = hash_password("a password nobody has")
+    verify_password(password if isinstance(password, str) else "", _DECOY_HASH)
+    return False
+
+
 class SessionManager:
     """
     Session store mapping opaque tokens to user ids. Backed by the

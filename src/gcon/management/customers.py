@@ -23,7 +23,7 @@ exists, with zero extra wiring, simply by sharing that same id.
 from datetime import datetime, UTC
 from uuid import uuid4
 
-from .auth import hash_password, verify_password
+from .auth import hash_password, verify_password, decoy_password_check
 from ..storage.database import Database
 
 VALID_CUSTOMER_STATUSES = ["Active", "Disabled"]
@@ -136,9 +136,9 @@ class CustomerUserRegistry:
         single generic outcome so a login form can't be used to
         enumerate which emails have accounts."""
         user = self.get_user_by_email(email)
-        if user is None or user.status != "Active":
-            return None
-        if not user.check_password(password):
+        # Always pay for one password check, so the time taken does not reveal an unknown or disabled account.
+        password_ok = user.check_password(password) if user is not None else decoy_password_check(password)
+        if user is None or not password_ok or user.status != "Active":
             return None
         user.last_active = datetime.now(UTC)
         self._persist(user)
