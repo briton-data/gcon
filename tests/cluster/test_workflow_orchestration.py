@@ -170,16 +170,18 @@ def test_job_id_clash_rejects_the_whole_workflow_before_anything_runs(coord):
         coord.submit_workflow(make_workflow("wf-two", {"shared": OK}, []))   # same id in another workflow
 
 
-def test_a_job_the_coordinator_refuses_fails_the_workflow_with_the_reason(coord):
+def test_a_job_held_back_by_the_concurrent_job_cap_waits_instead_of_failing_the_workflow(coord):
     coord._max_concurrent_jobs_per_org = 1                # per-org cap: one job in flight
     coord.pause_scheduler()                               # keep r1 pending so the cap is hit
     wf = make_workflow("wf-limit", {"r1": OK, "r2": OK, "after": OK}, [("r2", "after")], org_id="acme")
     state = coord.submit_workflow(wf)                     # returns normally: no half-built workflow, no 500
-    assert "r2" in state.errors and "concurrent-job limit" in state.errors["r2"]
-    assert state.job_states["r2"] == "FAILED" and state.job_states["after"] == "BLOCKED"
-    assert state.job_states["r1"] == "RUNNING" and state.status == "FAILED"
-    assert "r2" not in coord.jobs                          # the refused job was never created
-    assert state.summary()["errors"]["r2"] == state.errors["r2"]
+    # A cap is about timing, not a verdict on the job: r2 waits (READY) and goes in when room appears, so nothing
+    # downstream is blocked and the workflow is still running. (Cap refusals used to fail it here; the full
+    # behaviour is in test_workflow_cap_and_size_and_idempotency.py.)
+    assert state.job_states["r1"] == "RUNNING" and state.job_states["r2"] == "READY"
+    assert state.job_states["after"] == "PENDING" and state.status == "RUNNING"
+    assert not state.errors and not state.failed_jobs
+    assert "r2" not in coord.jobs                          # not created until it is let in
 
 
 # ------------------------------------------------------------- restart
