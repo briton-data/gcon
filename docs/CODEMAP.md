@@ -19,7 +19,7 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 
 ## Customer API routes (organization API key)
 
-39 routes. Scopes used: `Submit workflows`, `View monitoring`.
+41 routes. Scopes used: `Submit workflows`, `View monitoring`.
 
 | Method | Path | Summary |
 |---|---|---|
@@ -38,6 +38,8 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 | GET | `/billing/invoices/{invoice_id}` | Get one of your organization's invoices |
 | GET | `/billing/pricing` | Current price list |
 | GET | `/billing/usage` | Preview your usage and charges for a period |
+| GET | `/callback-secret` | Whether your organization has a callback signing secret |
+| POST | `/callback-secret` | Create or rotate your organization's callback signing secret |
 | GET | `/cluster` | Get current cluster state |
 | GET | `/enroll/ca` | The coordinator's CA certificate and its fingerprint (public) |
 | GET | `/health` | Get overall cluster health |
@@ -226,7 +228,7 @@ Panels (`templates/panels/`): `client_heatmap.html`, `cluster_health.html`, `clu
 
 ## Database
 
-Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 3 `billing_staking_webhooks_ha_retention`, 4 `receipt_verification_and_uploaded_at_indexes`, 5 `org_scoped_enroll_tokens`, 6 `telemetry_events`, 7 `node_enrollment_audit`, 8 `job_submission_idempotency_keys`, 9 `node_ed25519_public_key`, 10 `observability_history_and_incidents`, 11 `incident_ownership`, 12 `workflows`, 13 `job_client_reference_and_idempotency_fingerprint`, 14 `org_shared_pool_settings`, 15 `enroll_token_expiry_and_use_limit`, 16 `invoice_line_item_exact_price_and_order`, 17 `node_archived_at`, 18 `hosted_fleet_and_worker_leases`.
+Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 3 `billing_staking_webhooks_ha_retention`, 4 `receipt_verification_and_uploaded_at_indexes`, 5 `org_scoped_enroll_tokens`, 6 `telemetry_events`, 7 `node_enrollment_audit`, 8 `job_submission_idempotency_keys`, 9 `node_ed25519_public_key`, 10 `observability_history_and_incidents`, 11 `incident_ownership`, 12 `workflows`, 13 `job_client_reference_and_idempotency_fingerprint`, 14 `org_shared_pool_settings`, 15 `enroll_token_expiry_and_use_limit`, 16 `invoice_line_item_exact_price_and_order`, 17 `node_archived_at`, 18 `hosted_fleet_and_worker_leases`, 19 `workflow_submission_idempotency_keys`.
 
 ### Control plane (`cp.db`)
 
@@ -257,6 +259,7 @@ Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 
 - `webhook_deliveries`(delivery_id, subscription_id, org_id, url, secret, job_id, event_type, payload_json, status, attempt_count, response_code, last_error, created_at, last_attempt_at, next_attempt_at)
 - `webhook_subscriptions`(subscription_id, org_id, url, secret, event_types_json, active, created_at)
 - `worker_leases`(lease_id, node_id, org_id, state, requested_by, started_at, last_activity_at, ending_at, ended_at, end_reason, ended_by, sanitize_result)
+- `workflow_submission_idempotency_keys`(org_id, idempotency_key, workflow_id, request_hash, created_at)
 - `workflows`(workflow_id, name, org_id, created_by, status, definition_json, state_json, created_at, updated_at)
 
 ### Management (users, organizations, API keys)
@@ -320,6 +323,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `GCON_DB_PATH` — `scripts/ci_bootstrap_key.py`, `scripts/gen_codemap.py`, `src/gcon/config.py`, `src/gcon/management/management_layer.py`
 - `GCON_DB_RETENTION_DAYS` — `src/gcon/persistence/retention.py`
 - `GCON_ENROLL_ADDRESS` — `scripts/run_worker.py`
+- `GCON_ENROLL_AUDIT_REJECTED_KEEP` — `src/gcon/persistence/repositories/node_enrollment_audit.py`
 - `GCON_ENROLL_INSECURE` — `scripts/run_worker.py`, `src/gcon/transport/grpc_transport.py`
 - `GCON_ENROLL_RATE_OVERALL` — `src/gcon/transport/grpc_transport.py`
 - `GCON_ENROLL_RATE_PER_SOURCE` — `src/gcon/transport/grpc_transport.py`
@@ -364,6 +368,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `GCON_MAX_JOB_OUTPUT_BYTES` — `src/gcon/execution/output_limits.py`
 - `GCON_MAX_RECEIPTS_IN_MEMORY` — `src/gcon/cluster/coordinator.py`
 - `GCON_MAX_TELEMETRY_EVENTS_IN_MEMORY` — `src/gcon/telemetry.py`
+- `GCON_MAX_WORKFLOW_JOBS` — `src/gcon/workflow/workflow_engine.py`
 - `GCON_METRICS_RETENTION_HOURS` — `src/gcon/monitoring/observability.py`
 - `GCON_METRICS_SNAPSHOT_INTERVAL_SECONDS` — `src/gcon/monitoring/observability.py`
 - `GCON_MIN_NODE_STAKE` — `src/gcon/execution/staking.py`
@@ -388,6 +393,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `GCON_RECONNECT_BACKOFF_MULTIPLIER` — `src/gcon/transport/config.py`
 - `GCON_RECONNECT_INITIAL_BACKOFF_SECONDS` — `src/gcon/transport/config.py`
 - `GCON_RECONNECT_MAX_BACKOFF_SECONDS` — `src/gcon/transport/config.py`
+- `GCON_REQUIRE_CALLBACK_SECRET` — `src/gcon/api/api_v1.py`
 - `GCON_RETENTION_SWEEP_INTERVAL_SECONDS` — `src/gcon/cluster/coordinator.py`
 - `GCON_SANDBOX_POLICY` — `scripts/run_worker.py`, `src/gcon/api/api_v1.py`, `src/gcon/cluster/coordinator.py`, `src/gcon/cluster/scheduler.py`, `src/gcon/execution/agent.py`, `src/gcon/transport/remote_node.py`
 - `GCON_SCHEDULER_MAX_RESTARTS` — `src/gcon/cluster/coordinator.py`
@@ -413,6 +419,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `GCON_USAGE_REPORT_PATH` — `src/gcon/cluster/coordinator.py`, `src/gcon/execution/agent.py`, `src/gcon/execution/docker_executor.py`
 - `GCON_USAGE_WRITE_INTERVAL_SECONDS` — `src/gcon/management/write_throttle.py`
 - `GCON_WEBHOOK_ALLOW_PRIVATE_TARGETS` — `src/gcon/transport/url_safety.py`
+- `GCON_WEBHOOK_LEGACY_SIGNATURE` — `src/gcon/transport/webhooks.py`
 - `GCON_WEBHOOK_MAX_ATTEMPTS` — `src/gcon/transport/webhooks.py`
 - `GCON_WEBHOOK_TIMEOUT_SECONDS` — `src/gcon/transport/webhooks.py`
 - `GCON_WEB_BASE_URL` — `src/gcon/api/api_v1.py`, `src/gcon/management/mailer.py`
@@ -424,7 +431,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `tests/` (2): `test_codemap_current.py`, `test_gcon.py`
 - `tests/api/` (33): `test_abuse_controls.py`, `test_account_routes.py`, `test_api_cors_retry_after.py`, `test_api_rate_limit.py`, `test_artifact_scoping.py`, `test_billing_routes.py`, `test_cancel_pending_job.py`, `test_clear_jobs.py`, `test_cluster_metrics_scoping.py`, `test_command_meaning.py`, `test_command_rules_api.py`, `test_customer_auth_flow.py`, `test_enroll_ca_route.py`, `test_evicted_lookups_and_limits.py`, `test_health_is_scoped.py`, `test_job_and_receipt_filters.py`, `test_job_attempts_route.py`, `test_job_cancel_retry_org_isolation.py`, `test_job_submission_idempotency.py`, `test_login_hardening.py`, `test_node_enrollment_history.py`, `test_openapi_contract.py`, `test_org_required.py`, `test_password_reset_email.py`, `test_plans_api.py`, `test_policy_rejection_http.py`, `test_receipts_org_isolation.py`, `test_server_minted_job_ids.py`, `test_shared_pool_route.py`, `test_staff_plan_routes.py`, `test_verify_and_callback.py`, `test_worker_gate.py`, `test_worker_lease_routes.py`
 - `tests/billing/` (5): `test_billing_hardening.py`, `test_invoicing.py`, `test_invoicing_preview.py`, `test_plan_fee_and_included_usage.py`, `test_plan_terms_at_period_start.py`
-- `tests/cluster/` (23): `test_assurance_integration.py`, `test_coordinator_full.py`, `test_job_rules.py`, `test_job_runner_guard.py`, `test_job_verification.py`, `test_live_gpu_pipeline.py`, `test_max_job_attempts.py`, `test_org_isolation.py`, `test_quarantine.py`, `test_replicated_stale_attempt.py`, `test_restart_recovery.py`, `test_sandbox_boundary.py`, `test_sandbox_policy.py`, `test_scheduler_log_flood.py`, `test_scheduler_no_eligible_node.py`, `test_shared_pool.py`, `test_submission_policy_gate.py`, `test_telemetry_lifecycle.py`, `test_untrusted_input_cannot_break_dispatch.py`, `test_worker_leases.py`, `test_worker_lost_mid_job.py`, `test_workflow_orchestration.py`, `test_workflow_plan_rules_up_front.py`
+- `tests/cluster/` (25): `test_assurance_integration.py`, `test_concurrency_cap_race.py`, `test_coordinator_full.py`, `test_job_rules.py`, `test_job_runner_guard.py`, `test_job_verification.py`, `test_live_gpu_pipeline.py`, `test_max_job_attempts.py`, `test_org_isolation.py`, `test_quarantine.py`, `test_replicated_stale_attempt.py`, `test_restart_recovery.py`, `test_sandbox_boundary.py`, `test_sandbox_policy.py`, `test_scheduler_log_flood.py`, `test_scheduler_no_eligible_node.py`, `test_shared_pool.py`, `test_submission_policy_gate.py`, `test_telemetry_lifecycle.py`, `test_untrusted_input_cannot_break_dispatch.py`, `test_worker_leases.py`, `test_worker_lost_mid_job.py`, `test_workflow_cap_and_size_and_idempotency.py`, `test_workflow_orchestration.py`, `test_workflow_plan_rules_up_front.py`
 - `tests/dashboard/` (2): `test_verify_pillar_metrics.py`, `test_websocket_hardening.py`
 - `tests/execution/` (13): `test_assurance.py`, `test_attestation_pinning.py`, `test_command_check.py`, `test_docker_executor.py`, `test_docker_hardening.py`, `test_docker_run_isolation.py`, `test_gpu_sampling.py`, `test_job_run_as_user.py`, `test_output_cap.py`, `test_replication_compare.py`, `test_sanitize_host.py`, `test_worker_identity.py`, `test_worker_script_secrets.py`
 - `tests/integration/` (1): `test_multiprocess_fault_injection.py`
@@ -433,7 +440,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `tests/persistence/` (11): `test_control_plane.py`, `test_durability_warnings.py`, `test_job_deletion_keeps_receipts.py`, `test_lease_race.py`, `test_node_enrollment_audit.py`, `test_node_registration_keeps_identity.py`, `test_on_node_disconnected.py`, `test_postgres_backend.py`, `test_volume_paths.py`, `test_webhook_secret_encryption.py`, `test_webhook_unreadable_secret_does_not_stall_delivery.py`
 - `tests/sdk/` (4): `test_client_billing.py`, `test_client_leases.py`, `test_client_new_methods.py`, `test_client_plan.py`
 - `tests/support/` (1): `test_utils.py`
-- `tests/transport/` (15): `test_config.py`, `test_control_and_enroll_hardening.py`, `test_coordinator_receipt_attempt_linking.py`, `test_enroll_rpc.py`, `test_enroll_tls.py`, `test_enroll_token_limits.py`, `test_enroll_worker_cap.py`, `test_fleet_enroll_and_sanitize.py`, `test_grpc_tenancy.py`, `test_grpc_transport.py`, `test_local_transport.py`, `test_restart_recovery_late_completion.py`, `test_tls.py`, `test_url_safety.py`, `test_worker_attestation.py`
+- `tests/transport/` (17): `test_config.py`, `test_control_and_enroll_hardening.py`, `test_coordinator_receipt_attempt_linking.py`, `test_enroll_inputs_and_audit.py`, `test_enroll_rpc.py`, `test_enroll_tls.py`, `test_enroll_token_limits.py`, `test_enroll_worker_cap.py`, `test_fleet_enroll_and_sanitize.py`, `test_grpc_tenancy.py`, `test_grpc_transport.py`, `test_local_transport.py`, `test_restart_recovery_late_completion.py`, `test_tls.py`, `test_url_safety.py`, `test_webhook_signing_and_callback_secret.py`, `test_worker_attestation.py`
 
 ## Modules
 
@@ -589,6 +596,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 
 - `__init__.py` — GCON Transport Layer.
 - `agent_daemon.py` — AgentDaemon — the persistent process that runs on every worker
+- `callback_secrets.py` — An organization's callback signing secret.
 - `config.py` — Configuration precedence for the transport layer: environment
 - `errors.py`
 - `grpc_transport.py` — GrpcTransport — the real, network `Transport` implementation.

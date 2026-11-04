@@ -241,8 +241,9 @@ separate upload step.
   coordinator (not filepaths) — folded into the receipt's `input_hash`
   at completion.
 - `callback_url`: GCON POSTs a signed JSON payload here on completion/
-  failure/cancellation instead of requiring the submitter to poll (HMAC
-  signature in `X-GCON-Signature`).
+  failure/cancellation instead of requiring the submitter to poll. It is
+  signed with your organization's callback signing secret (see
+  [Callback signing secret](#callback-signing-secret) below).
 
 **Not exposed here:** `verify` (replicated-execution verification —
 dispatch to N nodes, compare results — see `docs/ARCHITECTURE.md`'s
@@ -299,6 +300,50 @@ of artifact objects; fetch `/artifacts` separately for file details.
 ```
 **Errors:** `400` if the job can't be cancelled (already finished, etc.).
 
+#### Callback signing secret
+
+| Method | Path | Scope | Summary |
+|---|---|---|---|
+| `GET` | `/callback-secret` | `Submit workflows` | Whether your organization has one (never the secret itself) |
+| `POST` | `/callback-secret` | `Submit workflows` | Create it, or replace it with a new one |
+
+`POST /callback-secret` returns `{ "secret": "...", "created_at": "..." }`. **The secret is shown only in that
+response**; keep it, because it can be replaced but never read again. Replacing it applies to callbacks queued
+from then on; one already queued keeps the secret it was queued with. Both endpoints need a key that belongs to
+an organization (`403` otherwise).
+
+Every callback carries:
+
+| Header | Meaning |
+|---|---|
+| `X-GCON-Timestamp` | Unix seconds when this attempt was sent (fresh on every retry). |
+| `X-GCON-Signature-V2` | `sha256=` + HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed by your secret. |
+| `X-GCON-Event`, `X-GCON-Delivery` | The event, and a delivery id you can use to ignore a retry you already handled. |
+| `X-GCON-Signature` | The original signature, over the body alone. Still sent so existing receivers keep working; it has no timestamp and so no replay protection. Verify `X-GCON-Signature-V2` instead. |
+
+A receiver must (1) recompute the HMAC over the **raw** body bytes with the timestamp, compare in constant time,
+and (2) reject a delivery whose timestamp is more than about five minutes from its own clock, which is what stops
+a captured delivery being replayed later:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, raw_body: bytes, timestamp: str, signature: str, tolerance: int = 300) -> bool:
+    try:
+        if abs(time.time() - int(timestamp)) > tolerance:
+            return False
+    except (TypeError, ValueError):
+        return False
+    expected = "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+```
+
+An organization that has not created a secret still receives its callbacks, but they are signed with a random
+secret nobody can check, so **create one before relying on a `callback_url`**. The operator can make that
+mandatory with `GCON_REQUIRE_CALLBACK_SECRET=1`, after which a `callback_url` is refused (`400`) until the
+organization has a secret, and can stop sending the original signature header with
+`GCON_WEBHOOK_LEGACY_SIGNATURE=0`.
+
 ---
 
 ### Workflows
@@ -340,7 +385,22 @@ label → id map. Workflow jobs run under the same sandbox rule as `POST /jobs`.
   "jobs": { "download": "job_a1...", "train": "job_b2..." }
 }
 ```
-**Errors:** `400` for an invalid DAG (cycle, unknown dependency, etc.).
+**`Idempotency-Key` header (optional, up to 255 printable characters):** works as for `POST /jobs`. Retrying with
+the same key returns the workflow the first request created (`Idempotent-Replayed: true`, same `workflow_id` and
+`jobs` map) instead of creating another. Keys are scoped to your organization, survive restarts, and are separate
+from job keys (a key used for a job and the same text used for a workflow do not clash). Re-using a key for a
+*different* workflow (different jobs, commands or dependencies; the `name` and `workflow_id` label do not count)
+is a `422`. A request that is refused (`400`) does not use up its key.
+
+**Limits:**
+- A workflow can have at most 200 jobs (`GCON_MAX_WORKFLOW_JOBS`); more is a `400` before anything is created.
+- Every job in the workflow is checked against your plan's rules (allowed programs) **when you submit**, so a job
+  your plan does not allow refuses the whole workflow with a `400` that names it, instead of failing it later.
+- Your plan's limit on concurrent jobs does not fail a workflow. A job the limit holds back waits (it stays
+  ready, not failed) and starts as your running jobs finish, including after a restart.
+
+**Errors:** `400` for an invalid DAG (cycle, unknown dependency, etc.), too many jobs, or a job your plan does
+not allow. `422` for an `Idempotency-Key` re-used for a different workflow.
 
 #### `GET /workflows`
 
