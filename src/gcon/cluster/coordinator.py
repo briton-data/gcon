@@ -1046,16 +1046,15 @@ class GCONCoordinator:
             if refusal:
                 raise WorkersRequiredError(refusal)
 
-        if org_id is not None:
-            cap = self._concurrent_job_cap(org_id)
-            if cap > 0:
-                in_flight = self.count_inflight_jobs(org_id)
-                if in_flight >= cap:
-                    raise ConcurrentJobLimitError(
-                        f"org '{org_id}' already has {in_flight} job(s) pending/running, "
-                        f"at its concurrent-job limit of {cap} -- wait for one to "
-                        "finish before submitting more."
-                    )
+        cap = self._concurrent_job_cap(org_id) if org_id is not None else 0   # resolved once, outside the lock
+        if cap > 0:
+            in_flight = self.count_inflight_jobs(org_id)
+            if in_flight >= cap:
+                raise ConcurrentJobLimitError(
+                    f"org '{org_id}' already has {in_flight} job(s) pending/running, "
+                    f"at its concurrent-job limit of {cap} -- wait for one to "
+                    "finish before submitting more."
+                )
 
         with self.jobs_lock:
             if job_id in self.jobs:
@@ -1067,7 +1066,20 @@ class GCONCoordinator:
             artifact_ids.append(artifact_id)
         
         
-        with self.jobs_lock:    
+        # The cap and the duplicate-id check were made above, before the artifacts were registered, so they are
+        # only a quick refusal for the common case. They are made again here, in the same lock hold that inserts
+        # the job: otherwise simultaneous submissions all see room and all get in.
+        with self.jobs_lock:
+            if job_id in self.jobs:
+                raise ValueError(f"Job '{job_id}' already exists.")
+            if cap > 0:
+                in_flight = self.count_inflight_jobs(org_id)
+                if in_flight >= cap:
+                    raise ConcurrentJobLimitError(
+                        f"org '{org_id}' already has {in_flight} job(s) pending/running, "
+                        f"at its concurrent-job limit of {cap} -- wait for one to "
+                        "finish before submitting more."
+                    )
             self.jobs[job_id] = {
                 "command": command,
                 "node_id": None,
@@ -2110,6 +2122,17 @@ class GCONCoordinator:
         return dashboard
     
     def _advance_workflow(self, job_id, job, success, cancelled=None):
+        """A job ended: advance its workflow's DAG (if it has one), then give any workflow job of the same
+        organization that the concurrent-job cap was holding back a chance, since this job's slot is free."""
+        self._advance_workflow_dag(job_id, job, success, cancelled)
+        org_id = job.get("org_id")
+        if org_id is not None:
+            try:
+                self.workflow_engine.retry_deferred(org_id)
+            except Exception as e:
+                _log_line(f"[WARN] retrying deferred workflow jobs for org '{org_id}' failed: {e}")
+
+    def _advance_workflow_dag(self, job_id, job, success, cancelled=None):
         """
         If `job` belongs to a workflow, tell the workflow engine it
         finished so the DAG actually advances -- dispatching newly-

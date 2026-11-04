@@ -109,6 +109,20 @@ class PresentationLayer:
             request_hash=request_hash,
         )
 
+    def get_workflow_idempotency_record(self, org_id, idempotency_key):
+        """{workflow_id, request_hash, created_at} for (org_id, key), or None."""
+        if self.coordinator.control_plane is None:
+            return None
+        return self.coordinator.control_plane.workflow_idempotency_keys.get(org_id, idempotency_key)
+
+    def record_workflow_idempotency_key(self, org_id, idempotency_key, workflow_id, request_hash=None):
+        if self.coordinator.control_plane is None:
+            return
+        self.coordinator.control_plane.workflow_idempotency_keys.record(
+            org_id, idempotency_key, workflow_id, datetime.now(UTC).isoformat(),
+            request_hash=request_hash,
+        )
+
     def get_job_attempts(self, job_id):
         """
         Durable dispatch-attempt history for one job -- see

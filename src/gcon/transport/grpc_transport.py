@@ -31,6 +31,7 @@ itself opened, without polling.
 from __future__ import annotations
 
 import collections
+import ipaddress
 import logging
 import os
 import queue
@@ -158,27 +159,30 @@ def _peer_address(context: grpc.ServicerContext) -> Optional[str]:
     if not peer:
         return None
 
+    candidate = None
     if peer.startswith("ipv6:"):
         # "ipv6:[2001:db8::1]:54321" -> "2001:db8::1" on Linux/macOS.
         # On Windows, gRPC's Python implementation percent-encodes the
         # brackets instead: "ipv6:%5B::1%5D:10250" (%5B/%5D = [/]) --
         # confirmed on a real Windows run, where the unencoded-only
         # check below silently fell through and returned the whole
-        # garbled "%5B::1%5D:10250" string as if it were an IP. This
-        # means node addresses tracked via IPv6 loopback on Windows
-        # were already wrong before this fix; nothing had asserted on
-        # the exact value precisely enough to catch it until
-        # node_enrollment_audit's source_ip did. unquote() is a
-        # harmless no-op on the already-literal Linux/macOS form.
+        # garbled "%5B::1%5D:10250" string as if it were an IP. unquote()
+        # is a harmless no-op on the already-literal Linux/macOS form.
         rest = unquote(peer[len("ipv6:"):])
-        if rest.startswith("[") and "]" in rest:
-            return rest[1:rest.index("]")]
-        return rest
-
-    if peer.startswith("ipv4:"):
+        candidate = rest[1:rest.index("]")] if rest.startswith("[") and "]" in rest else rest
+    elif peer.startswith("ipv4:"):
         # "ipv4:203.0.113.5:54321" -> "203.0.113.5"
         rest = peer[len("ipv4:"):]
-        return rest.rsplit(":", 1)[0] if ":" in rest else rest
+        candidate = rest.rsplit(":", 1)[0] if ":" in rest else rest
+
+    if candidate is not None:
+        # Whatever was cut out must actually BE an address. This value is stored in the audit trail and keys the
+        # enroll throttle, so a half-parsed string is worse than none.
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return None
+        return candidate
 
     # Unix socket or another scheme gRPC may report locally
     # ("unix:/tmp/gcon.sock") -- not a routable address, so don't
@@ -473,6 +477,13 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         # Before any database or crypto work: this port is reachable without a certificate.
         if not self._enroll_throttle.allow(source_ip):
             return pb.EnrollResponse(accepted=False, reason="too many enrollment attempts; try again in a minute")
+        # What an audit row or log line may say about the claimed node_id: only a well-formed one, never the raw
+        # text of a stranger's request.
+        try:
+            tls.validate_node_id(request.node_id)
+            node_label = request.node_id
+        except ValueError:
+            node_label = "(unknown)" if not request.node_id else "(invalid)"
         org_id = None
         enroll_token_id = None
         # A fleet token enrolls a GCON-hosted worker: NO organization (a fleet token stores a marker where an
@@ -487,7 +498,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 unusable = self.control_plane.enroll_tokens.unusable_reason(token_row)
                 if unusable:
                     self.control_plane.node_enrollment_audit.record(
-                        node_id=request.node_id or "(unknown)", accepted=False,
+                        node_id=node_label, accepted=False,
                         org_id=None if is_fleet else token_row["org_id"], enroll_token_id=token_row["token_id"],
                         source_ip=source_ip, reason=unusable,
                     )
@@ -504,7 +515,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 # succeeded.
                 if self.control_plane is not None:
                     self.control_plane.node_enrollment_audit.record(
-                        node_id=request.node_id or "(unknown)",
+                        node_id=node_label,
                         accepted=False, source_ip=source_ip,
                         reason="invalid or missing enroll token",
                     )
@@ -517,6 +528,14 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     reason="node_id is required",
                 )
             return pb.EnrollResponse(accepted=False, reason="node_id is required")
+        if node_label == "(invalid)":
+            reason = str(tls.NODE_ID_RULE)
+            if self.control_plane is not None:
+                self.control_plane.node_enrollment_audit.record(
+                    node_id=node_label, accepted=False, org_id=org_id,
+                    enroll_token_id=enroll_token_id, source_ip=source_ip, reason=reason,
+                )
+            return pb.EnrollResponse(accepted=False, reason=reason)
         # The name of a hosted-fleet worker can only be enrolled again with a fleet token. Without this, anyone
         # holding an organization's token or the shared one could enroll under a hosted worker's name and take
         # over its identity (and the customer's jobs it is running).

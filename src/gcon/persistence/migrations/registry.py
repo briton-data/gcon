@@ -714,4 +714,25 @@ MIGRATIONS: List[Migration] = [
             "CREATE INDEX idx_worker_leases_org ON worker_leases (org_id, state)",
         ],
     ),
+    Migration(
+        version=19,
+        name="workflow_submission_idempotency_keys",
+        up_sql=[
+            # Idempotency-Key for POST /workflows, the same idea as job_submission_idempotency_keys (version 8)
+            # but its own table: that one points at a job with ON DELETE CASCADE, and a workflow is not a job
+            # (and when the organization's concurrent-job cap holds every job back, none exists yet). No foreign
+            # key: if the workflow is later gone, the key simply no longer refers to anything and a retry
+            # makes the workflow afresh.
+            """
+            CREATE TABLE workflow_submission_idempotency_keys (
+                org_id           TEXT NOT NULL DEFAULT '',
+                idempotency_key  TEXT NOT NULL,
+                workflow_id      TEXT NOT NULL,
+                request_hash     TEXT,
+                created_at       TEXT NOT NULL,
+                PRIMARY KEY (org_id, idempotency_key)
+            )
+            """,
+        ],
+    ),
 ]

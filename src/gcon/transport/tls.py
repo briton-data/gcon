@@ -41,6 +41,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -335,6 +336,7 @@ def sign_agent_csr(
     afterward (see grpc_transport.py's _peer_org_id), not a
     self-reported field a node could change per-request.
     """
+    validate_node_id(node_id)
     csr = x509.load_pem_x509_csr(csr_pem)
     if not csr.is_signature_valid:
         raise ValueError("CSR signature is invalid")
@@ -387,6 +389,20 @@ def sign_agent_csr(
     return cert.public_bytes(serialization.Encoding.PEM)
 
 
+# A node_id becomes a certificate's Common Name and DNS name, part of a file name, a log line and an audit row, and
+# anyone who can reach the enroll port chooses it. So it has one fixed shape: 1-64 characters (the longest a
+# Common Name can be), letters, digits, ".", "_" and "-", starting with a letter or digit.
+NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+NODE_ID_RULE = "node_id must be 1-64 characters: letters, digits, '.', '_' or '-', starting with a letter or digit"
+
+
+def validate_node_id(node_id: str) -> str:
+    """Return node_id unchanged if it has the permitted shape, else raise ValueError saying what is allowed."""
+    if not isinstance(node_id, str) or not NODE_ID_PATTERN.fullmatch(node_id):
+        raise ValueError(NODE_ID_RULE)
+    return node_id
+
+
 def issue_agent_cert(cert_dir: str, node_id: str) -> CertPaths:
     """
     The issued certificate's Common Name is the node_id. The
@@ -396,6 +412,7 @@ def issue_agent_cert(cert_dir: str, node_id: str) -> CertPaths:
     -- a `Register` call claiming a different node_id than its own
     certificate's CN is rejected.
     """
+    validate_node_id(node_id)          # it is part of a file name below
     return _issue_leaf_cert(cert_dir, common_name=node_id, file_prefix=f"agent-{node_id}")
 
 

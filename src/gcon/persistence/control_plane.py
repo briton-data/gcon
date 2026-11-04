@@ -29,6 +29,7 @@ from gcon.persistence.repositories import (
     TelemetryRepository,
     NodeEnrollmentAuditRepository,
     IdempotencyKeyRepository,
+    WorkflowIdempotencyKeyRepository,
     OrgPoolSettingsRepository,
     SharedPoolNodeRepository,
     FleetNodeRepository,
@@ -73,6 +74,7 @@ class ControlPlane:
         self.telemetry_events = TelemetryRepository(self.db)
         self.node_enrollment_audit = NodeEnrollmentAuditRepository(self.db)
         self.idempotency_keys = IdempotencyKeyRepository(self.db)
+        self.workflow_idempotency_keys = WorkflowIdempotencyKeyRepository(self.db)
         self.org_pool_settings = OrgPoolSettingsRepository(self.db)
         self.shared_pool_nodes = SharedPoolNodeRepository(self.db)
         self.fleet_nodes = FleetNodeRepository(self.db)

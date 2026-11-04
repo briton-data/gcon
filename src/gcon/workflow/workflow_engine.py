@@ -1,4 +1,6 @@
 import logging
+import os
+import threading
 from datetime import datetime, UTC
 
 from .workflow import Workflow
@@ -10,6 +12,17 @@ logger = logging.getLogger("gcon.workflow")
 # Workflow statuses that mean "a job did not succeed; the rest of the DAG
 # downstream of it will not run".
 _STOPPED = ("FAILED", "CANCELLED")
+
+DEFAULT_MAX_WORKFLOW_JOBS = 200
+
+
+def max_workflow_jobs() -> int:
+    """Most jobs one workflow may have (GCON_MAX_WORKFLOW_JOBS, default 200). Each job is a row, a DAG node and a
+    dependency check, and one request could otherwise ask for any number of them."""
+    try:
+        return max(1, int(os.environ.get("GCON_MAX_WORKFLOW_JOBS", DEFAULT_MAX_WORKFLOW_JOBS)))
+    except ValueError:
+        return DEFAULT_MAX_WORKFLOW_JOBS
 
 
 class WorkflowEngine:
@@ -26,6 +39,11 @@ class WorkflowEngine:
         self.workflows = {}
         self.dags = {}
         self.states = {}
+        # Workflows with a job the organization's concurrent-job cap is holding back (READY, not yet submitted).
+        self._deferred = set()
+        # Jobs are submitted from the thread that submits a workflow and from every thread that finishes a job; one
+        # lock keeps two of them from submitting the same READY job.
+        self._schedule_lock = threading.RLock()
         
         
     def submit_workflow(self, workflow: Workflow) -> WorkflowState:
@@ -36,6 +54,11 @@ class WorkflowEngine:
         initializes runtime state, and prepares it
         for execution.
         """
+    # Refuse an oversized workflow first, before any of it is looked at
+        limit = max_workflow_jobs()
+        if len(workflow.jobs) > limit:
+            raise ValueError(f"A workflow can have at most {limit} jobs ({len(workflow.jobs)} were submitted).")
+
     # Validate workflow definition
         workflow.validate()
 
@@ -82,6 +105,7 @@ class WorkflowEngine:
         return state
 
     def _forget(self, workflow_id):
+        self._deferred.discard(workflow_id)
         self.workflows.pop(workflow_id, None)
         self.dags.pop(workflow_id, None)
         self.states.pop(workflow_id, None)
@@ -138,11 +162,15 @@ class WorkflowEngine:
         """
         Schedule all jobs that are ready for execution.
         """
-        from gcon.cluster.coordinator import NotLeaderError
+        with self._schedule_lock:
+            self._schedule_ready_jobs_locked(workflow, state)
+
+    def _schedule_ready_jobs_locked(self, workflow: Workflow, state: WorkflowState):
+        from gcon.cluster.coordinator import NotLeaderError, ConcurrentJobLimitError
 
         # ready_jobs is a set, whose string order changes between processes
         # (hash randomization). Submit in the workflow's own job order so which
-        # job a per-org cap or a full queue refuses is deterministic.
+        # job a per-org cap or a full queue holds back is deterministic.
         for job_id in [j for j in workflow.jobs if j in state.ready_jobs]:
 
             job = workflow.get_job(job_id)
@@ -162,9 +190,15 @@ class WorkflowEngine:
                 )
             except NotLeaderError:
                 raise
+            except ConcurrentJobLimitError as e:
+                # The organization is at its concurrent-job cap. That is a matter of timing, not a verdict on this
+                # job: it stays READY and goes in when one of the organization's jobs finishes (see retry_deferred).
+                logger.info("workflow %s: job %s waits for room under the concurrent-job cap: %s",
+                            workflow.workflow_id, job_id, e)
+                continue
             except Exception as e:
-                # The coordinator refused this job (policy rejection, org
-                # concurrency limit, ...). Record why and fail the job and
+                # The coordinator refused this job for a reason that will not change (policy rejection, ...).
+                # Record why and fail the job and
                 # everything downstream, instead of leaving it READY forever
                 # or crashing the caller halfway through a DAG.
                 logger.warning("workflow %s: job %s was not accepted: %s",
@@ -178,7 +212,27 @@ class WorkflowEngine:
                 continue
 
             state.mark_running(job.job_id)
-            
+
+        if state.ready_jobs:
+            self._deferred.add(workflow.workflow_id)
+        else:
+            self._deferred.discard(workflow.workflow_id)
+
+    def retry_deferred(self, org_id):
+        """Try again the jobs of this organization's workflows that the concurrent-job cap held back. Called when any
+        of the organization's jobs ends, since that is when room appears."""
+        with self._schedule_lock:
+            for workflow_id in list(self._deferred):
+                workflow = self.workflows.get(workflow_id)
+                state = self.states.get(workflow_id)
+                if workflow is None or state is None or not state.ready_jobs:
+                    self._deferred.discard(workflow_id)
+                    continue
+                if org_id is not None and workflow.org_id != org_id:
+                    continue
+                self.schedule_ready_jobs(workflow, state)
+                self._persist(state)
+
     def process_completed_job(
         self,
         workflow: Workflow,

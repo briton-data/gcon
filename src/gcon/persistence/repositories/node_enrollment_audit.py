@@ -21,15 +21,30 @@ later, at Register().
 
 from __future__ import annotations
 
+import os
+import threading
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
 from gcon.persistence.db import ControlPlaneDatabase
 
 
+DEFAULT_REJECTED_KEEP = 10_000
+
+
 class NodeEnrollmentAuditRepository:
+    """
+    Rejected attempts are bounded: anyone who can reach the enroll port can generate them, so they are kept only up
+    to the newest GCON_ENROLL_AUDIT_REJECTED_KEEP rows (default 10000; 0 keeps them all). ACCEPTED enrollments, the
+    record of who brought a node online and under which organization, are never removed here.
+    """
+
+    _prune_every = 200          # rejected inserts between prunes; a prune is one bounded DELETE
+
     def __init__(self, db: ControlPlaneDatabase):
         self.db = db
+        self._rejected_since_prune = 0
+        self._prune_lock = threading.Lock()
 
     def record(
         self,
@@ -50,6 +65,33 @@ class NodeEnrollmentAuditRepository:
                 node_id, org_id, enroll_token_id, source_ip,
                 1 if accepted else 0, reason, datetime.now(UTC).isoformat(),
             ),
+        )
+        if not accepted:
+            with self._prune_lock:
+                self._rejected_since_prune += 1
+                due = self._rejected_since_prune >= self._prune_every
+                if due:
+                    self._rejected_since_prune = 0
+            if due:
+                self.prune_rejected()
+
+    def prune_rejected(self, keep: Optional[int] = None) -> None:
+        """Delete rejected attempts beyond the newest `keep` (default from the environment). Accepted rows are untouched."""
+        if keep is None:
+            try:
+                keep = int(os.environ.get("GCON_ENROLL_AUDIT_REJECTED_KEEP", DEFAULT_REJECTED_KEEP))
+            except ValueError:
+                keep = DEFAULT_REJECTED_KEEP
+        if keep <= 0:
+            return
+        self.db.execute(
+            """
+            DELETE FROM node_enrollment_audit
+            WHERE accepted = 0 AND id NOT IN (
+                SELECT id FROM node_enrollment_audit WHERE accepted = 0 ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (keep,),
         )
 
     def get_latest_for_node(self, node_id: str) -> Optional[Dict[str, Any]]:

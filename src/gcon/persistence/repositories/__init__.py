@@ -14,7 +14,7 @@ from gcon.persistence.repositories.leases import LeaseRepository
 from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
 from gcon.persistence.repositories.telemetry import TelemetryRepository
 from gcon.persistence.repositories.node_enrollment_audit import NodeEnrollmentAuditRepository
-from gcon.persistence.repositories.idempotency_keys import IdempotencyKeyRepository
+from gcon.persistence.repositories.idempotency_keys import IdempotencyKeyRepository, WorkflowIdempotencyKeyRepository
 from gcon.persistence.repositories.org_pool_settings import OrgPoolSettingsRepository
 from gcon.persistence.repositories.shared_pool_nodes import SharedPoolNodeRepository
 from gcon.persistence.repositories.fleet_nodes import FleetNodeRepository
@@ -30,6 +30,7 @@ __all__ = [
     "EnrollTokenRepository",
     "NodeEnrollmentAuditRepository",
     "IdempotencyKeyRepository",
+    "WorkflowIdempotencyKeyRepository",
     "OrgPoolSettingsRepository",
     "SharedPoolNodeRepository",
     "FleetNodeRepository",

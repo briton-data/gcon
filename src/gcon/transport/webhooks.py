@@ -7,8 +7,11 @@ Two independent ways to receive a callback, both landing in the same
   1. Per-job, ad-hoc: `POST /jobs` with `callback_url` set (see
      `api_v1.JobSubmitRequest.callback_url` / `jobs.callback_url`
      column). No standing registration needed -- the common case for
-     "notify me when this one batch finishes". Signed with a
-     per-delivery random secret (nothing durable to leak).
+     "notify me when this one batch finishes". Signed with the
+     organization's callback signing secret (callback_secrets.py),
+     which the organization can read once and verify against; an
+     organization that has not created one gets a random
+     per-delivery secret, which nobody can verify.
   2. Standing, org-level: `webhook_subscriptions`
      (`ControlPlane.webhooks.create_subscription`), matched by
      `event_types`, for an org that wants every job (or every
@@ -26,13 +29,18 @@ survive a crash the same way jobs/receipts do).
 
 Signing
 --------
-Every POST carries `X-GCON-Signature: sha256=<hex hmac>` over the
-raw JSON body, keyed by the subscription's (or ad-hoc delivery's)
-secret -- the same "prove you hold the shared secret, not just that
-you can produce a plausible-looking payload" primitive `verifier.py`
-already uses for receipts. `X-GCON-Event` carries the event type,
-`X-GCON-Delivery` the delivery_id, so a receiving endpoint can
-de-duplicate retried attempts by delivery_id.
+Every POST carries `X-GCON-Timestamp` (unix seconds, fresh on every attempt) and
+`X-GCON-Signature-V2: sha256=<hex hmac>`, an HMAC-SHA256 over `"<timestamp>.<raw JSON body>"` keyed by the
+subscription's secret, or, for a job's `callback_url`, by the organization's callback signing secret (see
+callback_secrets.py). The timestamp is part of what is signed, so a captured delivery cannot be replayed later:
+a receiver rejects one whose timestamp is more than a few minutes old (`verify_signature` does exactly that).
+This is the "prove you hold the shared secret, not just that you can produce a plausible-looking payload"
+primitive `verifier.py` already uses for receipts.
+
+The original `X-GCON-Signature: sha256=<hex hmac>` over the body alone is still sent so receivers written
+against it keep working while they move to V2. It carries no timestamp, so it offers no replay protection; set
+GCON_WEBHOOK_LEGACY_SIGNATURE=0 to stop sending it. `X-GCON-Event` carries the event type, `X-GCON-Delivery` the
+delivery_id, so a receiving endpoint can de-duplicate retried attempts by delivery_id.
 
 Retries
 --------
@@ -60,13 +68,42 @@ from datetime import datetime, timedelta, UTC
 from typing import Any, Dict, Optional
 
 from gcon.persistence.control_plane import ControlPlane
+from gcon.transport import callback_secrets
 from gcon.transport.url_safety import safe_urlopen
 
 logger = logging.getLogger(__name__)
 
 
+# How far a delivery's timestamp may be from the receiver's clock before verify_signature refuses it.
+SIGNATURE_TOLERANCE_SECONDS = 300
+
+
 def sign_payload(secret: str, body: bytes) -> str:
+    """The original signature: HMAC-SHA256 of the body alone. No timestamp, so no replay protection."""
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def sign_payload_v2(secret: str, timestamp: str, body: bytes) -> str:
+    """HMAC-SHA256 over "<timestamp>.<body>": the timestamp cannot be changed without breaking the signature."""
+    return "sha256=" + hmac.new(secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
+
+
+def verify_signature(secret: str, body: bytes, timestamp, signature,
+                     tolerance: int = SIGNATURE_TOLERANCE_SECONDS, now: Optional[float] = None) -> bool:
+    """For a receiving endpoint (or a test of one): True only if `signature` (the X-GCON-Signature-V2 header) is
+    valid for this body and `timestamp` (X-GCON-Timestamp), and the timestamp is within `tolerance` seconds of now.
+    Anything malformed is False, never an exception."""
+    try:
+        ts = int(timestamp)
+        if abs((time.time() if now is None else now) - ts) > tolerance:
+            return False
+        return hmac.compare_digest(sign_payload_v2(secret, str(ts), body), str(signature))
+    except (TypeError, ValueError):
+        return False
+
+
+def _legacy_signature_enabled() -> bool:
+    return os.environ.get("GCON_WEBHOOK_LEGACY_SIGNATURE", "1").strip().lower() not in ("0", "false", "no")
 
 
 def dispatch_job_event(
@@ -94,7 +131,9 @@ def dispatch_job_event(
 
     callback_url = job.get("callback_url")
     if callback_url:
-        secret = uuid.uuid4().hex  # ad-hoc: only needs to exist for this delivery's signature
+        # The organization's callback signing secret, which the receiver can verify against. An organization that
+        # has not created one gets a random per-delivery secret: delivery still works, but nobody can check it.
+        secret = (callback_secrets.get(control_plane, org_id) if org_id else None) or uuid.uuid4().hex
         control_plane.webhooks.enqueue_delivery(
             event_type=event_type, payload=payload, url=callback_url,
             secret=secret, subscription_id=None, org_id=org_id, job_id=job_id,
@@ -178,16 +217,18 @@ class WebhookDispatcher:
 
     def _attempt(self, delivery: Dict[str, Any]) -> None:
         body = json.dumps(delivery["payload"]).encode()
-        signature = sign_payload(delivery["secret"], body)
-        req = urllib.request.Request(
-            delivery["url"], data=body, method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-GCON-Signature": signature,
-                "X-GCON-Event": delivery["event_type"],
-                "X-GCON-Delivery": delivery["delivery_id"],
-            },
-        )
+        # Fresh on every attempt (a retry is a new delivery of the same event), and part of what is signed.
+        timestamp = str(int(time.time()))
+        headers = {
+            "Content-Type": "application/json",
+            "X-GCON-Timestamp": timestamp,
+            "X-GCON-Signature-V2": sign_payload_v2(delivery["secret"], timestamp, body),
+            "X-GCON-Event": delivery["event_type"],
+            "X-GCON-Delivery": delivery["delivery_id"],
+        }
+        if _legacy_signature_enabled():
+            headers["X-GCON-Signature"] = sign_payload(delivery["secret"], body)
+        req = urllib.request.Request(delivery["url"], data=body, method="POST", headers=headers)
         error: Optional[str] = None
         response_code: Optional[int] = None
         success = False

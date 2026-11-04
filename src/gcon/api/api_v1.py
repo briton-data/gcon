@@ -38,6 +38,7 @@ from gcon.management import plans as plans_mod
 from gcon.management.request_limiter import RequestRateLimiter, env_override
 from gcon.management.auth import RESET_TOKEN_TTL_MINUTES
 from gcon.management.mailer import SmtpMailer, password_reset_message
+from gcon.transport import callback_secrets
 
 log = logging.getLogger(__name__)
 
@@ -247,8 +248,11 @@ class JobSubmitRequest(BaseModel):
         description=(
             "If set, GCON POSTs a signed JSON payload here when this "
             "job reaches a terminal state (completed/failed/cancelled), "
-            "instead of requiring the submitter to poll. Body is signed "
-            "via HMAC-SHA256 in the X-GCON-Signature header."
+            "instead of requiring the submitter to poll. Signed with your "
+            "organization's callback signing secret (create it with "
+            "POST /callback-secret): X-GCON-Timestamp plus "
+            "X-GCON-Signature-V2, an HMAC-SHA256 over \"<timestamp>.<body>\". "
+            "Reject a delivery whose timestamp is more than a few minutes old."
         ),
     )
     verify: Optional[Dict[str, Any]] = Field(
@@ -567,6 +571,17 @@ def _request_fingerprint(payload) -> str:
                      "dataset_artifacts", "callback_url", "verify")
     }
     blob = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _workflow_fingerprint(payload) -> str:
+    """Hash of what a workflow submission asks GCON to DO: its jobs, their commands and their dependencies. The
+    name and the workflow_id label are only labels, so changing them does not make a retry a different request."""
+    material = [
+        {"job_id": j.job_id, "command": j.command, "depends_on": list(j.depends_on)}
+        for j in payload.jobs
+    ]
+    blob = json.dumps(material, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -1351,6 +1366,17 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
                 detail="Registering artifacts by file path is not supported through the API.",
             )
 
+        # Optional: refuse a callback_url until the organization has a signing secret, so no callback it
+        # receives is one it could not have verified. Off unless GCON_REQUIRE_CALLBACK_SECRET is set.
+        if (payload.callback_url and org_id
+                and os.environ.get("GCON_REQUIRE_CALLBACK_SECRET", "").strip().lower() in ("1", "true", "yes")
+                and not callback_secrets.status(presentation.coordinator.control_plane, org_id)["configured"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Create a callback signing secret first (POST /callback-secret) so you can verify "
+                       "the callbacks GCON sends to this callback_url.",
+            )
+
         def _do_submit(job_id):
             try:
                 presentation.submit_job(
@@ -1428,6 +1454,52 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             _do_submit(job_id)
             presentation.record_idempotency_key(org_id, idempotency_key, job_id, request_hash)
         return {"job_id": job_id, "submitted": True, "client_reference": client_reference}
+
+    class CallbackSecretStatusOut(BaseModel):
+        configured: bool
+        created_at: Optional[str] = None
+
+    class CallbackSecretCreatedOut(BaseModel):
+        secret: str = Field(description="Shown only now. Store it; it cannot be read again, only replaced.")
+        created_at: str
+
+    def _callback_secret_org(auth):
+        owner = auth["owner"]
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        if not org_id:
+            raise HTTPException(status_code=400, detail="A callback signing secret belongs to an organization account.")
+        if presentation.coordinator.control_plane is None:
+            raise HTTPException(status_code=503, detail="Callback signing secrets are not available on this deployment.")
+        return owner, org_id
+
+    @app.get(
+        "/callback-secret",
+        response_model=CallbackSecretStatusOut,
+        tags=["Jobs"],
+        summary="Whether your organization has a callback signing secret",
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}},
+    )
+    def get_callback_secret_status(auth=Depends(require_scope("Submit workflows"))):
+        _, org_id = _callback_secret_org(auth)
+        return callback_secrets.status(presentation.coordinator.control_plane, org_id)
+
+    @app.post(
+        "/callback-secret",
+        response_model=CallbackSecretCreatedOut,
+        tags=["Jobs"],
+        summary="Create or rotate your organization's callback signing secret",
+        description=(
+            "The secret that signs every callback_url delivery to your organization. It is returned here once and "
+            "can never be read again, only replaced. Creating a new one replaces the old: callbacks queued from "
+            "then on are signed with the new one; any already queued keep the one they were queued with."
+        ),
+        responses={400: {"model": ErrorOut}, 401: {"model": ErrorOut}},
+    )
+    def create_callback_secret(auth=Depends(require_scope("Submit workflows"))):
+        owner, org_id = _callback_secret_org(auth)
+        return callback_secrets.rotate(
+            presentation.coordinator.control_plane, org_id, updated_by=getattr(owner, "user_id", None),
+        )
 
     @app.post(
         "/jobs/clear",
@@ -1555,17 +1627,16 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             description="Your job label -> the canonical GCON job_id.",
         )
 
-    @app.post(
-        "/workflows",
-        response_model=WorkflowSubmitResponse,
-        tags=["Workflows"],
-        summary="Submit a new workflow (DAG of jobs)",
-        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 409: {"model": WorkersRequiredOut}},
-    )
-    def submit_workflow(payload: WorkflowSubmitRequest, auth=Depends(require_scope("Submit workflows"))):
+    def _create_workflow(payload, owner):
         from gcon.workflow.workflow import Workflow, WorkflowJob
+        from gcon.workflow.workflow_engine import max_workflow_jobs
 
-        owner = auth["owner"]
+        # Before any of it is built: the most jobs one workflow may have.
+        if len(payload.jobs) > max_workflow_jobs():
+            raise HTTPException(
+                status_code=400,
+                detail=f"A workflow can have at most {max_workflow_jobs()} jobs ({len(payload.jobs)} were submitted).",
+            )
         labels = [job_in.job_id for job_in in payload.jobs]
         if len(set(labels)) != len(labels):
             raise HTTPException(status_code=400, detail="Job labels within a workflow must be unique.")
@@ -1612,6 +1683,66 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         return {
             "workflow_id": workflow.workflow_id, "status": state.status, "submitted": True,
             "client_reference": client_reference, "jobs": canonical,
+        }
+
+    @app.post(
+        "/workflows",
+        response_model=WorkflowSubmitResponse,
+        tags=["Workflows"],
+        summary="Submit a new workflow (DAG of jobs)",
+        responses={401: {"model": ErrorOut}, 400: {"model": ErrorOut}, 409: {"model": WorkersRequiredOut}, 422: {"model": ErrorOut}},
+    )
+    def submit_workflow(
+        payload: WorkflowSubmitRequest,
+        response: Response,
+        auth=Depends(require_scope("Submit workflows")),
+        idempotency_key: str = Header(default=None, alias="Idempotency-Key"),
+    ):
+        owner = auth["owner"]
+        if not idempotency_key:
+            return _create_workflow(payload, owner)
+
+        # Same rules as POST /jobs: durable, per organization, one lock per (org, key) around
+        # look up -> create -> record. Kept in its own table, so a key used for a job and the same
+        # text used for a workflow are two different keys.
+        if len(idempotency_key) > _IDEMPOTENCY_KEY_MAX or not idempotency_key.isprintable():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX} printable characters.",
+            )
+        org_id = getattr(owner, "organization_id", None) if owner else None
+        request_hash = _workflow_fingerprint(payload)
+        with _idempotency_lock(org_id, f"workflow:{idempotency_key}"):
+            record = presentation.get_workflow_idempotency_record(org_id, idempotency_key)
+            if record is not None:
+                stored_hash = record.get("request_hash")
+                if stored_hash and stored_hash != request_hash:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This Idempotency-Key was already used for a different request.",
+                    )
+                replayed = _replay_workflow(record["workflow_id"])
+                if replayed is not None:
+                    response.headers["Idempotent-Replayed"] = "true"
+                    return replayed
+                # The workflow it created is gone (for example after the database was reset): the key
+                # no longer refers to anything, so the request is made afresh.
+            result = _create_workflow(payload, owner)
+            presentation.record_workflow_idempotency_key(org_id, idempotency_key, result["workflow_id"], request_hash)
+        return result
+
+    def _replay_workflow(workflow_id):
+        """The response the original request got, rebuilt from the workflow itself: its current status, and the
+        label -> job id mapping (a job's label is stored as its client_reference)."""
+        engine = presentation.coordinator.workflow_engine
+        workflow = engine.workflows.get(workflow_id)
+        state = engine.states.get(workflow_id)
+        if workflow is None or state is None:
+            return None
+        return {
+            "workflow_id": workflow_id, "status": state.status, "submitted": True,
+            "client_reference": (workflow.metadata or {}).get("client_reference"),
+            "jobs": {(j.metadata or {}).get("client_reference"): j.job_id for j in workflow.jobs.values()},
         }
 
     @app.get(

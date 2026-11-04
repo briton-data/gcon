@@ -67,3 +67,45 @@ class IdempotencyKeyRepository:
                 return existing
             raise
         return job_id
+
+
+class WorkflowIdempotencyKeyRepository:
+    """Durable (org_id, idempotency_key) -> workflow_id mapping for POST /workflows (migration 19). Same
+    contract as IdempotencyKeyRepository; a separate table because a workflow is not a job."""
+
+    def __init__(self, db):
+        self.db = db
+
+    @staticmethod
+    def _norm_org_id(org_id: Optional[str]) -> str:
+        return org_id or ""
+
+    def get(self, org_id: Optional[str], idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """The stored mapping (workflow_id, request_hash, created_at), or None."""
+        row = self.db.query_one(
+            "SELECT workflow_id, request_hash, created_at FROM workflow_submission_idempotency_keys "
+            "WHERE org_id = ? AND idempotency_key = ?",
+            (self._norm_org_id(org_id), idempotency_key),
+        )
+        return dict(row) if row else None
+
+    def record(
+        self, org_id: Optional[str], idempotency_key: str, workflow_id: str, created_at: str,
+        request_hash: Optional[str] = None,
+    ) -> str:
+        """Record that the key resolves to `workflow_id`. Returns the workflow_id durably recorded: the same one,
+        or the winner's if a concurrent request with the same key got there first."""
+        norm_org_id = self._norm_org_id(org_id)
+        try:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO workflow_submission_idempotency_keys "
+                    "(org_id, idempotency_key, workflow_id, request_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (norm_org_id, idempotency_key, workflow_id, request_hash, created_at),
+                )
+        except self.db.IntegrityError:
+            existing = self.get(norm_org_id, idempotency_key)
+            if existing is not None:
+                return existing["workflow_id"]
+            raise
+        return workflow_id
