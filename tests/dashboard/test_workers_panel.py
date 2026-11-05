@@ -1,5 +1,5 @@
 """
-The Workers panel on the staff Overview: it is in the page, its data is in the first payload and in every live
+The Workers panel on the staff dashboard's Cluster > Infra tab: it is in the page, its data is in the first payload and in every live
 update, and it shows what the registry holds.
 """
 import json
