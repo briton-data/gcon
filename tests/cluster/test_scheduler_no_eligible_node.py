@@ -153,3 +153,30 @@ class TestOneUnplaceableJobDoesNotBlockOthers:
         assert _wait_for(lambda: coordinator.jobs["FINE"]["status"] == "completed")
         assert coordinator.jobs["STUCK"]["status"] == "pending"
         assert coordinator.jobs["STUCK"].get("attempt_number", 0) == 0
+
+
+def test_a_workers_idle_heartbeat_cannot_undo_a_fresh_claim():
+    """A heartbeat already in flight ("idle") must not let the scheduler hand a claimed worker a second job."""
+    from datetime import datetime, UTC, timedelta
+
+    from gcon.cluster.registry import CLAIM_GRACE_SECONDS, NodeRegistry
+
+    registry = NodeRegistry()
+    registry.register(_agent("w1"))
+    assert registry.claim_best_idle_node(lambda info: 0) is not None
+
+    registry.heartbeat("w1", "idle", datetime.now(UTC), worker_reported=True)
+    registry.update_node_resources(
+        "w1", {"running_jobs": 0, "timestamp": datetime.now(UTC), "status": "idle"}, worker_reported=True)
+    assert registry.nodes["w1"]["status"] == "busy"
+    assert registry.claim_best_idle_node(lambda info: 0) is None
+
+    # The coordinator's own "idle" (the job ended) is never ignored...
+    registry.heartbeat("w1", "idle", datetime.now(UTC))
+    assert registry.nodes["w1"]["status"] == "idle"
+
+    # ...and once the grace has passed, a worker's own "idle" is believed again, so a node can never stay stuck busy.
+    registry.claim_best_idle_node(lambda info: 0)
+    registry.nodes["w1"]["last_claimed_at"] = datetime.now(UTC) - timedelta(seconds=CLAIM_GRACE_SECONDS + 1)
+    registry.heartbeat("w1", "idle", datetime.now(UTC), worker_reported=True)
+    assert registry.nodes["w1"]["status"] == "idle"

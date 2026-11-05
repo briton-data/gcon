@@ -2073,7 +2073,7 @@ class GCONCoordinator:
                         self.queue_job(job_id)
     
     
-    def receive_heartbeat(self, heartbeat):
+    def receive_heartbeat(self, heartbeat, worker_reported=False):
         """
         Process a heartbeat received from a node.
         """
@@ -2083,12 +2083,13 @@ class GCONCoordinator:
         self.registry.heartbeat(
             heartbeat["node_id"],
             heartbeat["status"],
-            heartbeat["timestamp"]
+            heartbeat["timestamp"],
+            worker_reported=worker_reported,
         )
 
         _log_line(f"Heartbeat received from {node_id} ({status})")
     
-    def receive_resource_report(self, resources):
+    def receive_resource_report(self, resources, worker_reported=False):
         """
         Process a resource report received from a node.
 
@@ -2100,7 +2101,7 @@ class GCONCoordinator:
 
         node_id = resources["node_id"]
 
-        self.registry.update_node_resources(node_id, resources)
+        self.registry.update_node_resources(node_id, resources, worker_reported=worker_reported)
 
         cpu = resources.get("cpu")
         memory = resources.get("memory")

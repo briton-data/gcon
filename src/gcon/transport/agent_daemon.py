@@ -442,6 +442,15 @@ class AgentDaemon:
                 self._run_job, job, outbound, session_token, stub
             )
             self._active_jobs[job.job_id] = future
+            # _run_job removes its own entry when it ends, but a very short job can end before the line above
+            # runs, which would leave a stale entry (worker reports busy forever). This runs after the entry
+            # exists, or immediately if the job is already over. It removes only this attempt's own entry: a
+            # retry of the same job may already have registered a new one.
+            def _forget(done, job_id=job.job_id):
+                if self._active_jobs.get(job_id) is done:
+                    self._active_jobs.pop(job_id, None)
+
+            future.add_done_callback(_forget)
         elif kind == "job_cancel":
             job_id = envelope.job_cancel.job_id
             if job_id in self._active_jobs and hasattr(self.agent, "cancel"):

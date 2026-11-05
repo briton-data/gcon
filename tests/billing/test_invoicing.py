@@ -272,3 +272,19 @@ class TestGenerateInvoiceEndToEnd:
         first = generate_invoice(control_plane, "acme", PERIOD_START, PERIOD_END, pricing=pricing)
         second = generate_invoice(control_plane, "acme", PERIOD_START, PERIOD_END, pricing=pricing)
         assert first["invoice_id"] == second["invoice_id"]
+
+
+class TestJobNodes:
+    def test_a_retried_job_is_attributed_to_the_node_whose_attempt_succeeded(self, control_plane):
+        # Workers record a successful attempt as "success" (not "completed"); the node lookup must match that.
+        from gcon.billing.invoicing import _job_nodes
+
+        _make_node(control_plane, "node-a")
+        _make_node(control_plane, "node-b")
+        _make_job(control_plane, "job-1", org_id="acme")
+        first = control_plane.job_attempts.record_attempt("job-1", "node-a", "req-1")
+        control_plane.job_attempts.set_status(first["attempt_id"], "failed", error="boom", completed=True)
+        second = control_plane.job_attempts.record_attempt("job-1", "node-b", "req-2")
+        control_plane.job_attempts.set_status(second["attempt_id"], "success", completed=True)
+
+        assert _job_nodes(control_plane, ["job-1"]) == {"job-1": "node-b"}

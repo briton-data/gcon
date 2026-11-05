@@ -136,7 +136,7 @@ def main():
             "node_id": node_id,
             "status": payload["status"],
             "timestamp": datetime.now(UTC),
-        })
+        }, worker_reported=True)
         # payload already carries the agent's real, live cpu_percent/
         # memory_percent/running_jobs (see grpc_transport.py's
         # heartbeat envelope handling) -- this used to be discarded
@@ -145,10 +145,12 @@ def main():
         # after that node finished a job. The scheduler's
         # cpu*0.5 + memory*0.3 + running_jobs*20 scoring was, in
         # effect, always scoring every idle node at ~0 -- load-aware
-        # selection wasn't actually functioning. update_node_resources
-        # deliberately never writes status (see its docstring), so
-        # this can't race the atomic claim_best_idle_node() busy-flag
-        # the way writing status here would.
+        # selection wasn't actually functioning. Both calls here carry the
+        # worker's own status, so both pass worker_reported=True: the
+        # registry then ignores a worker's "idle" for a few seconds after
+        # claim_best_idle_node() marked it busy (see registry.py's
+        # _status_to_record), instead of letting a heartbeat that was
+        # already in flight undo the claim.
         coordinator.receive_resource_report({
             "node_id": node_id,
             "cpu": payload["cpu_percent"],
@@ -173,7 +175,7 @@ def main():
                 "gpu_memory_used": payload["gpu_memory_used"],
                 "gpu_utilization_percent": payload["gpu_utilization_percent"],
             } if payload.get("gpu_name") else {}),
-        })
+        }, worker_reported=True)
 
     def on_node_registered(node_id, capabilities, org_id=None, address=None):
         proxy = RemoteNodeProxy(

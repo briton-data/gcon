@@ -38,6 +38,20 @@ def node_connected(node):
 # leased: GCON could not clean it between customers.
 FLEET_MIN_WORKER_VERSION = "1.1.0"
 
+# A worker's heartbeat can already be on its way, saying "idle", when the scheduler claims it for a job. For this long
+# after a claim, a worker's own "idle" report is ignored so it cannot hand the same worker a second job. The
+# coordinator's own status changes (job finished, job failed) are never ignored.
+CLAIM_GRACE_SECONDS = 10.0
+
+
+def _status_to_record(info, status, worker_reported):
+    """The status to store for `info`: `status`, unless a worker says "idle" right after the scheduler claimed it."""
+    if worker_reported and status == "idle" and info.get("status") == "busy":
+        claimed = info.get("last_claimed_at")
+        if claimed is not None and (datetime.now(UTC) - claimed).total_seconds() < CLAIM_GRACE_SECONDS:
+            return "busy"
+    return status
+
 
 def dispatchable(info):
     """The one definition of 'idle': a job can really be sent to this worker right now."""
@@ -374,9 +388,10 @@ class NodeRegistry:
             best_info["last_claimed_at"] = datetime.now(UTC)
             return best_info["node"]
 
-    def heartbeat(self, node_id, status, timestamp):
+    def heartbeat(self, node_id, status, timestamp, worker_reported=False):
         """
-        Update heartbeat information for a node.
+        Update heartbeat information for a node. `worker_reported` is True when the status is the worker's own
+        word (its periodic heartbeat) rather than the coordinator's: see _status_to_record.
         """
         with self._lock:
             if node_id not in self.nodes:
@@ -386,7 +401,9 @@ class NodeRegistry:
             current = info.get("last_seen")
             if current is None or timestamp >= current:
                 info["last_seen"] = timestamp
-                info["status"] = status
+                info["status"] = _status_to_record(info, status, worker_reported)
+                if status == "busy" and not worker_reported:
+                    info["last_claimed_at"] = datetime.now(UTC)
 
     def mark_offline(self, node_id):
         """
@@ -427,7 +444,7 @@ class NodeRegistry:
 
         return offline_nodes
 
-    def update_node_resources(self, node_id, resources):
+    def update_node_resources(self, node_id, resources, worker_reported=False):
         """
         Update the latest resource information for a node.
 
@@ -470,7 +487,7 @@ class NodeRegistry:
                 info["memory"] = resources["memory"]
             info["running_jobs"] = resources["running_jobs"]
             info["resource_timestamp"] = resources["timestamp"]
-            info["status"] = resources["status"]
+            info["status"] = _status_to_record(info, resources["status"], worker_reported)
             if "gpu_name" in resources:
                 info["gpu_name"] = resources["gpu_name"]
             if "gpu_memory_total" in resources:

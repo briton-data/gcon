@@ -21,6 +21,7 @@ import os
 import re
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
 
@@ -619,9 +620,11 @@ MAX_SESSION_KEYS_PER_CUSTOMER = 5
 _CLIENT_REFERENCE_MAX = 128
 _IDEMPOTENCY_KEY_MAX = 255
 # Serialises "look up key -> submit -> record key" per (org, key). Only the
-# leader accepts submissions, so one process-local lock set is enough; striped
-# so unrelated keys never wait on each other.
-_IDEMPOTENCY_LOCKS = [threading.Lock() for _ in range(64)]
+# leader accepts submissions, so one process-local lock set is enough. Each
+# (org, key) has its own lock, created on demand and dropped when nobody holds
+# or waits for it, so a request never waits on a different key.
+_IDEMPOTENCY_GUARD = threading.Lock()
+_IDEMPOTENCY_LOCKS: Dict[str, list] = {}  # "org\0key" -> [lock, holders and waiters]
 
 
 def _new_job_id() -> str:
@@ -674,9 +677,20 @@ def _workflow_fingerprint(payload) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+@contextmanager
 def _idempotency_lock(org_id, key):
-    digest = hashlib.sha256(f"{org_id or ''}\0{key}".encode("utf-8")).digest()
-    return _IDEMPOTENCY_LOCKS[digest[0] % len(_IDEMPOTENCY_LOCKS)]
+    name = f"{org_id or ''}\0{key}"
+    with _IDEMPOTENCY_GUARD:
+        entry = _IDEMPOTENCY_LOCKS.setdefault(name, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _IDEMPOTENCY_GUARD:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del _IDEMPOTENCY_LOCKS[name]
 
 
 def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=None, mailer=None):

@@ -188,7 +188,7 @@ def _job_nodes(control_plane: ControlPlane, job_ids: List[str]) -> Dict[str, str
             found[row["job_id"]] = row["node_id"]
         for row in control_plane.db.query(
             f"SELECT job_id, node_id FROM job_attempts WHERE job_id IN ({marks}) AND node_id IS NOT NULL "
-            "AND status = 'completed' ORDER BY attempt_number", tuple(chunk)):
+            "AND status IN ('success', 'completed') ORDER BY attempt_number", tuple(chunk)):
             found[row["job_id"]] = row["node_id"]
     return found
 

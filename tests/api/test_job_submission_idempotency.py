@@ -170,3 +170,35 @@ def test_over_long_or_unprintable_keys_are_refused(env):
     client, _, _ = env
     key = _signup(client)["api_key"]["secret"]
     assert _post(client, key, "k" * 300).status_code == 400
+
+
+def test_idempotency_locks_are_per_key_and_do_not_leak():
+    """The old 64 shared locks made a different key occasionally wait behind a slow submission."""
+    from gcon.api.api_v1 import _IDEMPOTENCY_LOCKS, _idempotency_lock
+
+    holding, release = threading.Event(), threading.Event()
+
+    def hold():
+        with _idempotency_lock("org", "key-held"):
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(5)
+    try:
+        for i in range(200):
+            got_it = threading.Event()
+
+            def other(n=i, flag=got_it):
+                with _idempotency_lock("org", f"other-{n}"):
+                    flag.set()
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            assert got_it.wait(2), f"key other-{i} waited behind an unrelated key"
+            thread.join()
+    finally:
+        release.set()
+        holder.join()
+    assert _IDEMPOTENCY_LOCKS == {}
