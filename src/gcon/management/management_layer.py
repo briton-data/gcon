@@ -1056,6 +1056,30 @@ class ManagementLayer:
         return result
 
 
+    def get_worker_overview(self, limit=25):
+        """The coordinator's worker overview (kinds, states, per customer, needing attention) with each customer
+        named: an organization that no longer exists shows its id instead of failing the whole panel."""
+        if self.coordinator is None:
+            return None
+        overview = self.coordinator.get_worker_overview(limit=limit)
+        names = {}
+
+        def name_of(org_id):
+            if org_id is None:
+                return None
+            if org_id not in names:
+                try:
+                    names[org_id] = self.org_registry.get_organization(org_id).name
+                except ValueError:
+                    names[org_id] = org_id
+            return names[org_id]
+
+        for row in overview["by_customer"]:
+            row["name"] = name_of(row["org_id"])
+        for item in overview["attention"]:
+            item["customer"] = name_of(item["org_id"])
+        return overview
+
     def get_org_usage_summary(self):
         """
         Per-client rollup for the dashboard's Clients panel: which

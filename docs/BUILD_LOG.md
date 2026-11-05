@@ -12,7 +12,10 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 - **Shared worker pool and self-enrollment** (2026-10-10): verified-TLS enrollment, pool flag per node, per-org pool mode changed only by a logged-in Owner/Administrator.
 - **Customer site (`gcon-web`)**: landing, auth, jobs, submit, job detail, API keys, settings (profile, plan, password, delete account), workers, usage & billing.
 - **Billing (2026-10-15)**: receipts billed only when their signature verifies, periods must have ended and cannot overlap, own-worker GPU rate, total rounded once with an explicit adjustment line, automatic monthly **draft** invoices, staff dashboard controls.
-- **Load tool**: `benchmarks/benchmark.py`.
+- **Worker observability (staff dashboard Overview)**: a Workers panel counts every worker once, by who hosts it (GCON hosted fleet, customer hosted, shared pool, unassigned) and by state (working, idle, offline, quarantined), per customer with their own and GCON-leased workers kept apart, and lists quarantined workers (the platform's sign of a possible compromise) and hosted workers held out of the pool, with the reason. Counts only; one aggregate, `Coordinator.get_worker_overview()`.
+- **Benchmarks** (two, both must keep running; `tests/test_benchmarks_still_run.py` runs each small):
+  - `benchmarks/benchmark.py`: the platform over HTTP. A real server with simulated workers, every `/api/v1` route called (it exits non-zero if one is not), the staff dashboard on a second port (every read-only page and `/management` route, live websocket viewers, a check that the worker view adds up to what was registered), idempotent retries, hosted-worker leases. `--smoke` is the quick version.
+  - `scripts/benchmark.py`: the platform in-process. Scheduler throughput, the same over the durable SQLite control plane, workflows, what the dashboard costs as the fleet grows (100, 1,000, 5,000 workers), and the real gRPC transport (enrollment, registration, control-stream heartbeats). It prints what it does not cover and why: webhook delivery, Docker-sandboxed hosted workers, several coordinators.
 
 ## Deliberately deferred
 

@@ -5311,6 +5311,99 @@ class GCONCoordinator:
 
         return summary
     
+    _WORKER_STATES = ("working", "idle", "offline", "quarantined", "other")
+    _WORKER_ATTENTION_LIMIT = 20
+
+    def get_worker_overview(self, limit=25):
+        """
+        What the staff dashboard needs to see about the workers at a glance, in one pass over the registry.
+
+        Every worker is counted once as exactly one KIND and exactly one STATE, so the numbers add up:
+
+          kind   gcon_fleet       hosted by GCON (leased to a customer, free, or held out of the pool)
+                 customer_hosted  a customer's own machine, enrolled to their organization
+                 shared_pool      an operator-placed worker that serves any organization's jobs
+                 unassigned       enrolled with the shared token and in no pool: takes no customer jobs
+          state  quarantined > offline > working > idle > other, first match wins. Quarantined comes first
+                 because it is the platform's own sign that a worker may be compromised (its signed results failed
+                 verification, or its sandbox evidence did not match); it is never folded into "idle".
+
+        `attention` lists quarantined workers and hosted workers held out of the pool (a clean-up that did not
+        finish) with the reason, capped, with `attention_total` the real count. `by_customer` has one row per
+        organization that has any worker, own and GCON-leased kept apart, the ones needing attention first,
+        capped at `limit` with `customers_with_workers` the real count.
+        """
+        def blank():
+            return {"total": 0, "working": 0, "idle": 0, "offline": 0, "quarantined": 0, "other": 0}
+
+        kinds = {name: blank() for name in ("gcon_fleet", "customer_hosted", "shared_pool", "unassigned")}
+        kinds["gcon_fleet"].update({"leased": 0, "available": 0, "held": 0})
+        states = {name: 0 for name in self._WORKER_STATES}
+        customers = {}
+        attention = []
+        held_reasons = {}
+        if self.control_plane is not None:
+            held_reasons = {r["node_id"]: r["held_reason"] for r in self.control_plane.fleet_nodes.list_all()
+                            if r.get("held_reason")}
+
+        for node_id, info in self.registry.snapshot().items():
+            if info.get("quarantined"):
+                state = "quarantined"
+            elif info.get("status") == "offline":
+                state = "offline"
+            elif info.get("status") == "busy" or info.get("running_jobs", 0) > 0:
+                state = "working"
+            elif info.get("status") == "idle":
+                state = "idle"
+            else:
+                state = "other"
+
+            if info.get("fleet"):
+                kind = "gcon_fleet"
+                customer = info.get("lease_org_id") if info.get("lease_state") else None
+                share = "leased"
+                held = node_id in held_reasons
+                if held:
+                    kinds[kind]["held"] += 1
+                    attention.append({"node_id": node_id, "kind": kind, "state": "held", "org_id": customer,
+                                      "reason": f"held out of the pool: {held_reasons[node_id]}"})
+                elif customer:
+                    kinds[kind]["leased"] += 1
+                else:
+                    kinds[kind]["available"] += 1
+            elif info.get("org_id") is not None:
+                kind, customer, share = "customer_hosted", info["org_id"], "own"
+            elif info.get("shared_pool"):
+                kind, customer, share = "shared_pool", None, None
+            else:
+                kind, customer, share = "unassigned", None, None
+
+            if state == "quarantined":
+                attention.append({"node_id": node_id, "kind": kind, "state": "quarantined", "org_id": customer,
+                                  "reason": info.get("quarantine_reason") or "quarantined"})
+
+            states[state] += 1
+            kinds[kind]["total"] += 1
+            kinds[kind][state] += 1
+            if customer is not None:
+                row = customers.setdefault(customer, {"org_id": customer, "own": 0, "leased": 0, **blank()})
+                row[share] += 1
+                row["total"] += 1
+                row[state] += 1
+
+        rows = sorted(customers.values(), key=lambda r: (-r["quarantined"], -r["offline"], -r["total"], r["org_id"]))
+        # Quarantined ones first, then held; stable within each so the list does not reshuffle between ticks.
+        attention.sort(key=lambda a: (a["state"] != "quarantined", a["node_id"]))
+        return {
+            "total": sum(states.values()),
+            "states": states,
+            "kinds": kinds,
+            "by_customer": rows[:max(0, limit)],
+            "customers_with_workers": len(rows),
+            "attention": attention[:self._WORKER_ATTENTION_LIMIT],
+            "attention_total": len(attention),
+        }
+
     def get_artifacts(self, org_id=None, scoped=False):
         """
         Return a dashboard-friendly summary of artifacts: all of them for the

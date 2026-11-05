@@ -248,6 +248,7 @@ def serve(args):
     os.environ.setdefault("GCON_MAX_JOBS_IN_MEMORY", str(args.max_jobs_in_memory))
     os.environ.setdefault("GCON_MAX_RECEIPTS_IN_MEMORY", str(args.max_jobs_in_memory))
     os.environ.setdefault("GCON_BILLING_AUTO_INVOICE", "0")       # the monthly invoicing thread is not part of what is being measured
+    os.environ.setdefault("GCON_OWNER_PASSWORD", "bench-owner-pw-1")   # the staff login the dashboard bots use
 
     from gcon.cluster.coordinator import GCONCoordinator
     from gcon.dashboard.presentation import PresentationLayer
@@ -278,6 +279,7 @@ def serve(args):
         # Customer jobs must run on a sandboxed worker; a real one proves it with a
         # signed attestation, which the coordinator only checks for remote (gRPC) nodes.
         sandboxed = True
+        agent_version = "1.1.0"             # a real worker reports its version; hosted workers older than this are not leasable
 
         def __init__(self, node_id):
             super().__init__(node_id)
@@ -321,6 +323,21 @@ def serve(args):
         tenants[i % args.tenants]["nodes"].append(node.node_id)
         nodes.append(node)
     node_setup_s = time.time() - t_nodes
+
+    # ---- the kinds of worker the customer nodes above are not, so the staff dashboard's worker view has every kind to
+    # count: GCON-hosted fleet workers (unleased, so they take no customer jobs) and quarantined workers. They are kept
+    # OUT of `nodes`, so per-node job counts, utilisation and capacity stay comparable with earlier reports.
+    for i in range(args.fleet_nodes):
+        node = BenchNode(f"bench-fleet-{i:02d}")
+        cp.fleet_nodes.add(node.node_id, None)
+        co.register_agent(node)
+        node.start_heartbeat(co, interval=args.hb_interval)
+    for i in range(args.quarantined):
+        node = BenchNode(f"bench-quarantined-{i:02d}")
+        node.org_id = tenants[0]["org_id"]
+        co.register_agent(node)
+        node.start_heartbeat(co, interval=args.hb_interval)
+        co.registry.set_quarantined(node.node_id, True, reason="benchmark: simulated receipt verification failures")
 
     # ---- instrumentation: lock wait/hold, hot method timings, SQL cost
     locks = []
@@ -379,6 +396,33 @@ def serve(args):
     routes = sorted({f"{m} {r.path}" for r in app.routes if hasattr(r, "methods") for m in r.methods
                      if m not in ("HEAD", "OPTIONS") and not r.path.startswith(("/docs", "/redoc", "/openapi"))})
 
+    # ---- the staff dashboard (pages, /management JSON, live websocket) on a second port. It is built over the SAME
+    # coordinator and management layer. WebServer makes its own ManagementLayer, and a second one would take over the
+    # coordinator's hooks (plan rules, caps) and change what the API run measures, so it is handed this one instead.
+    import shutil
+    import gcon.dashboard.web_server as web_server_module
+    for d in ("templates", "static"):                       # WebServer reads these relative to the working directory
+        if not os.path.exists(os.path.join(args.workdir, d)):
+            shutil.copytree(os.path.join(REPO_ROOT, d), os.path.join(args.workdir, d))
+    real_management_layer = web_server_module.ManagementLayer
+    web_server_module.ManagementLayer = lambda *a, **k: mgmt
+    try:
+        web = web_server_module.WebServer(pres)
+    finally:
+        web_server_module.ManagementLayer = real_management_layer
+    if not args.no_instrument:
+        wrap_method(web, "_build_live_payload", "dashboard.live_payload (one viewer, one update)")
+        wrap_method(co, "get_worker_overview", "coordinator.get_worker_overview")
+        wrap_method(co, "get_cluster_health", "coordinator.get_cluster_health")
+        wrap_method(mgmt, "get_org_usage_summary", "management.get_org_usage_summary")
+    dash_routes = sorted({r.path for r in web.app.routes if "GET" in (getattr(r, "methods", None) or ())
+                          and "{" not in r.path and not r.path.startswith(("/docs", "/redoc", "/openapi"))})
+    dash_not_swept = sorted({f"{m} {r.path}" for r in web.app.routes for m in (getattr(r, "methods", None) or ())
+                             if m not in ("HEAD", "OPTIONS") and not (m == "GET" and "{" not in r.path)
+                             and not r.path.startswith(("/docs", "/redoc", "/openapi"))})
+    dash_port = free_port()
+    owner_email = next(u.email for u in mgmt.user_registry.users.values() if u.role == "Owner")
+
     samples = {"t": [], "cpu": [], "rss_mb": [], "threads": [], "busy_nodes": []}
     stop_sampler = threading.Event()
     try:
@@ -430,7 +474,13 @@ def serve(args):
     @app.get("/__bench/info", include_in_schema=False)
     def bench_info():
         return {"routes": routes, "tenants": tenants, "locks_instrumented": instrumented, "node_setup_s": node_setup_s,
-                "pid": os.getpid()}
+                "pid": os.getpid(),
+                "dashboard": {"port": dash_port, "routes": dash_routes, "not_swept": dash_not_swept,
+                              "owner_email": owner_email, "owner_password": os.environ["GCON_OWNER_PASSWORD"]},
+                # what the dashboard's worker view must add up to, from what this setup registered
+                "expected_workers": {"total": len(nodes) + args.fleet_nodes + args.quarantined,
+                                     "gcon_fleet": args.fleet_nodes, "customer_hosted": len(nodes) + args.quarantined,
+                                     "quarantined": args.quarantined}}
 
     @app.get("/__bench/stats", include_in_schema=False)
     def bench_stats():
@@ -477,8 +527,13 @@ def serve(args):
         signal.signal(signal.SIGTERM, lambda *_: setattr(server, "should_exit", True))
     except Exception:
         pass
+    dash_server = uvicorn.Server(uvicorn.Config(web.app, host="127.0.0.1", port=dash_port, log_level="warning",
+                                                backlog=1024, access_log=False))
+    dash_server.install_signal_handlers = lambda: None            # not the main thread
+    threading.Thread(target=dash_server.run, daemon=True).start()
     open(args.ready_file, "w").write("ready")
     server.run()
+    dash_server.should_exit = True
     stop_sampler.set()
 
 
@@ -486,7 +541,7 @@ def serve(args):
 # CLIENT SIDE: bots, phases, report
 # =============================================================================
 
-_ID_SEGMENT = {"jobs": "{id}", "nodes": "{id}", "receipts": "{id}", "invoices": "{id}", "api-keys": "{id}"}
+_ID_SEGMENT = {"jobs": "{id}", "nodes": "{id}", "receipts": "{id}", "invoices": "{id}", "api-keys": "{id}", "leases": "{id}"}
 
 
 def templ(method, path):
@@ -750,8 +805,14 @@ class Load:
             i += 1
 
 
-def smoke(api, load, routes, tenants):
-    """One call to every route (so coverage is real, not assumed). Returns {route: status}."""
+def smoke(api, load, routes, tenants, with_leases=False):
+    """One call to every route (so coverage is real, not assumed). Returns {route: status}.
+
+    Every route is called with a harmless request: the password routes with an address that does not exist and a
+    token that is not real (so no email is sent), /jobs/clear with a job id that does not exist (so nothing is
+    deleted). The worker-lease routes lease a GCON-hosted worker to the first tenant, which would change which jobs
+    that worker takes, so they run only when asked (the final sweep, and --smoke), not before the load starts.
+    Entries named "check: ..." are behaviours rather than routes: 200 if it held, 599 if it did not."""
     key = tenants[0]["key"]
     seen = {}
     ok, doc = api.json("POST", "/jobs", key, {"command": "echo smoke", "client_reference": "smoke-1"}, label="POST /jobs")
@@ -782,6 +843,32 @@ def smoke(api, load, routes, tenants):
     seen["GET /enroll/ca"] = api.call("GET", "/enroll/ca")[0]
     if kcode in (200, 201) and isinstance(k, dict) and k.get("key_id"):
         seen["DELETE /auth/api-keys/{id}"] = api.call("DELETE", f"/auth/api-keys/{k['key_id']}", key)[0]
+    # the organization's callback signing secret
+    seen["GET /callback-secret"] = api.call("GET", "/callback-secret", key)[0]
+    sc, sec = api.json("POST", "/callback-secret", key, {})
+    seen["POST /callback-secret"] = sc
+    # a retry with the same Idempotency-Key must return the first job / workflow, not make another
+    idem = f"smoke-{time.time_ns()}"
+    h = {"Idempotency-Key": idem}
+    c1, d1 = api.json("POST", "/jobs", key, {"command": "echo idem"}, label="POST /jobs (idempotent)", headers=h)
+    c2, d2 = api.json("POST", "/jobs", key, {"command": "echo idem"}, label="POST /jobs (idempotent)", headers=h)
+    seen["check: POST /jobs Idempotency-Key replays the same job"] = 200 if (
+        c1 == c2 == 200 and isinstance(d1, dict) and isinstance(d2, dict) and d1.get("job_id") == d2.get("job_id")) else 599
+    wf_body = {"name": "smoke-idem", "jobs": [{"job_id": "a", "command": "echo a"}]}
+    w1c, w1 = api.json("POST", "/workflows", key, wf_body, label="POST /workflows (idempotent)", headers=h)
+    w2c, w2 = api.json("POST", "/workflows", key, wf_body, label="POST /workflows (idempotent)", headers=h)
+    seen["check: POST /workflows Idempotency-Key replays the same workflow"] = 200 if (
+        w1c == w2c == 200 and isinstance(w1, dict) and isinstance(w2, dict) and w1.get("workflow_id") == w2.get("workflow_id")) else 599
+    # routes that would email or delete, called so that they can do neither
+    seen["POST /auth/forgot-password"] = api.call("POST", "/auth/forgot-password", None, {"email": "nobody-smoke@bench.test"})[0]
+    seen["POST /auth/reset-password"] = api.call("POST", "/auth/reset-password", None, {"token": "not-a-real-token", "new_password": "smoke-password-1"})[0]
+    seen["POST /jobs/clear"] = api.call("POST", "/jobs/clear", key, {"job_ids": ["job_bench_missing"]})[0]
+    if with_leases:
+        seen["GET /workers/leases"] = api.call("GET", "/workers/leases", key)[0]
+        lc, leases = api.json("POST", "/workers/leases", key, {"count": 1})
+        seen["POST /workers/leases"] = lc
+        if lc in (200, 201) and isinstance(leases, list) and leases and leases[0].get("lease_id"):
+            seen["DELETE /workers/leases/{id}"] = api.call("DELETE", f"/workers/leases/{leases[0]['lease_id']}", key)[0]
     # account lifecycle on a throwaway tenant: signup -> login -> change password -> delete account
     email = f"smoke-{int(time.time())}@bench.test"
     pw = "smoke-password-1"
@@ -799,6 +886,143 @@ def smoke(api, load, routes, tenants):
     return seen
 
 
+def uncovered_routes(routes, swept, endpoints=()):
+    """Routes on /api/v1 that nothing called. A call to GET /jobs/job_abc counts for GET /jobs/{job_id}. No route is
+    exempt: one that cannot be called harmlessly has to be called with a harmless request (see smoke())."""
+    import re
+
+    def norm(r):
+        return re.sub(r"\{[^}]+\}", "{id}", r)
+    hit = {norm(templ(k.split(" ", 1)[0], k.split(" ", 1)[1])) for k in swept if not k.startswith("check:")}
+    hit |= {norm(k) for k in endpoints}
+    return [r for r in routes if norm(r) not in hit]
+
+
+def staff_login(dash):
+    """Log in to the dashboard as the owner and return the session cookie header value."""
+    c = http.client.HTTPConnection("127.0.0.1", dash["port"], timeout=60)
+    c.request("POST", "/auth/login", body=json.dumps({"email": dash["owner_email"], "password": dash["owner_password"]}),
+              headers={"Content-Type": "application/json"})
+    r = c.getresponse()
+    r.read()
+    cookies = [v.split(";", 1)[0] for k, v in r.getheaders() if k.lower() == "set-cookie"]
+    c.close()
+    if r.status != 200 or not cookies:
+        raise RuntimeError(f"dashboard staff login failed: HTTP {r.status}")
+    return "; ".join(cookies)
+
+
+def wait_dashboard(port, seconds=60):
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/login")
+            ok = c.getresponse().status == 200
+            c.close()
+            if ok:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
+def smoke_dashboard(dash, cookie):
+    """Every read-only dashboard route that takes no id (pages and /management JSON), as a logged-in owner.
+    Returns {route: status}. The routes that change something, and the ones that need an id, are listed by the
+    server (info["dashboard"]["not_swept"]) and reported as not exercised, not hidden."""
+    api = Api(dash["port"])
+    seen = {}
+    for path in dash["routes"]:
+        seen[f"GET {path}"] = api.call("GET", path, None, None, label=f"GET {path}", headers={"Cookie": cookie})[0]
+    return seen, api
+
+
+def worker_view_problems(overview, expected):
+    """Does the dashboard's worker view add up to what was registered? Returns a list of what does not."""
+    if not isinstance(overview, dict):
+        return ["no worker_overview in the dashboard payload"]
+    out = []
+    kinds, states = overview.get("kinds", {}), overview.get("states", {})
+    if overview.get("total") != expected["total"]:
+        out.append(f"total workers {overview.get('total')} != {expected['total']} registered")
+    if sum(states.values()) != overview.get("total"):
+        out.append(f"states add up to {sum(states.values())}, not the total {overview.get('total')}")
+    if sum(k.get("total", 0) for k in kinds.values()) != overview.get("total"):
+        out.append("kinds do not add up to the total")
+    if kinds.get("gcon_fleet", {}).get("total") != expected["gcon_fleet"]:
+        out.append(f"gcon_fleet {kinds.get('gcon_fleet', {}).get('total')} != {expected['gcon_fleet']}")
+    if kinds.get("customer_hosted", {}).get("total") != expected["customer_hosted"]:
+        out.append(f"customer_hosted {kinds.get('customer_hosted', {}).get('total')} != {expected['customer_hosted']}")
+    if states.get("quarantined") != expected["quarantined"]:
+        out.append(f"quarantined {states.get('quarantined')} != {expected['quarantined']}")
+    if overview.get("attention_total", 0) < expected["quarantined"]:
+        out.append("a quarantined worker is not in the needs-attention list")
+    return out
+
+
+class DashboardViewers:
+    """Staff browsers holding the live websocket open: each gets a full dashboard update every ~2s, which is
+    built on the server for every viewer separately."""
+
+    def __init__(self, dash, cookie, n, stop):
+        self.dash, self.cookie, self.n, self.stop = dash, cookie, n, stop
+        self.intervals, self.sizes, self.errors = [], [], []
+        self.last_overview = None
+        self.updates = 0
+        self.lock = threading.Lock()
+        self.threads = []
+
+    def _run(self):
+        from websockets.sync.client import connect
+        try:
+            with connect(f"ws://127.0.0.1:{self.dash['port']}/ws", additional_headers={"Cookie": self.cookie},
+                         max_size=None, open_timeout=30) as ws:
+                prev = None
+                while not self.stop.is_set():
+                    try:
+                        msg = ws.recv(timeout=5)
+                    except TimeoutError:
+                        continue
+                    now = perf()
+                    doc = json.loads(msg)
+                    with self.lock:
+                        self.updates += 1
+                        self.sizes.append(len(msg))
+                        if prev is not None:
+                            self.intervals.append(now - prev)
+                        self.last_overview = doc.get("worker_overview")
+                    prev = now
+        except Exception as e:
+            with self.lock:
+                self.errors.append(repr(e)[:200])
+
+    def start(self):
+        for _ in range(self.n):
+            t = threading.Thread(target=self._run, daemon=True)
+            t.start()
+            self.threads.append(t)
+
+    def finish(self):
+        self.stop.set()
+        for t in self.threads:
+            t.join(timeout=8)
+        with self.lock:
+            iv = sorted(self.intervals)
+            q = lambda p: iv[min(len(iv) - 1, int(p * len(iv)))] if iv else None
+            return {"viewers": self.n, "updates": self.updates, "errors": self.errors[:3], "error_count": len(self.errors),
+                    "update_interval_s": {"p50": q(0.5), "p95": q(0.95), "max": iv[-1] if iv else None},
+                    "payload_kb_mean": (sum(self.sizes) / len(self.sizes) / 1024) if self.sizes else None}
+
+
+def one_dashboard_update(dash, cookie):
+    """A single live update, for the worker view check when no viewers are running (--smoke)."""
+    from websockets.sync.client import connect
+    with connect(f"ws://127.0.0.1:{dash['port']}/ws", additional_headers={"Cookie": cookie}, max_size=None, open_timeout=30) as ws:
+        return json.loads(ws.recv(timeout=30))
+
+
 def run_client(args, port, info):
     tenants = info["tenants"]
     routes = info["routes"]
@@ -807,10 +1031,25 @@ def run_client(args, port, info):
     load.args.login_email = f"bench0-{info['pid']}@bench.test"
 
     print(f"[bench] smoke sweep over {len(routes)} routes ...", flush=True)
-    swept = smoke(api, load, routes, tenants)
+    swept = smoke(api, load, routes, tenants, with_leases=args.smoke)
     bad_smoke = {r: c for r, c in swept.items() if c >= 500 or c == 0}
+
+    dash = info.get("dashboard")
+    dashboard, cookie = {}, None
+    if dash:
+        if not wait_dashboard(dash["port"]):
+            raise RuntimeError("the dashboard did not come up")
+        cookie = staff_login(dash)
+        print(f"[bench] dashboard sweep over {len(dash['routes'])} read-only routes (logged in as the owner) ...", flush=True)
+        dswept, _ = smoke_dashboard(dash, cookie)
+        dashboard.update({"swept": dswept, "bad": {r: c for r, c in dswept.items() if c >= 500 or c == 0},
+                          "not_swept": dash["not_swept"]})
     if args.smoke:
-        return {"smoke": swept, "routes": routes, "bad": bad_smoke}, load, api
+        if dash:
+            dashboard["worker_problems"] = worker_view_problems(one_dashboard_update(dash, cookie).get("worker_overview"),
+                                                                info["expected_workers"])
+        return {"smoke": swept, "routes": routes, "bad": bad_smoke, "dashboard": dashboard,
+                "uncovered": uncovered_routes(routes, swept)}, load, api
 
     def progress():
         code, doc = api.json("GET", "/__bench/progress", label="(bench) progress")
@@ -834,6 +1073,10 @@ def run_client(args, port, info):
         threads.append(threading.Thread(target=load.guard(load.login_bot, args.login_rps), daemon=True))
     for t in threads:
         t.start()
+    viewers = None
+    if dash and args.dashboard_viewers:
+        viewers = DashboardViewers(dash, cookie, args.dashboard_viewers, load.stop)
+        viewers.start()
 
     series = []                                      # (t_rel, accepted, finished-by-nodes, running)
     cpu_me = []
@@ -877,13 +1120,25 @@ def run_client(args, port, info):
     for t in threads:
         t.join(timeout=5)
     wall = time.time() - wall0
+    if dash:
+        if viewers is not None:
+            dashboard["viewers"] = viewers.finish()
+            last = viewers.last_overview
+        else:
+            last = one_dashboard_update(dash, cookie).get("worker_overview")
+        dashboard["worker_problems"] = worker_view_problems(last, info["expected_workers"])
+        dashboard["worker_overview"] = last
     print("[bench] final sweep over every route (receipts exist now) ...", flush=True)
-    final = smoke(api, load, routes, tenants)
+    final = smoke(api, load, routes, tenants, with_leases=True)
     swept.update(final)
     bad = {r: c for r, c in final.items() if c >= 500 or c == 0}
     bad_smoke.update(bad)
+    if dash:
+        dswept, _ = smoke_dashboard(dash, cookie)
+        dashboard["swept"].update(dswept)
+        dashboard["bad"] = {r: c for r, c in dashboard["swept"].items() if c >= 500 or c == 0}
     return {"series": series, "wall": wall, "submit_end": submit_end, "swept": swept, "bad_smoke": bad_smoke,
-            "client_cpu": cpu_me}, load, api
+            "client_cpu": cpu_me, "dashboard": dashboard}, load, api
 
 
 def build_report(args, run, load, api, stats, info):
@@ -964,15 +1219,16 @@ def build_report(args, run, load, api, stats, info):
         notes.append(f"{load.rejected} job submissions were not accepted (see POST /jobs status counts)")
     if stats.get("receipts") is not None and stats["receipts"] < by.get("completed", 0):
         notes.append(f"receipts ({stats['receipts']}) < completed jobs ({by.get('completed', 0)})")
-    uncovered = [r for r in info["routes"] if r not in {f"{k.split(' ')[0]} {k.split(' ', 1)[1]}" for k in endpoints}
-                 and r not in {k for k in run["swept"]}]
-
-    def norm(r):
-        import re
-        return re.sub(r"\{[^}]+\}", "{id}", r)
-    hit = {norm(k) for k in endpoints} | {norm(k) for k in run["swept"]}
-    uncovered = [r for r in info["routes"] if norm(r) not in hit and r not in
-                 ("POST /auth/forgot-password", "POST /auth/reset-password", "POST /jobs/clear")]
+    uncovered = uncovered_routes(info["routes"], run["swept"], endpoints)
+    dash_run = run.get("dashboard") or {}
+    if dash_run.get("bad"):
+        notes.append(f"dashboard 5xx/failed: {dash_run['bad']}")
+    for problem in dash_run.get("worker_problems") or []:
+        notes.append(f"dashboard worker view: {problem}")
+    if (dash_run.get("viewers") or {}).get("error_count"):
+        notes.append(f"{dash_run['viewers']['error_count']} dashboard websocket viewers failed: {dash_run['viewers']['errors']}")
+    if uncovered:
+        notes.append(f"routes nothing called: {uncovered}")
     return {
         "config": {k: v for k, v in vars(args).items() if k not in ("serve", "ready_file", "workdir", "compare", "login_email")},
         "env": {"cpus": os.cpu_count(), "python": sys.version.split()[0], "platform": sys.platform},
@@ -989,7 +1245,10 @@ def build_report(args, run, load, api, stats, info):
         "server": srv,
         "locks": stats["locks"], "methods": stats["methods"], "locks_instrumented": info["locks_instrumented"],
         "integrity": {"stuck_jobs": stuck, "receipts": stats.get("receipts"), "completed": by.get("completed", 0)},
-        "coverage": {"routes": len(info["routes"]), "uncovered": uncovered, "smoke": run["swept"]},
+        "coverage": {"routes": len(info["routes"]), "uncovered": uncovered, "smoke": run["swept"],
+                     "dashboard_routes_swept": len((info.get("dashboard") or {}).get("routes", [])),
+                     "dashboard_not_swept": (info.get("dashboard") or {}).get("not_swept", [])},
+        "dashboard": {k: v for k, v in dash_run.items() if k != "swept"},
         "series": [(round(t, 2), a, d, r) for t, a, d, r in series],
         "notes": notes,
     }
@@ -1053,8 +1312,21 @@ def print_report(rep):
         print(f"  {label:30s} {m['n']:7d} {ms(m['mean']):>7} {ms(m['p50']):>7} {ms(m['p95']):>7} {ms(m['p99']):>7} {ms(m['max']):>7} {m['total']:>8.2f}")
 
     cv = rep["coverage"]
-    print(f"\nCOVERAGE  {cv['routes']} routes on /api/v1; not exercised: {cv['uncovered'] or 'none'}"
-          f"  (forgot/reset-password send email and /jobs/clear deletes history, both left out on purpose)")
+    print(f"\nCOVERAGE  {cv['routes']} routes on /api/v1; not exercised: {cv['uncovered'] or 'none'}")
+    d = rep.get("dashboard") or {}
+    if d or cv.get("dashboard_routes_swept"):
+        v = d.get("viewers") or {}
+        print(f"DASHBOARD {cv['dashboard_routes_swept']} read-only routes swept as the owner, 5xx/failed: {d.get('bad') or 'none'}; "
+              f"{len(cv['dashboard_not_swept'])} that change something or need an id are not exercised")
+        if v:
+            iv = v["update_interval_s"]
+            print(f"          live: {v['viewers']} viewers, {v['updates']} updates, every {ms(iv['p50'])} median / {ms(iv['p95'])} p95 ms "
+                  f"(the server pushes every 2000), {v['payload_kb_mean'] or 0:.0f} KB each, failures {v['error_count']}")
+        wp = d.get("worker_problems")
+        wo = d.get("worker_overview") or {}
+        if wp is not None:
+            print("WORKERS   " + ("the worker view adds up to what was registered: "
+                                  f"{wo.get('total')} workers, {wo.get('states')}" if not wp else "DOES NOT ADD UP: " + "; ".join(wp)))
     ig = rep["integrity"]
     print(f"INTEGRITY stuck jobs {ig['stuck_jobs']} | completed {ig['completed']} | receipts {ig['receipts']}")
     for note in rep["notes"]:
@@ -1112,6 +1384,8 @@ def parser():
     g.add_argument("--job-ms", type=float, default=100.0, help="simulated execution time per job (default 100)")
     g.add_argument("--job-jitter", type=float, default=0.3, help="execution time varies by +/- this fraction (default 0.3)")
     g.add_argument("--fail-pct", type=float, default=2.0, help="percent of jobs a node reports as failed (default 2)")
+    g.add_argument("--fleet-nodes", type=int, default=4, help="GCON-hosted fleet workers (take no customer jobs; there so the dashboard's worker view counts every kind) (default 4)")
+    g.add_argument("--quarantined", type=int, default=1, help="quarantined workers (counted by the dashboard as possibly compromised) (default 1)")
     g.add_argument("--tenants", type=int, default=4, help="customer organizations; nodes and traffic are spread across them (default 4)")
     g.add_argument("--plan", default="Enterprise", choices=["Standard", "Pro", "Enterprise"], help="plan of the tenants; Enterprise keeps plan limits out of the way (default)")
     b = p.add_argument_group("bots")
@@ -1121,6 +1395,7 @@ def parser():
     b.add_argument("--reader-bots", type=int, default=8, help="threads sending the mixed read/write API traffic (default 8)")
     b.add_argument("--read-rps", type=float, default=150.0, help="total mixed API requests per second (default 150)")
     b.add_argument("--cancel-pct", type=float, default=2.0, help="percent of jobs cancelled shortly after submit (default 2)")
+    b.add_argument("--dashboard-viewers", type=int, default=3, help="staff browsers holding the live dashboard websocket open for the whole run (each gets a full update every 2s) (default 3)")
     b.add_argument("--login-rps", type=float, default=2.0, help="logins per second (slow password hashing: CPU load) (default 2)")
     s = p.add_argument_group("server")
     s.add_argument("--api-threads", type=int, default=40, help="threads the API may use for requests (the framework default is 40)")
@@ -1162,6 +1437,7 @@ def main():
            "--nodes", str(args.nodes), "--tenants", str(args.tenants), "--plan", args.plan, "--job-ms", str(args.job_ms),
            "--job-jitter", str(args.job_jitter), "--fail-pct", str(args.fail_pct), "--hb-interval", str(args.hb_interval),
            "--api-threads", str(args.api_threads), "--sync", args.sync, "--seed", str(args.seed),
+           "--fleet-nodes", str(args.fleet_nodes), "--quarantined", str(args.quarantined),
            "--max-jobs-in-memory", str(args.max_jobs_in_memory)]
     if args.no_instrument:
         cmd.append("--no-instrument")
@@ -1191,8 +1467,14 @@ def main():
         if args.smoke:
             rows = [[r, run["smoke"].get(r, "-")] for r in sorted(run["smoke"])]
             print(table(["route called", "status"], rows))
-            print(f"\nroutes on /api/v1: {len(run['routes'])}; 5xx/failed: {run['bad'] or 'none'}")
-            return 1 if run["bad"] else 0
+            print(f"\nroutes on /api/v1: {len(run['routes'])}; 5xx/failed: {run['bad'] or 'none'}; nothing called: {run['uncovered'] or 'none'}")
+            d = run["dashboard"]
+            if d:
+                print(f"dashboard: {len(d['swept'])} read-only routes swept; 5xx/failed: {d['bad'] or 'none'}; "
+                      f"not exercised (change something or need an id): {len(d['not_swept'])}")
+                print("dashboard worker view: " + ("adds up to what was registered" if not d["worker_problems"]
+                                                    else "DOES NOT ADD UP: " + "; ".join(d["worker_problems"])))
+            return 1 if (run["bad"] or run["uncovered"] or (d and (d["bad"] or d["worker_problems"]))) else 0
         code, stats = api.json("GET", "/__bench/stats", label="(bench) stats")
         if code != 200 or not stats:
             print("[bench] could not fetch server stats", file=sys.stderr)
@@ -1202,7 +1484,9 @@ def main():
         with open(args.out, "w") as f:
             json.dump(report, f, indent=1)
         print(f"[bench] full report written to {args.out}")
-        return 1 if report["integrity"]["stuck_jobs"] else 0
+        d = report.get("dashboard") or {}
+        return 1 if (report["integrity"]["stuck_jobs"] or report["coverage"]["uncovered"] or d.get("bad")
+                     or d.get("worker_problems") or run["bad_smoke"]) else 0
     finally:
         proc.terminate()
         try:

@@ -170,6 +170,7 @@ class WebServer:
             "critical_alerts": self.presentation.get_critical_alerts(health),
             "execution_timeline": self.presentation.get_execution_timeline(),
             "companies": self.management.get_org_usage_summary(),
+            "worker_overview": self.management.get_worker_overview(),
             "notif_unread_by_severity": self.management.get_unread_notification_count_by_severity(),
         }
 
@@ -236,6 +237,7 @@ class WebServer:
             # user-facing "Client" label changed, not the internal
             # data shape/naming, to keep this change contained.)
             dashboard_data["companies"] = self.management.get_org_usage_summary()
+            dashboard_data["worker_overview"] = self.management.get_worker_overview()
 
             return self.templates.TemplateResponse(
                 request=request,

@@ -828,6 +828,71 @@ function renderNodeSummary(summary) {
     }
 }
 
+// ---- Workers: every worker once, by who hosts it and by customer ----
+const WORKER_KIND_LABELS = {
+    gcon_fleet: "GCON hosted fleet",
+    customer_hosted: "Customer hosted",
+    shared_pool: "Shared pool",
+    unassigned: "Unassigned (takes no customer jobs)",
+};
+
+// A zero is quiet; a number that needs attention is not.
+function workerCell(n, cls) {
+    return `<td class="text-center">${n ? `<span class="${cls}">${n}</span>` : `<span class="text-secondary">0</span>`}</td>`;
+}
+
+function renderWorkers(wo) {
+    const kindsBody = document.getElementById("workers-kinds-body");
+    if (!wo || !kindsBody) return;
+    const s = wo.states || {};
+
+    setText("workers-headline", wo.total
+        ? `${wo.total} worker(s): ${s.working} working, ${s.idle} idle, ${s.offline} offline` + (s.quarantined ? `, ${s.quarantined} quarantined` : "")
+        : "No workers registered");
+
+    const attention = document.getElementById("workers-attention");
+    if (attention) {
+        const items = wo.attention || [];
+        attention.innerHTML = items.length
+            ? `<div class="alert alert-danger small mb-0"><strong>${wo.attention_total} worker(s) need attention</strong> (quarantined workers may be compromised; held hosted workers did not finish a clean-up):<ul class="mb-0 mt-1">`
+                + items.map(a => `<li><strong>${escapeHtml(a.node_id)}</strong> <span class="badge ${a.state === "quarantined" ? "bg-danger" : "bg-warning text-dark"}">${escapeHtml(a.state)}</span> `
+                    + `${escapeHtml(WORKER_KIND_LABELS[a.kind] || a.kind)}${a.customer ? ` &middot; ${escapeHtml(a.customer)}` : ""}: ${escapeHtml(a.reason)}</li>`).join("")
+                + (wo.attention_total > items.length ? `<li>and ${wo.attention_total - items.length} more</li>` : "")
+                + `</ul></div>`
+            : `<div class="small text-success"><i class="bi bi-shield-check me-1"></i>No quarantined or held workers.</div>`;
+    }
+
+    kindsBody.innerHTML = Object.keys(WORKER_KIND_LABELS).map(kind => {
+        const k = (wo.kinds || {})[kind] || {};
+        const sub = kind === "gcon_fleet" && k.total
+            ? `<div class="small text-secondary">${k.leased || 0} leased &middot; ${k.available || 0} available${k.held ? ` &middot; <span class="text-danger">${k.held} held</span>` : ""}</div>`
+            : "";
+        return `<tr><td>${escapeHtml(WORKER_KIND_LABELS[kind])}${sub}</td>
+            <td class="text-center">${k.total || 0}</td>
+            ${workerCell(k.working || 0, "text-primary fw-semibold")}
+            ${workerCell(k.idle || 0, "text-success")}
+            ${workerCell(k.offline || 0, "text-warning")}
+            ${workerCell(k.quarantined || 0, "badge bg-danger")}
+        </tr>`;
+    }).join("");
+
+    const custBody = document.getElementById("workers-customers-body");
+    if (custBody) {
+        const rows = wo.by_customer || [];
+        custBody.innerHTML = rows.length ? rows.map(r => `<tr>
+            <td>${escapeHtml(r.name || r.org_id)}</td>
+            <td class="text-center">${r.own}</td>
+            <td class="text-center">${r.leased}</td>
+            ${workerCell(r.working, "text-primary fw-semibold")}
+            ${workerCell(r.idle, "text-success")}
+            ${workerCell(r.offline, "text-warning")}
+            ${workerCell(r.quarantined, "badge bg-danger")}
+        </tr>`).join("") : `<tr><td colspan="7" class="text-center text-secondary">No customer has a worker yet.</td></tr>`;
+    }
+    setMsg("workers-customers-note", (wo.customers_with_workers || 0) > (wo.by_customer || []).length
+        ? `Showing ${(wo.by_customer || []).length} of ${wo.customers_with_workers} customers: the ones with quarantined or offline workers first.` : "");
+}
+
 function renderStorageSummary(summary) {
     if (!summary) return;
 
@@ -883,6 +948,7 @@ function renderHomeDashboard(data) {
     renderTrustHealth(data.health, data.trust, data.global_status);
     renderCriticalAlerts(data.critical_alerts);
     renderNodeSummary(data.node_summary);
+    renderWorkers(data.worker_overview);
     renderStorageSummary(data.storage_summary);
     renderExecutionTimeline(data.execution_timeline);
     if (data.companies) {
