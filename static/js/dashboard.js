@@ -893,6 +893,46 @@ function renderWorkers(wo) {
         ? `Showing ${(wo.by_customer || []).length} of ${wo.customers_with_workers} customers: the ones with quarantined or offline workers first.` : "");
 }
 
+// The four panels under Node Summary (Avg CPU, Avg Memory, Node Health, Storage Capacity). Their renderer was deleted
+// with the old Monitoring tab, so they stayed on "Loading..." / "--" forever. system_metrics is in every live update.
+function renderSystemMetrics(m) {
+    if (!m) return;
+    const pctText = (v) => (v === null || v === undefined ? "--" : `${v}%`);
+    setText("sm-avg-cpu", pctText(m.avg_cpu));
+    setText("sm-avg-memory", pctText(m.avg_memory));
+
+    const nodeHealth = document.getElementById("sm-node-health");
+    if (nodeHealth) {
+        const ns = m.node_summary || {};
+        nodeHealth.innerHTML = `
+            <div class="gcon-service-list">
+                <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Idle</span><span class="gcon-service-value">${ns.idle ?? 0}</span></div>
+                <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot ok"></span>Busy</span><span class="gcon-service-value">${ns.busy ?? 0}</span></div>
+                <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot warn"></span>Draining</span><span class="gcon-service-value muted">${ns.draining ?? 0}</span></div>
+                <div class="gcon-service-row"><span class="gcon-service-name"><span class="dot bad"></span>Offline</span><span class="gcon-service-value bad">${ns.offline ?? 0}</span></div>
+            </div>`;
+    }
+
+    const storageHealth = document.getElementById("sm-storage-health");
+    if (storageHealth) {
+        const pct = m.disk_remaining_pct;
+        const known = pct !== null && pct !== undefined;
+        storageHealth.innerHTML = `
+            <div class="gcon-summary-widget">
+                <div class="gcon-summary-headline">
+                    <span class="value">${known ? pct + "%" : "--"}</span>
+                    <span class="label">disk free</span>
+                </div>
+                <div class="gcon-summary-bar">
+                    <div class="seg" style="width:${known ? 100 - pct : 0}%; background: var(--info);"></div>
+                </div>
+                <div class="gcon-summary-legend">
+                    <span class="item"><span class="swatch" style="background:var(--info);"></span>${m.artifact_count ?? 0} artifact(s)</span>
+                </div>
+            </div>`;
+    }
+}
+
 function renderStorageSummary(summary) {
     if (!summary) return;
 
@@ -950,6 +990,7 @@ function renderHomeDashboard(data) {
     renderNodeSummary(data.node_summary);
     renderWorkers(data.worker_overview);
     renderStorageSummary(data.storage_summary);
+    renderSystemMetrics(data.system_metrics);
     renderExecutionTimeline(data.execution_timeline);
     if (data.companies) {
         renderCompaniesTable(data.companies);
