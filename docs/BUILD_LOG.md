@@ -30,6 +30,7 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 | Assurance counters across restarts | the Assure counters reset when the coordinator restarts |
 | Artifact persistence | the artifact registry is in memory |
 | Cryptographic proof (ZK/TEE) | not implemented; receipts are HMAC + per-node Ed25519 signatures |
+| Non-root worker image | `docker/Dockerfile` runs the worker as root on purpose. Job containers run with every capability dropped, so a root-owned job-IO directory is not writable by a non-root worker's job reports, and the shared `jobio` volume is created root-owned by the Docker daemon container. A non-root worker needs the job containers to run as the worker's uid (`GCON_JOB_DOCKER_USER=uid:gid`, which already exists) and the volume handed to that uid, and it must be tested against a real Docker daemon first |
 
 ## Before the fleet goes live (owner checklist, 2026-11-01)
 
