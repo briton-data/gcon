@@ -1,0 +1,17 @@
+# What the SANDBOXED WORKER image needs -- and nothing else (docker/Dockerfile installs this file).
+#
+# A worker only holds an outbound gRPC connection to the coordinator and starts
+# job containers on a Docker daemon; customer jobs never run inside this image.
+# So it does not need the coordinator (fastapi, uvicorn, jinja2, websockets),
+# the ML demo jobs (numpy, scikit-learn, joblib) or the test tools (pytest).
+# Those stay in requirements.txt for the coordinator and for development.
+#
+# Verified by importing everything scripts/run_worker.py loads in a virtualenv
+# holding only these packages. psycopg is optional and not needed here;
+# GPUtil is optional (the worker falls back to its own GPU detection) but kept
+# so GPU detection behaves exactly as it did before.
+psutil>=5.9.0
+GPUtil>=1.4.0
+cryptography>=45.0.0
+grpcio>=1.82.1
+protobuf>=7.35.0

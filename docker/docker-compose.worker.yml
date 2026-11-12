@@ -9,7 +9,7 @@ services:
     # nothing customer-controlled ever runs in THIS container, only job containers
     # the daemon starts. DOCKER_TLS_CERTDIR is empty so it listens on a plain
     # socket shared only with the worker through a volume (no TCP port is published).
-    image: docker:27-dind
+    image: docker:27.5.1-dind
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
