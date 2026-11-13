@@ -152,9 +152,10 @@ class TestCustomerView:
         view = customer_invoice_view(self._issued(cp, status="failed"))
         assert set(view) == {
             "invoice_id", "period_start", "period_end", "currency", "amount_cents",
-            "status", "created_at", "finalized_at", "paid_at", "line_items",
+            "status", "created_at", "finalized_at", "paid_at", "hosted_invoice_url", "line_items",
         }
         assert view["status"] == "failed"
+        assert view["hosted_invoice_url"] is None      # the pay link is the one provider detail a customer is meant to see
         assert set(view["line_items"][0]) == {
             "description", "quantity", "unit", "unit_price_cents", "amount_cents",
         }

@@ -249,6 +249,7 @@ def serve(args):
     os.environ.setdefault("GCON_MAX_RECEIPTS_IN_MEMORY", str(args.max_jobs_in_memory))
     os.environ.setdefault("GCON_BILLING_AUTO_INVOICE", "0")       # the monthly invoicing thread is not part of what is being measured
     os.environ.setdefault("GCON_OWNER_PASSWORD", "bench-owner-pw-1")   # the staff login the dashboard bots use
+    os.environ.setdefault("GCON_STRIPE_WEBHOOK_SECRET", "whsec_benchmark_only")   # so the Stripe webhook answers 400 to a forged call, not 503
 
     from gcon.cluster.coordinator import GCONCoordinator
     from gcon.dashboard.presentation import PresentationLayer
@@ -862,6 +863,8 @@ def smoke(api, load, routes, tenants, with_leases=False):
     # routes that would email or delete, called so that they can do neither
     seen["POST /auth/forgot-password"] = api.call("POST", "/auth/forgot-password", None, {"email": "nobody-smoke@bench.test"})[0]
     seen["POST /auth/reset-password"] = api.call("POST", "/auth/reset-password", None, {"token": "not-a-real-token", "new_password": "smoke-password-1"})[0]
+    # public and called by Stripe, not by customers: called with a forged signature, which it must refuse (400)
+    seen["POST /webhooks/stripe"] = api.call("POST", "/webhooks/stripe", None, {"id": "evt_bench"}, headers={"Stripe-Signature": "t=1,v1=00"})[0]
     seen["POST /jobs/clear"] = api.call("POST", "/jobs/clear", key, {"job_ids": ["job_bench_missing"]})[0]
     if with_leases:
         seen["GET /workers/leases"] = api.call("GET", "/workers/leases", key)[0]

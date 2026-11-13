@@ -152,3 +152,27 @@ def test_an_invoice_can_be_read_back_with_exact_prices_and_in_order():
         assert [li["description"] for li in invoice["line_items"]] == [f"line {i}" for i in range(5)]
         assert [li["unit_price_cents"] for li in invoice["line_items"]] == [0.05, 0.005, 0.0001, 12.0, 0.3]
         assert "position" not in invoice["line_items"][0] and "unit_price" not in invoice["line_items"][0]
+
+
+def test_hosted_invoice_link_and_billing_customers_round_trip(control_plane):
+    """Migration 20: the pay link on an invoice, lookup by the provider's invoice id, and one customer per org+scope."""
+    org = _uid("org")
+    invoice = control_plane.invoices.create(
+        org_id=org, period_start="2026-09-01", period_end="2026-10-01", currency="usd",
+        line_items=[{"description": "GPU", "quantity": 10.0, "unit": "gpu-second", "unit_price_cents": 1.0, "amount_cents": 10}],
+    )
+    stripe_id = _uid("in")
+    issued = control_plane.invoices.mark_status(
+        invoice["invoice_id"], "open", provider="stripe", provider_charge_id=stripe_id,
+        hosted_invoice_url="https://invoice.stripe.com/i/test",
+    )
+    assert issued["hosted_invoice_url"] == "https://invoice.stripe.com/i/test"
+    paid = control_plane.invoices.mark_status(invoice["invoice_id"], "paid", provider="stripe")
+    assert paid["hosted_invoice_url"] == "https://invoice.stripe.com/i/test"      # a later update keeps the link
+    assert control_plane.invoices.get_by_provider_ref("stripe", stripe_id)["invoice_id"] == invoice["invoice_id"]
+    assert control_plane.invoices.get_by_provider_ref("stripe", _uid("missing")) is None
+
+    assert control_plane.billing_customers.get(org, "stripe:test") is None
+    assert control_plane.billing_customers.set_if_absent(org, "stripe:test", "cus_first") == "cus_first"
+    assert control_plane.billing_customers.set_if_absent(org, "stripe:test", "cus_second") == "cus_first"
+    assert control_plane.billing_customers.get(org, "stripe:live") is None
