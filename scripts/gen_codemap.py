@@ -24,7 +24,9 @@ SKIP_PARTS = {"__pycache__", "node_modules", "htmlcov", ".git"}
 
 def _py_files(*bases):
     for base in bases:
-        for path in sorted((ROOT / base).rglob("*.py")):
+        # Sorted by the path as text, not as a Path: Windows compares Paths ignoring case, so the same files came out
+        # in a different order there ("WORKERS_X" before "WORKER_Y" on Linux, after it on Windows) and the map never matched.
+        for path in sorted((ROOT / base).rglob("*.py"), key=lambda p: p.as_posix()):
             rel = path.relative_to(ROOT).as_posix()
             if SKIP_PARTS & set(path.parts) or "_pb2" in path.name or rel.startswith("gcon-rebuild/"):
                 continue
@@ -194,7 +196,7 @@ def _tests():
     out = []
     base = ROOT / "tests"
     folders = defaultdict(list)
-    for path in sorted(base.rglob("test_*.py")):
+    for path in sorted(base.rglob("test_*.py"), key=lambda p: p.as_posix()):
         if SKIP_PARTS & set(path.parts):
             continue
         folders[path.parent.relative_to(ROOT).as_posix()].append(path.name)
@@ -206,7 +208,7 @@ def _tests():
 
 def _docs():
     out = []
-    for path in sorted((ROOT / "docs").glob("*.md")):
+    for path in sorted((ROOT / "docs").glob("*.md"), key=lambda p: p.as_posix()):
         if path.name == "CODEMAP.md":
             continue
         title = next((l.lstrip("# ").strip() for l in path.read_text(encoding="utf-8").splitlines()
