@@ -24,7 +24,7 @@ Statements here come from the decisions recorded in chat; checks marked **(verif
 | VIP / load balancer in front of coordinators | deployment work, outside the code; see "Running two coordinators" |
 | Password-reset email | no SMTP provider yet (`GCON_SMTP_*` unset), so reset links are not delivered |
 | Persisting the coordinator CA | built (2026-10-16); it only works once a Railway volume is attached, see "Before the fleet goes live". Without one, workers must re-enroll after every redeploy |
-| Real payment provider | Stripe is a stub. Until it is built, invoicing is by hand: the default provider issues an invoice (status open) and staff record the payment with Mark paid. The mock provider (`GCON_PAYMENT_PROVIDER=mock`) marks invoices paid without moving money and is for development only |
+| Stripe against the real Stripe | Stripe-hosted invoices are built (2026-11-13) and tested only against a fake Stripe, because there is no Stripe account here. The first real run is yours, in test mode: see "Taking payments with Stripe" in DEPLOYMENT.md. Card-on-file charging and subscriptions are not built |
 | Customer-created worker enroll tokens | tokens are issued by GCON staff; the Workers page says so |
 | Customer roles | customer accounts have no roles, so customer self-serve pool-mode changes stay off |
 | Assurance counters across restarts | the Assure counters reset when the coordinator restarts |
@@ -42,7 +42,7 @@ Status on 2026-11-01: Railway was down, so none of the latest commits (plan fee 
 |---|---|---|
 | `GCON_GRPC_MAX_WORKERS` | `1200` | Each connected worker holds one server thread for as long as it is connected. The default `256` is a hard ceiling: measured with 320 workers, exactly 256 connected and 64 never did. 700 workers need about 1,400 threads and about 210 MB |
 | Railway volume | attach one | Databases, certificate authority and signing key follow it automatically. Check `GET /management/persistence` (staff login) or look for the red "Data is not persistent" banner. Without it every redeploy wipes organizations, API keys, invoices and the CA, and all workers are rejected |
-| `GCON_PAYMENT_PROVIDER` | leave unset (or `manual`) | Invoicing by hand: Finalize issues an invoice (status open), staff use Mark paid with a payment reference. `mock` is for development only because it marks invoices paid without any payment |
+| `GCON_PAYMENT_PROVIDER` | leave unset (or `manual`) until Stripe is tested | Invoicing by hand: Finalize issues an invoice (status open), staff use Mark paid with a payment reference. `stripe` issues Stripe-hosted invoices (needs `STRIPE_SECRET_KEY` and `GCON_STRIPE_WEBHOOK_SECRET`, see DEPLOYMENT.md). `mock` is for development only because it marks invoices paid without any payment |
 | `GCON_AUTOSCALE_ENABLED` | leave unset | The AutoScaler is a demo. It creates fake in-process workers inside the coordinator process. It does not provision machines. Growing the hosted fleet today means adding machines by hand and enrolling them with the fleet token |
 | `GCON_TRUSTED_PROXY_IP_HEADER` | `X-Real-IP` | Railway's proxy sits in front of the coordinator, so without this every visitor looks like the same address to the login limiter and one person's wrong passwords lock everyone out of that account. Railway's documentation says its edge sets `X-Real-IP` to the client address; use that one rather than `X-Forwarded-For`, which community reports disagree about (whether a client-supplied value can pass through). Check it after the deploy, see "Check the client address after the deploy" |
 
@@ -73,7 +73,7 @@ Separately from the address, an account is also locked after 20 wrong passwords 
 - No automated backups. Use Railway volume backups. Do not copy the live SQLite files with `tar` while the coordinator runs.
 - Worker certificates last 825 days and nothing warns before they expire. Add a reminder for about two years after the first enrollment. The CA lasts 10 years.
 - Delete the old `certs/` and `certs-from-railway/` folders from your computer (old CA and worker keys from earlier deploys; they are git-ignored, not in the repository).
-- Decision still open: build Stripe subscriptions so customers can pay without a hand-sent invoice.
+- Decided (2026-11-13): customers pay through Stripe-hosted invoices (Stripe emails the invoice and hosts the page). Built; not yet run against real Stripe. Card-on-file charging is not built.
 
 ## v1 contract freeze: checklist (2026-10-16)
 

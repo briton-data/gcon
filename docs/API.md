@@ -586,12 +586,23 @@ that had completed jobs in it. Drafts are charged by staff, or automatically onl
 `failed` or `void`. A `draft` is a staff working copy and is never shown. An
 invoice that does not exist, belongs to another organization, or is still a
 draft all return the same `404`. Payment-gateway details (provider, charge id,
-error text) are not part of the customer view.
+error text) are not part of the customer view. The one exception is
+`hosted_invoice_url`: when a payment provider hosts the invoice (Stripe), it is the page
+where the customer pays, and it is `null` for invoices paid by hand. A customer site
+should show a Pay button for `open` and `failed` invoices that have one.
 
-> **Payments are not live.** The payment provider defaults to a mock and the
-> Stripe provider is not implemented, so `paid` on an invoice does not mean
-> money moved. Do not present these invoices to customers as real charges until
-> a real provider is configured.
+**Stripe.** With `GCON_PAYMENT_PROVIDER=stripe`, finalizing an invoice creates the matching
+invoice at Stripe, which emails it and hosts the payment page; the GCON invoice becomes
+`open`. It becomes `paid` only when Stripe's signed webhook says so
+(`POST /api/v1/webhooks/stripe`, called by Stripe, not documented in the OpenAPI schema).
+A failed attempt shows as `failed` and the customer can still pay from the same page; an
+invoice voided in Stripe becomes `void`. Setup: see "Taking payments with Stripe" in
+`docs/DEPLOYMENT.md`.
+
+> **Check which provider is running before presenting invoices as real charges.** The
+> default is invoicing by hand (staff record each payment), and `mock` marks invoices paid
+> without any payment. Only with the Stripe provider configured does `paid` mean Stripe
+> confirmed a payment.
 
 ---
 

@@ -12,11 +12,12 @@ Production-ready deployment instructions for GCON clusters.
 4. [Docker Deployment](#docker-deployment)
 5. [Multi-Node Cluster](#multi-node-cluster)
 6. [Persistent Storage & Worker Enrollment](#persistent-storage--worker-enrollment)
-7. [High Availability](#high-availability)
-8. [Security Hardening](#security-hardening)
-9. [Monitoring & Observability](#monitoring--observability)
-10. [Troubleshooting](#troubleshooting)
-11. [Operations Runbooks](#operations-runbooks)
+7. [Taking payments with Stripe](#taking-payments-with-stripe)
+8. [High Availability](#high-availability)
+9. [Security Hardening](#security-hardening)
+10. [Monitoring & Observability](#monitoring--observability)
+11. [Troubleshooting](#troubleshooting)
+12. [Operations Runbooks](#operations-runbooks)
 
 ---
 
@@ -593,6 +594,49 @@ directory, deleted afterwards; nothing carries over between jobs. Keep the
 worker's host and Docker daemon dedicated to the pool.
 
 ---
+
+## Taking payments with Stripe
+
+GCON issues each invoice at Stripe. Stripe emails it and hosts the page where the customer pays, so card details
+never reach GCON. When the payment succeeds Stripe calls GCON's webhook and the invoice becomes `paid`.
+
+| Setting | Value |
+|---|---|
+| `GCON_PAYMENT_PROVIDER` | `stripe` |
+| `STRIPE_SECRET_KEY` | A secret key (`sk_...`) or restricted key (`rk_...`) from the Stripe dashboard. Start with the test-mode key `sk_test_...`. A publishable key (`pk_...`) is refused at startup |
+| `GCON_STRIPE_WEBHOOK_SECRET` | The signing secret (`whsec_...`) of the webhook endpoint you add below. Until it is set the webhook answers `503`, so Stripe retries and nothing is lost |
+| `GCON_STRIPE_DAYS_UNTIL_DUE` | Optional, default `14` |
+
+**One-time setup (test mode first)**
+
+1. In Stripe (test mode): Developers, Webhooks, Add endpoint. URL: `https://<your-coordinator-host>/api/v1/webhooks/stripe`.
+   Events: `invoice.paid`, `invoice.payment_failed`, `invoice.voided`.
+2. Copy the endpoint's signing secret into `GCON_STRIPE_WEBHOOK_SECRET` and the test key into `STRIPE_SECRET_KEY`, set
+   `GCON_PAYMENT_PROVIDER=stripe`, redeploy.
+3. Generate an invoice for an organization, then Finalize it. The invoice becomes `open` and the customer's Billing page
+   gets a pay link. Open the link and pay with Stripe's test card `4242 4242 4242 4242`: the invoice becomes `paid`.
+   Do not wait for an email in test mode; use the pay link or the Stripe dashboard.
+4. Check in the Stripe dashboard (Developers, Webhooks) that the deliveries show `200`. A `400` means the signing
+   secret is wrong; a `503` means `GCON_STRIPE_WEBHOOK_SECRET` is not set on the server that received it.
+
+**Going live.** Create a second webhook endpoint in Stripe's live mode (it has its own signing secret), switch
+`STRIPE_SECRET_KEY` to the live key and `GCON_STRIPE_WEBHOOK_SECRET` to the live secret. Customers made in test mode are
+not reused: GCON keeps one customer per organization for test mode and one for live mode.
+
+**Things to know**
+
+- The customer's invoice email goes to the email of the account that signed the organization up. An organization with no
+  active account cannot be invoiced (Finalize says so and the invoice stays a draft).
+- If Stripe is down or refuses a request, Finalize reports Stripe's message and the invoice stays a draft, so pressing
+  Finalize again retries. Requests are idempotent for 24 hours, so a retry does not create a second Stripe invoice.
+- If the invoice is created at Stripe but the email fails, the invoice is still `open` with its pay link; resend it from
+  the Stripe dashboard.
+- Stripe will not collect a card payment below its minimum charge (50 cents for USD). A tiny invoice can be issued but not
+  paid by card; record it by hand or let usage roll into the next month.
+- The webhook is public by design. Its only protection is the signature check, so keep the signing secret private. Payments
+  recorded by hand (Mark paid) still work for invoices issued by hand and as a fallback.
+- Payments, refunds and disputes themselves are managed in the Stripe dashboard; GCON only shows `open`, `failed`, `paid` or
+  `void`.
 
 ## High Availability
 

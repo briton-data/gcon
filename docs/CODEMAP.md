@@ -14,12 +14,12 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 - `docs/FAILOVER.md` — GCON Coordinator Failover (High Availability)
 - `docs/QUICKSTART.md` — GCON Quick Start Guide
 - `docs/TRANSPORT_AND_PERSISTENCE.md` — GCON Distributed Foundation: Transport Layer + Persistence Layer
-- `docs/WORKER_SANDBOX.md` — Sandboxed workers
 - `docs/WORKERS_AND_ENROLLMENT.md` — Workers, enrollment and hosted leases
+- `docs/WORKER_SANDBOX.md` — Sandboxed workers
 
 ## Customer API routes (organization API key)
 
-41 routes. Scopes used: `Submit workflows`, `View monitoring`.
+42 routes. Scopes used: `Submit workflows`, `View monitoring`.
 
 | Method | Path | Summary |
 |---|---|---|
@@ -58,6 +58,7 @@ Hand-written guides are listed under *Docs*. Start with `docs/WORKERS_AND_ENROLL
 | GET | `/receipts` | List all job receipts |
 | GET | `/receipts/{receipt_id}` | Get full evidence detail for a single receipt |
 | GET | `/telemetry/events` | List job-lifecycle telemetry events |
+| POST | `/webhooks/stripe` | Called by Stripe, not by customers: payment events for invoices GCON issued. Public on purpose; the Stripe |
 | GET | `/whoami` | Identify the API key making this request |
 | GET | `/workers/leases` | This organization's hosted-worker leases (open ones, and recently ended) |
 | POST | `/workers/leases` | Lease GCON-hosted workers: they run this organization's jobs, and only its jobs, until released |
@@ -228,10 +229,11 @@ Panels (`templates/panels/`): `client_heatmap.html`, `cluster_health.html`, `clu
 
 ## Database
 
-Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 3 `billing_staking_webhooks_ha_retention`, 4 `receipt_verification_and_uploaded_at_indexes`, 5 `org_scoped_enroll_tokens`, 6 `telemetry_events`, 7 `node_enrollment_audit`, 8 `job_submission_idempotency_keys`, 9 `node_ed25519_public_key`, 10 `observability_history_and_incidents`, 11 `incident_ownership`, 12 `workflows`, 13 `job_client_reference_and_idempotency_fingerprint`, 14 `org_shared_pool_settings`, 15 `enroll_token_expiry_and_use_limit`, 16 `invoice_line_item_exact_price_and_order`, 17 `node_archived_at`, 18 `hosted_fleet_and_worker_leases`, 19 `workflow_submission_idempotency_keys`.
+Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 3 `billing_staking_webhooks_ha_retention`, 4 `receipt_verification_and_uploaded_at_indexes`, 5 `org_scoped_enroll_tokens`, 6 `telemetry_events`, 7 `node_enrollment_audit`, 8 `job_submission_idempotency_keys`, 9 `node_ed25519_public_key`, 10 `observability_history_and_incidents`, 11 `incident_ownership`, 12 `workflows`, 13 `job_client_reference_and_idempotency_fingerprint`, 14 `org_shared_pool_settings`, 15 `enroll_token_expiry_and_use_limit`, 16 `invoice_line_item_exact_price_and_order`, 17 `node_archived_at`, 18 `hosted_fleet_and_worker_leases`, 19 `workflow_submission_idempotency_keys`, 20 `hosted_invoices_and_billing_customers`.
 
 ### Control plane (`cp.db`)
 
+- `billing_customers`(org_id, scope, customer_id, created_at)
 - `cluster_events`(id, event_type, node_id, job_id, payload_json, created_at)
 - `coordinator_leases`(lease_name, holder_id, term, acquired_at, expires_at, updated_at)
 - `enroll_tokens`(token_id, org_id, token_hash, label, created_at, revoked_at, expires_at, max_uses, uses, kind)
@@ -240,7 +242,7 @@ Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 
 - `heartbeats`(id, node_id, sequence, status, cpu_percent, memory_percent, running_jobs, received_at)
 - `incidents`(incident_id, rule, subject, severity, title, status, first_seen, last_seen, resolved_at, detail_json, owner, owner_at)
 - `invoice_line_items`(line_item_id, invoice_id, description, quantity, unit, unit_price_cents, amount_cents, unit_price, position)
-- `invoices`(invoice_id, org_id, period_start, period_end, currency, amount_cents, status, provider, provider_charge_id, provider_error, created_at, finalized_at, paid_at)
+- `invoices`(invoice_id, org_id, period_start, period_end, currency, amount_cents, status, provider, provider_charge_id, provider_error, created_at, finalized_at, paid_at, hosted_invoice_url)
 - `job_attempts`(attempt_id, job_id, node_id, attempt_number, status, request_message_id, dispatched_at, completed_at, error)
 - `job_submission_idempotency_keys`(org_id, idempotency_key, job_id, created_at, request_hash)
 - `jobs`(job_id, command, status, priority, workflow_id, created_by, timeout_seconds, submitted_at, completed_at, result_json, org_id, callback_url, client_reference)
@@ -412,6 +414,8 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `GCON_SMTP_USER` — `src/gcon/management/mailer.py`
 - `GCON_STAGE_REPORT_PATH` — `src/gcon/api/api_v1.py`, `src/gcon/execution/agent.py`, `src/gcon/execution/docker_executor.py`
 - `GCON_STAKING_REQUIRED` — `src/gcon/cluster/scheduler.py`, `src/gcon/execution/staking.py`, `src/gcon/management/management_layer.py`
+- `GCON_STRIPE_DAYS_UNTIL_DUE` — `src/gcon/billing/providers.py`
+- `GCON_STRIPE_WEBHOOK_SECRET` — `src/gcon/api/api_v1.py`, `src/gcon/billing/providers.py`, `src/gcon/billing/stripe_webhooks.py`, `src/gcon/management/management_layer.py`
 - `GCON_TLS_CERT_DIR` — `scripts/bulk_provision_workers.py`, `scripts/run_coordinator.py`, `scripts/run_worker.py`, `src/gcon/config.py`, `src/gcon/dashboard/web_server.py`, `src/gcon/execution/docker_executor.py`, `src/gcon/persistence/durability.py`, `src/gcon/transport/config.py`
 - `GCON_TLS_SNI_OVERRIDE` — `scripts/run_worker.py`
 - `GCON_TRUSTED_PROXY_IP_HEADER` — `src/gcon/dashboard/web_server.py`
@@ -430,7 +434,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 
 - `tests/` (3): `test_benchmarks_still_run.py`, `test_codemap_current.py`, `test_gcon.py`
 - `tests/api/` (33): `test_abuse_controls.py`, `test_account_routes.py`, `test_api_cors_retry_after.py`, `test_api_rate_limit.py`, `test_artifact_scoping.py`, `test_billing_routes.py`, `test_cancel_pending_job.py`, `test_clear_jobs.py`, `test_cluster_metrics_scoping.py`, `test_command_meaning.py`, `test_command_rules_api.py`, `test_customer_auth_flow.py`, `test_enroll_ca_route.py`, `test_evicted_lookups_and_limits.py`, `test_health_is_scoped.py`, `test_job_and_receipt_filters.py`, `test_job_attempts_route.py`, `test_job_cancel_retry_org_isolation.py`, `test_job_submission_idempotency.py`, `test_login_hardening.py`, `test_node_enrollment_history.py`, `test_openapi_contract.py`, `test_org_required.py`, `test_password_reset_email.py`, `test_plans_api.py`, `test_policy_rejection_http.py`, `test_receipts_org_isolation.py`, `test_server_minted_job_ids.py`, `test_shared_pool_route.py`, `test_staff_plan_routes.py`, `test_verify_and_callback.py`, `test_worker_gate.py`, `test_worker_lease_routes.py`
-- `tests/billing/` (5): `test_billing_hardening.py`, `test_invoicing.py`, `test_invoicing_preview.py`, `test_plan_fee_and_included_usage.py`, `test_plan_terms_at_period_start.py`
+- `tests/billing/` (6): `test_billing_hardening.py`, `test_invoicing.py`, `test_invoicing_preview.py`, `test_plan_fee_and_included_usage.py`, `test_plan_terms_at_period_start.py`, `test_stripe_hosted_invoices.py`
 - `tests/cluster/` (26): `test_assurance_integration.py`, `test_concurrency_cap_race.py`, `test_coordinator_full.py`, `test_job_rules.py`, `test_job_runner_guard.py`, `test_job_verification.py`, `test_live_gpu_pipeline.py`, `test_max_job_attempts.py`, `test_org_isolation.py`, `test_quarantine.py`, `test_replicated_stale_attempt.py`, `test_restart_recovery.py`, `test_sandbox_boundary.py`, `test_sandbox_policy.py`, `test_scheduler_log_flood.py`, `test_scheduler_no_eligible_node.py`, `test_shared_pool.py`, `test_submission_policy_gate.py`, `test_telemetry_lifecycle.py`, `test_untrusted_input_cannot_break_dispatch.py`, `test_worker_leases.py`, `test_worker_lost_mid_job.py`, `test_worker_overview.py`, `test_workflow_cap_and_size_and_idempotency.py`, `test_workflow_orchestration.py`, `test_workflow_plan_rules_up_front.py`
 - `tests/dashboard/` (3): `test_verify_pillar_metrics.py`, `test_websocket_hardening.py`, `test_workers_panel.py`
 - `tests/execution/` (13): `test_assurance.py`, `test_attestation_pinning.py`, `test_command_check.py`, `test_docker_executor.py`, `test_docker_hardening.py`, `test_docker_run_isolation.py`, `test_gpu_sampling.py`, `test_job_run_as_user.py`, `test_output_cap.py`, `test_replication_compare.py`, `test_sanitize_host.py`, `test_worker_identity.py`, `test_worker_script_secrets.py`
@@ -474,6 +478,7 @@ Lease events (published by name): `WORKER_HELD`, `WORKER_LEASE_ENDED`, `WORKER_L
 - `invoicing.py` — Invoice generation from usage-metering data.
 - `pricing.py` — Pricing configuration for GCON's usage-based invoicing.
 - `providers.py` — PaymentProvider — the seam a real payment gateway integration plugs
+- `stripe_webhooks.py` — Stripe webhook handling: proving a request really came from Stripe, and turning its events into invoice statu…
 - `terms_history.py` — What a period is billed is decided by the plan, and the plan's prices, in force when the period STARTED.
 
 ### `src/gcon/cluster/`
