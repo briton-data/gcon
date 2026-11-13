@@ -175,6 +175,7 @@ class InvoiceRepository:
         provider: Optional[str] = None,
         provider_charge_id: Optional[str] = None,
         provider_error: Optional[str] = None,
+        hosted_invoice_url: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         now = datetime.now(UTC).isoformat()
         finalized_at = now if status in ("open", "paid", "failed", "void") else None
@@ -185,10 +186,43 @@ class InvoiceRepository:
                 provider = COALESCE(?, provider),
                 provider_charge_id = COALESCE(?, provider_charge_id),
                 provider_error = ?,
+                hosted_invoice_url = COALESCE(?, hosted_invoice_url),
                 finalized_at = COALESCE(finalized_at, ?),
                 paid_at = COALESCE(paid_at, ?)
             WHERE invoice_id = ?
             """,
-            (status, provider, provider_charge_id, provider_error, finalized_at, paid_at, invoice_id),
+            (status, provider, provider_charge_id, provider_error, hosted_invoice_url, finalized_at, paid_at,
+             invoice_id),
         )
         return self.get(invoice_id)
+
+    def get_by_provider_ref(self, provider: str, provider_charge_id: str) -> Optional[Dict[str, Any]]:
+        """The invoice a payment provider knows by this id (for Stripe, its `in_...` invoice id)."""
+        row = self.db.query_one(
+            "SELECT invoice_id FROM invoices WHERE provider = ? AND provider_charge_id = ?",
+            (provider, provider_charge_id),
+        )
+        return self.get(row["invoice_id"]) if row is not None else None
+
+
+class BillingCustomerRepository:
+    """Which customer record a payment provider holds for an organization (one per organization and provider
+    scope). The id is whatever the provider gave back; GCON never stores card or bank details."""
+
+    def __init__(self, db: ControlPlaneDatabase):
+        self.db = db
+
+    def get(self, org_id: str, scope: str) -> Optional[str]:
+        row = self.db.query_one(
+            "SELECT customer_id FROM billing_customers WHERE org_id = ? AND scope = ?", (org_id, scope))
+        return row["customer_id"] if row is not None else None
+
+    def set_if_absent(self, org_id: str, scope: str, customer_id: str) -> str:
+        """Remember the customer id and return the one that ends up stored: if another request got there first,
+        theirs wins and is returned, so one organization never ends up with two."""
+        self.db.execute(
+            "INSERT INTO billing_customers (org_id, scope, customer_id, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (org_id, scope) DO NOTHING",
+            (org_id, scope, customer_id, datetime.now(UTC).isoformat()),
+        )
+        return self.get(org_id, scope) or customer_id

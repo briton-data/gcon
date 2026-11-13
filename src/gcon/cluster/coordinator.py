@@ -300,6 +300,8 @@ class GCONCoordinator:
         # Optional callable(org_id, replicas) -> None, or the refusal dict, set by ManagementLayer: does this
         # organization have the workers to run a job needing `replicas` distinct ones? Checked at submission.
         self.org_worker_gate_resolver = None
+        # Set by the management layer: org_id -> {"org_name", "email"}, who a payment provider should send an organization's invoices to.
+        self.billing_contact_resolver = None
         # The shared pool (an organization's job falling back to an organization-less worker staff flagged) has a
         # master switch, OFF by default: hosted workers are claimed through leases instead
         # (docs/WORKERS_AND_ENROLLMENT.md). Staff flip it on the dashboard; the choice is stored. GCON_SHARED_POOL

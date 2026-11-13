@@ -23,6 +23,7 @@ from gcon.persistence.repositories import (
     SettingsRepository,
     StakeRepository,
     InvoiceRepository,
+    BillingCustomerRepository,
     WebhookRepository,
     LeaseRepository,
     EnrollTokenRepository,
@@ -68,6 +69,7 @@ class ControlPlane:
         self.settings = SettingsRepository(self.db)
         self.stakes = StakeRepository(self.db)
         self.invoices = InvoiceRepository(self.db)
+        self.billing_customers = BillingCustomerRepository(self.db)
         self.webhooks = WebhookRepository(self.db)
         self.leases = LeaseRepository(self.db)
         self.enroll_tokens = EnrollTokenRepository(self.db)

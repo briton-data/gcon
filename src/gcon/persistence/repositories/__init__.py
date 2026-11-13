@@ -8,7 +8,7 @@ from gcon.persistence.repositories.cluster_events import ClusterEventRepository
 from gcon.persistence.repositories.execution_logs import ExecutionLogRepository
 from gcon.persistence.repositories.settings import SettingsRepository
 from gcon.persistence.repositories.staking import StakeRepository
-from gcon.persistence.repositories.billing import InvoiceRepository
+from gcon.persistence.repositories.billing import BillingCustomerRepository, InvoiceRepository
 from gcon.persistence.repositories.webhooks import WebhookRepository
 from gcon.persistence.repositories.leases import LeaseRepository
 from gcon.persistence.repositories.enroll_tokens import EnrollTokenRepository
@@ -50,6 +50,7 @@ __all__ = [
     "SettingsRepository",
     "StakeRepository",
     "InvoiceRepository",
+    "BillingCustomerRepository",
     "WebhookRepository",
     "LeaseRepository",
     "TelemetryRepository",

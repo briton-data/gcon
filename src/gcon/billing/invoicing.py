@@ -489,11 +489,14 @@ def finalize_invoice(
     invoice_id: str,
     provider=None,
     org_billing_ref: Optional[str] = None,
+    contact_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """
     Attempts to charge a draft invoice via `provider` (defaults to
     `gcon.billing.providers.get_configured_provider()`) and records
-    the outcome. A zero-amount invoice (no billable usage that
+    the outcome. A hosted provider (Stripe) does not charge: the invoice is created at the provider and issued
+    (`open`) with the link where the customer pays; the payment arrives later by webhook. `contact_resolver(org_id)`
+    returns that organization's {"org_name", "email"}, which a hosted provider needs to create the customer. A zero-amount invoice (no billable usage that
     period) is marked `paid` without ever calling the provider --
     there's nothing to charge, and a $0 charge attempt is a
     meaningless (and, on some real gateways, rejected) API call.
@@ -513,6 +516,8 @@ def finalize_invoice(
     if getattr(provider, "issues_only", False):
         # Invoicing by hand: nothing is charged. The invoice is issued and stays open until staff record the payment.
         return control_plane.invoices.mark_status(invoice_id, "open", provider=provider.name)
+    if getattr(provider, "hosted", False):
+        return _issue_hosted(control_plane, invoice, provider, contact_resolver)
     result = provider.charge(invoice, org_billing_ref)
     if result.success:
         return control_plane.invoices.mark_status(
@@ -522,6 +527,26 @@ def finalize_invoice(
     return control_plane.invoices.mark_status(
         invoice_id, "failed", provider=result.provider, provider_error=result.error,
     )
+
+
+def _issue_hosted(control_plane: ControlPlane, invoice: Dict[str, Any], provider,
+                  contact_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]]) -> Dict[str, Any]:
+    """Issue an invoice at a hosted provider. Anything that goes wrong raises and leaves the invoice a draft, so
+    nothing is half-issued and finalizing it again simply retries."""
+    org_id = invoice["org_id"]
+    scope = provider.customer_scope
+    customer_id = control_plane.billing_customers.get(org_id, scope)
+    if not customer_id:
+        contact = contact_resolver(org_id) if contact_resolver else None
+        if not contact or not str(contact.get("email") or "").strip():
+            raise ValueError(
+                f"Organization '{org_id}' has no billing email, so the payment provider cannot send it an invoice.")
+        created = provider.ensure_customer(org_id, contact)
+        customer_id = control_plane.billing_customers.set_if_absent(org_id, scope, created)
+    issued = provider.issue(invoice, customer_id)
+    return control_plane.invoices.mark_status(
+        invoice["invoice_id"], "open", provider=provider.name,
+        provider_charge_id=issued.provider_invoice_id, hosted_invoice_url=issued.hosted_invoice_url)
 
 
 def record_manual_payment(control_plane: ControlPlane, invoice_id: str, reference: str) -> Dict[str, Any]:
@@ -628,7 +653,7 @@ def preview_usage(
 
 _CUSTOMER_INVOICE_FIELDS = (
     "invoice_id", "period_start", "period_end", "currency", "amount_cents",
-    "status", "created_at", "finalized_at", "paid_at",
+    "status", "created_at", "finalized_at", "paid_at", "hosted_invoice_url",
 )
 _CUSTOMER_LINE_ITEM_FIELDS = ("description", "quantity", "unit", "unit_price_cents", "amount_cents")
 

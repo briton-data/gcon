@@ -735,4 +735,25 @@ MIGRATIONS: List[Migration] = [
             """,
         ],
     ),
+    Migration(
+        version=20,
+        name="hosted_invoices_and_billing_customers",
+        up_sql=[
+            # The page where the customer pays an invoice a payment provider hosts (Stripe's hosted invoice page).
+            # NULL for invoices issued by hand.
+            "ALTER TABLE invoices ADD COLUMN hosted_invoice_url TEXT",
+            # Which customer record a payment provider holds for an organization. `scope` is the provider plus its
+            # mode ('stripe:test' / 'stripe:live'): a customer made with a test key does not exist under a live key,
+            # so switching keys must not reuse the old id.
+            """
+            CREATE TABLE billing_customers (
+                org_id       TEXT NOT NULL,
+                scope        TEXT NOT NULL,
+                customer_id  TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (org_id, scope)
+            )
+            """,
+        ],
+    ),
 ]

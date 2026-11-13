@@ -4612,7 +4612,7 @@ async function setupBillingTab() {
         if (!window.confirm(`Finalize ${scope}?` + (real ? " Customers will be charged." : " (Mock payment provider: no money moves.)"))) return;
         try {
             const out = await billingPost("/management/billing/invoices/finalize-drafts", orgFilter ? { org_id: orgFilter } : {});
-            showToast(`${out.paid} paid, ${out.failed} failed (of ${out.drafts} drafts).`, out.failed > 0);
+            showToast(`${out.paid} paid, ${out.issued || 0} issued, ${out.failed} failed (of ${out.drafts} drafts).`, out.failed > 0);
             await loadBillingTab();
         } catch (err) {
             console.error("Failed to finalize drafts:", err);

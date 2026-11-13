@@ -100,6 +100,7 @@ class ManagementLayer:
             coordinator.org_worker_cap_resolver = self._plan_worker_cap_for_org
             coordinator.org_leased_worker_cap_resolver = self._plan_leased_worker_cap_for_org
             coordinator.org_worker_gate_resolver = self.worker_gate
+            coordinator.billing_contact_resolver = self.billing_contact
 
         self._bootstrap_owner_account()
         self._bridge_cluster_events()
@@ -1403,16 +1404,18 @@ class ManagementLayer:
             raise ValueError("No control plane available.")
         from gcon.billing.invoicing import finalize_invoice
         drafts = [i for i in self.get_invoices(org_id=org_id, limit=1000) if i["status"] == "draft"]
-        counts = {"drafts": len(drafts), "paid": 0, "failed": 0, "errors": []}
+        counts = {"drafts": len(drafts), "paid": 0, "issued": 0, "failed": 0, "errors": []}
         for invoice in drafts:
             try:
-                result = finalize_invoice(self.coordinator.control_plane, invoice["invoice_id"])
-                counts["paid" if result["status"] == "paid" else "failed"] += 1
+                result = finalize_invoice(self.coordinator.control_plane, invoice["invoice_id"],
+                                          contact_resolver=self.billing_contact)
+                # "issued" = sent out and waiting to be paid (invoicing by hand, or a hosted provider such as Stripe).
+                counts[{"paid": "paid", "open": "issued"}.get(result["status"], "failed")] += 1
             except Exception as e:
                 counts["failed"] += 1
                 counts["errors"].append(f"{invoice['invoice_id'][:12]}: {e}")
         self.audit_logger.log("Admin", "finalized draft invoices",
-                               f"{counts['paid']} paid, {counts['failed']} failed of {counts['drafts']}")
+                               f"{counts['paid']} paid, {counts['issued']} issued, {counts['failed']} failed of {counts['drafts']}")
         return counts
 
     def set_pricing(self, updates):
@@ -1455,9 +1458,46 @@ class ManagementLayer:
         if self.coordinator is None or self.coordinator.control_plane is None:
             raise ValueError("No control plane available.")
         from gcon.billing.invoicing import finalize_invoice
-        invoice = finalize_invoice(self.coordinator.control_plane, invoice_id)
+        invoice = finalize_invoice(self.coordinator.control_plane, invoice_id, contact_resolver=self.billing_contact)
         self.audit_logger.log("Admin", f"finalized invoice '{invoice_id}'", invoice.get("status", ""))
         return invoice
+
+    def billing_contact(self, org_id):
+        """Who a payment provider should send this organization's invoices to: its name and the email of its earliest
+        active customer account (the person who signed it up). None when there is no such account."""
+        try:
+            org = self.org_registry.get_organization(org_id)
+        except ValueError:
+            return None
+        accounts = [u for u in self.customer_registry.list_for_org(org_id) if getattr(u, "status", "Active") == "Active"]
+        if not accounts:
+            return None
+        first = min(accounts, key=lambda u: str(getattr(u, "created_at", "")))
+        return {"org_name": org.name, "email": first.email}
+
+    def process_stripe_webhook(self, payload, signature_header):
+        """Verify and apply one Stripe webhook delivery. Raises WebhookNotConfigured (no secret set) or
+        WebhookSignatureError (not from Stripe / too old); otherwise returns {"outcome", "invoice_id"}."""
+        import json as _json
+        from gcon.billing.stripe_webhooks import WebhookNotConfigured, apply_event, verify_signature
+        secret = os.environ.get("GCON_STRIPE_WEBHOOK_SECRET", "").strip()
+        if not secret:
+            raise WebhookNotConfigured("GCON_STRIPE_WEBHOOK_SECRET is not set.")
+        verify_signature(payload, signature_header, secret)
+        if self.coordinator is None or self.coordinator.control_plane is None:
+            raise WebhookNotConfigured("No control plane available.")
+        try:
+            event = _json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return {"outcome": "ignored", "invoice_id": None}
+        if not isinstance(event, dict):
+            return {"outcome": "ignored", "invoice_id": None}
+        result = apply_event(self.coordinator.control_plane, event)
+        if result["outcome"] in ("paid", "payment_failed", "voided", "paid_after_void", "total_mismatch",
+                                  "invoice_mismatch"):
+            self.audit_logger.log("Stripe", f"{event.get('type')} for invoice '{result['invoice_id']}'",
+                                   f"{result['outcome']} (event {event.get('id', '?')})")
+        return result
 
     def record_invoice_payment(self, invoice_id, reference):
         """Staff record that an issued invoice was paid outside GCON (bank transfer, cheque...). Needs the payment reference."""

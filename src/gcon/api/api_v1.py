@@ -463,6 +463,8 @@ class InvoiceOut(BaseModel):
     created_at: Optional[str] = None
     finalized_at: Optional[str] = None
     paid_at: Optional[str] = None
+    hosted_invoice_url: Optional[str] = Field(
+        default=None, description="Where to pay this invoice, when a payment provider hosts it. null for invoices paid by hand.")
     line_items: List[InvoiceLineItemOut]
 
 
@@ -868,6 +870,21 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
     # other call and revokes on logout. No session cookie, no
     # server-rendered page -- pure JSON in, JSON out.
     # ------------------------------------------------------------
+
+    @app.post("/webhooks/stripe", include_in_schema=False)
+    async def stripe_webhook(request: Request):
+        """Called by Stripe, not by customers: payment events for invoices GCON issued. Public on purpose; the Stripe
+        signature (checked against GCON_STRIPE_WEBHOOK_SECRET) is what proves a request is genuine."""
+        from gcon.billing.stripe_webhooks import WebhookNotConfigured, WebhookSignatureError
+        payload = await request.body()
+        try:
+            result = management.process_stripe_webhook(payload, request.headers.get("stripe-signature", ""))
+        except WebhookNotConfigured:
+            # 503, not 4xx: Stripe retries a failing delivery for days, so it still arrives once the secret is set.
+            raise HTTPException(status_code=503, detail="Stripe webhooks are not configured on this server.")
+        except WebhookSignatureError:
+            raise HTTPException(status_code=400, detail="Invalid signature.")
+        return {"received": True, "outcome": result["outcome"]}
 
     @app.post(
         "/auth/signup",

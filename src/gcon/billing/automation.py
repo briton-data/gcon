@@ -195,7 +195,8 @@ class BillingAutomation:
                                 continue
                             summary["generated"] += 1
                         if do_finalize and invoice["status"] == "draft":
-                            finalize_invoice(plane, invoice["invoice_id"])
+                            finalize_invoice(plane, invoice["invoice_id"],
+                                             contact_resolver=getattr(self.c, "billing_contact_resolver", None))
                             summary["finalized"] += 1
                     except InvoiceOverlapError as e:
                         summary["overlap_skipped"] += 1
