@@ -756,4 +756,14 @@ MIGRATIONS: List[Migration] = [
             """,
         ],
     ),
+    Migration(
+        version=21,
+        name="job_spec",
+        up_sql=[
+            # What a job was submitted with beyond its command (kind, requires, verify, stages, dataset_artifacts,
+            # require_sandbox), as JSON. Without it a coordinator restart cannot re-run a replicated job faithfully.
+            # NULL for jobs submitted before this migration.
+            "ALTER TABLE jobs ADD COLUMN spec_json TEXT",
+        ],
+    ),
 ]

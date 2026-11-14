@@ -151,6 +151,10 @@ class JobOut(BaseModel):
         default=None,
         description="Why a failed/cancelled job ended, when the result carries one.",
     )
+    waiting_reason: Optional[str] = Field(
+        default=None,
+        description="Why a queued (pending) job has not started yet, for example that no worker is available. None once it has started.",
+    )
     return_code: Optional[int] = None
 
 

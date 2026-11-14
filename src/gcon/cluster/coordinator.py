@@ -328,6 +328,10 @@ class GCONCoordinator:
         # only -- see JobAttemptRepository), which is used for
         # receipt binding, not for this.
         self._max_job_attempts = int(os.environ.get("GCON_MAX_JOB_ATTEMPTS", "3"))
+        # How long a job may wait in the queue for a worker before it is failed with a clear reason. 0 (the default)
+        # keeps today's behaviour: a valid job waits as long as it takes.
+        self._queue_timeout_seconds = float(os.environ.get("GCON_QUEUE_TIMEOUT_SECONDS", "0") or 0)
+        self._last_queue_sweep = 0.0
         # Sandbox policy (GCON_SANDBOX_POLICY): "required" (the default)
         # only dispatches to workers that run jobs inside a container
         # (docker backend) -- a job on a raw-subprocess worker runs with
@@ -623,16 +627,30 @@ class GCONCoordinator:
 
             open_attempts = [a for a in attempts if a["status"] == "dispatched"]
             failure_reason = None
-            if len(open_attempts) > 1:
+            try:
+                spec = self.control_plane.jobs.get_spec(job_id)
+            except Exception as e:
+                _log_line(f"[RESTORE] Failed to load the stored spec for '{job_id}': {e!r}")
+                spec = None
+            if spec:
+                for key in ("kind", "requires", "verify", "stages", "dataset_artifacts"):
+                    if spec.get(key) is not None:
+                        job[key] = spec[key]
+                if spec.get("require_sandbox") is not None:
+                    job["require_sandbox"] = bool(spec["require_sandbox"])
+            replicas = (job.get("verify") or {}).get("replicas", 2) if job.get("verify") else 1
+            # Each replica of a replicated dispatch is its own attempt row; the retry budget counts dispatches.
+            attempts_used = -(-len(attempts) // replicas) if replicas > 1 else len(attempts)
+            if len(open_attempts) > 1 and not job.get("verify"):
                 failure_reason = (
                     "Job was mid-flight as a replicated (multi-witness) "
                     "execution when the coordinator restarted. "
-                    "Verification config is not preserved across a "
-                    "restart, so it cannot be safely resumed "
+                    "It was submitted before verification settings were "
+                    "stored, so it cannot be safely resumed "
                     "automatically -- resubmit with the same verify "
                     "parameters."
                 )
-            elif len(attempts) >= self._max_job_attempts:
+            elif attempts_used >= self._max_job_attempts:
                 failure_reason = (
                     f"Job had already reached the max attempt limit "
                     f"({self._max_job_attempts}) across restarts and "
@@ -672,7 +690,7 @@ class GCONCoordinator:
             # let it overwrite the durable job status once this new
             # attempt exists) can't clobber the resumed attempt's
             # outcome or receipt.
-            job["attempt_number"] = len(attempts)
+            job["attempt_number"] = attempts_used
             job["status"] = "pending"
             job["node_id"] = None
             try:
@@ -1136,6 +1154,13 @@ class GCONCoordinator:
                         "UPDATE jobs SET callback_url = ? WHERE job_id = ?",
                         (callback_url, job_id),
                     )
+                # What the job was submitted with, so a coordinator restart can run it again as it was asked
+                # (in particular a replicated job, which used to be failed on restart).
+                self.control_plane.jobs.set_spec(job_id, {
+                    "kind": kind, "requires": requires, "verify": verify, "stages": stages,
+                    "dataset_artifacts": dataset_artifacts,
+                    "require_sandbox": self.jobs[job_id].get("require_sandbox"),
+                })
             except Exception as e:
                 self.telemetry.warning(f"[PERSIST] Failed to persist job '{job_id}': {e!r}")
 
@@ -3413,6 +3438,8 @@ class GCONCoordinator:
                 self._shutdown_event.wait(0.5)
                 continue
 
+            self._expire_stale_queued_jobs()
+
             if self.job_queue.empty():
                 self.scheduler_stats.tick("idle_queue_empty")
                 self._shutdown_event.wait(0.1)
@@ -3773,6 +3800,53 @@ class GCONCoordinator:
 
         _log_line(f"[JOB] Cancel requested for '{job_id}' (process killed: {killed}).")
         return killed
+
+    def _expire_stale_queued_jobs(self):
+        """Fail jobs that have waited for a worker longer than GCON_QUEUE_TIMEOUT_SECONDS (0 = never). Checked at
+        most every 5 seconds. The job ends as 'failed' with the reason, like any other failure; a job that was
+        picked up in the meantime is left alone. Their ids stay in the queue and are skipped by assign_job."""
+        timeout = self._queue_timeout_seconds
+        if timeout <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_queue_sweep < 5.0:
+            return
+        self._last_queue_sweep = now
+        cutoff = datetime.now(UTC).timestamp() - timeout
+        expired = []
+        with self.jobs_lock:
+            for job_id, job in self.jobs.items():
+                if job.get("status") != "pending" or not job.get("created_at"):
+                    continue
+                try:
+                    created = datetime.fromisoformat(str(job["created_at"])).timestamp()
+                except ValueError:
+                    continue
+                if created <= cutoff:
+                    job["status"] = "failed"
+                    job["completed_at"] = datetime.now(UTC).isoformat()
+                    job["result"] = {"error": (
+                        f"No worker became available within {int(timeout)} seconds, so the job was not run. "
+                        "Submit it again once a worker is online, or request a worker for your organization."
+                    )}
+                    expired.append((job_id, job))
+        for job_id, job in expired:
+            self._persist_job_status(job_id, job)
+            self._advance_workflow(job_id, job, success=False)
+            _log_line(f"[QUEUE] Job '{job_id}' failed: no worker within {int(timeout)} s.")
+
+    def _waiting_reason(self, job):
+        """Why a pending job has not started, in words a customer can act on. None unless the job is pending."""
+        if job.get("status") != "pending":
+            return None
+        if not self.registry.available_nodes():
+            return "No worker is available right now. The job is queued and starts as soon as one is."
+        if job.get("verify"):
+            return (f"Waiting for {(job['verify'] or {}).get('replicas', 2)} available workers "
+                    "to run it for verification.")
+        if job.get("requires"):
+            return "Waiting for a worker that meets this job's requirements."
+        return "Waiting for a worker that can take this job."
 
     def clear_queue(self):
         """
@@ -4649,6 +4723,8 @@ class GCONCoordinator:
             "kind": job.get("kind", "command"),
             "requires": job.get("requires"),
             "verify": job.get("verify"),
+            # Why a queued job has not started (None once it has).
+            "waiting_reason": self._waiting_reason(job),
             # 'shared' if an organization's job ran on the shared worker
             # pool, 'dedicated' if on one of its own workers, None for a
             # job with no org or not yet placed.

@@ -304,4 +304,16 @@ class JobRepository:
             return None
         d = dict(row)
         d["result"] = json.loads(d.pop("result_json")) if d.get("result_json") else None
+        d.pop("spec_json", None)       # internal; read only through get_spec(), never handed to API callers
         return d
+
+    def set_spec(self, job_id: str, spec: Dict[str, Any]) -> None:
+        """Store what the job was submitted with (see migration 21)."""
+        self.db.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?", (json.dumps(spec), job_id))
+
+    def get_spec(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """The stored submission spec, or None for a job submitted before it was stored."""
+        row = self.db.execute("SELECT spec_json FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        raw = row["spec_json"] if row is not None else None
+        return json.loads(raw) if raw else None
+
