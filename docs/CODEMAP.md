@@ -285,9 +285,9 @@ Migrations: 1 `initial_control_plane_schema`, 2 `add_org_id_to_nodes_and_jobs`, 
 
 | Plan | requests_per_minute | max_concurrent_jobs | allowed_programs | max_runtime_seconds | max_workers | max_leased_workers | verification | included_usage_cents | monthly_fee_cents |
 |---|---|---|---|---|---|---|---|---|---|
-| Standard (default) | 600 | 50 | ['python', 'python3', 'nvidia-smi', 'echo'] | 3600 | 5 | 1 | False | 500 | 0 |
-| Pro | 3000 | 200 | ['python', 'python3', 'nvidia-smi', 'echo', 'bash', 'sh', 'pip', 'pip3'] | 14400 | 25 | 4 | True | 0 | 0 |
-| Enterprise | 12000 | 1000 | ['*'] | 86400 | 100 | 20 | True | 0 | 0 |
+| Standard (default) | 600 | 20 | ['python', 'python3', 'nvidia-smi', 'echo'] | 3600 | 5 | 1 | False | 500 | 0 |
+| Pro | 3000 | 100 | ['python', 'python3', 'nvidia-smi', 'echo', 'bash', 'sh', 'pip', 'pip3'] | 14400 | 25 | 4 | True | 0 | 0 |
+| Enterprise | 6000 | 1000 | ['*'] | 86400 | 100 | 20 | True | 0 | 0 |
 
 ## Events
 

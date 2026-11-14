@@ -488,8 +488,8 @@ so always read the current values from this route instead of hard-coding them.
 
 `null` for a limit means that plan has no limit; `allowed_programs: null` means any
 program. Starting values (staff can change them): Standard 600 requests/minute,
-50 concurrent jobs, 1 hour per job and the four programs above; Pro 3000, 200, 4
-hours and also `bash`, `sh`, `pip`, `pip3`; Enterprise 12000, 1000, 24 hours and
+20 concurrent jobs, 1 hour per job and the four programs above; Pro 3000, 100, 4
+hours and also `bash`, `sh`, `pip`, `pip3`; Enterprise 6000, 1000, 24 hours and
 any program. An organization still carrying an old label (such as "Free") is
 limited as Standard until staff pick a plan for it, and then `plan` shows that old
 label.
