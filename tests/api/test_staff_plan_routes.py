@@ -103,7 +103,7 @@ class TestPlansRoutes:
         server, _ = stack
         login(server).put("/management/plans/Standard", json={"requests_per_minute": 9, "max_concurrent_jobs": 3})
         actions = [e["action"] for e in server.management.audit_logger.list_entries()]
-        assert any("changed Standard plan limits 600/min, 50 jobs -> 9/min, 3 jobs" in a for a in actions)
+        assert any("changed Standard plan limits 600/min, 20 jobs -> 9/min, 3 jobs" in a for a in actions)
 
 
 class TestOrganizationRoutes:

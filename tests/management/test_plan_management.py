@@ -100,7 +100,7 @@ class TestEditingTheTiers:
         pro_now = management.get_plan_limits()["Pro"]
         assert (pro_now["requests_per_minute"], pro_now["max_concurrent_jobs"]) == (0, 0)
         entries = [e["action"] for e in management.audit_logger.list_entries()]
-        assert any("changed Pro plan limits 3000/min, 200 jobs -> 100/min, 7 jobs" in a for a in entries)
+        assert any("changed Pro plan limits 3000/min, 100 jobs -> 100/min, 7 jobs" in a for a in entries)
 
     @pytest.mark.parametrize("actor", [OPERATOR, SimpleNamespace(name="Dev", role="Developer"), None])
     def test_nobody_else_can(self, env, actor):

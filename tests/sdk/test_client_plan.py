@@ -20,7 +20,7 @@ def test_get_plan_shows_plan_limits_and_usage(live_server):
     plan = client.get_plan()
     assert plan["plan"] == "Standard"
     assert plan["requests_per_minute"] == 600
-    assert plan["max_concurrent_jobs"] == 50
+    assert plan["max_concurrent_jobs"] == 20
     assert plan["jobs_in_flight"] == 0
 
     live_server.management.update_organization(org_id, plan="Enterprise")
