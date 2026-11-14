@@ -284,3 +284,7 @@ reverse Round 7 for that one place; it needs an explicit yes.
 ## Queued jobs: `waiting_reason` (2026-11-14)
 
 `GET /jobs` and `GET /jobs/{id}` return `waiting_reason` (string or null). It is set only while `status` is `pending` and says why the job has not started, for example that no worker is available. Show it under the "waiting for a worker" state. If the operator sets `GCON_QUEUE_TIMEOUT_SECONDS`, a job that waits too long becomes `failed` and `error` says that no worker became available.
+
+## Repeated commands (2026-11-14)
+
+`POST /jobs` returns 409 with `code: "duplicate_job"`, `existing_job_id` and `existing_status` when the same command is already pending, running or completed. Ask the customer; to run it again send the same body with `confirm_rerun: true`.
