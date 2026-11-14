@@ -77,17 +77,17 @@ _PROGRAM_NAME = re.compile(r"^(\*|[A-Za-z0-9][A-Za-z0-9._+-]{0,63})$")
 # rate equals the single limit the API had before plans existed (600/minute).
 DEFAULT_PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
     "Standard": {
-        "requests_per_minute": 600, "max_concurrent_jobs": 50,
+        "requests_per_minute": 600, "max_concurrent_jobs": 20,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo"],
         "max_runtime_seconds": 3600, "max_workers": 5, "max_leased_workers": 1, "verification": False, "included_usage_cents": 500, "monthly_fee_cents": 0,
     },
     "Pro": {
-        "requests_per_minute": 3000, "max_concurrent_jobs": 200,
+        "requests_per_minute": 3000, "max_concurrent_jobs": 100,
         "allowed_programs": ["python", "python3", "nvidia-smi", "echo", "bash", "sh", "pip", "pip3"],
         "max_runtime_seconds": 14400, "max_workers": 25, "max_leased_workers": 4, "verification": True, "included_usage_cents": 0, "monthly_fee_cents": 0,
     },
     "Enterprise": {
-        "requests_per_minute": 12000, "max_concurrent_jobs": 1000,
+        "requests_per_minute": 6000, "max_concurrent_jobs": 1000,
         "allowed_programs": ["*"],
         "max_runtime_seconds": 86400, "max_workers": 100, "max_leased_workers": 20, "verification": True, "included_usage_cents": 0, "monthly_fee_cents": 0,
     },
