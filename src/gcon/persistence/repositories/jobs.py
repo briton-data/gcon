@@ -317,3 +317,20 @@ class JobRepository:
         raw = row["spec_json"] if row is not None else None
         return json.loads(raw) if raw else None
 
+    # A job with one of these statuses is "the same work already asked for"; a failed or cancelled one may be re-submitted freely.
+    _DUPLICATE_STATUSES = ("pending", "running", "completed")
+
+    def find_same_command(self, org_id: str, command: str, limit: int = 500) -> Optional[Dict[str, Any]]:
+        """The newest of the organization's last `limit` pending/running/completed jobs whose command is the same
+        as `command` once whitespace is collapsed, or None."""
+        wanted = " ".join(str(command).split())
+        marks = ",".join("?" for _ in self._DUPLICATE_STATUSES)
+        rows = self.db.execute(
+            f"SELECT job_id, command, status FROM jobs WHERE org_id = ? AND status IN ({marks}) "
+            "ORDER BY submitted_at DESC LIMIT ?",
+            (org_id, *self._DUPLICATE_STATUSES, limit),
+        ).fetchall()
+        for row in rows:
+            if " ".join(str(row["command"]).split()) == wanted:
+                return {"job_id": row["job_id"], "status": row["status"]}
+        return None

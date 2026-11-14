@@ -157,7 +157,8 @@ class GconClient:
                     callback_url: Optional[str] = None,
                     verify: Optional[Dict[str, Any]] = None,
                     idempotency_key: Optional[str] = None,
-                    client_reference: Optional[str] = None) -> Dict[str, Any]:
+                    client_reference: Optional[str] = None,
+                    confirm_rerun: bool = False) -> Dict[str, Any]:
         """
         Submit a new job to the cluster.
 
@@ -203,6 +204,9 @@ class GconClient:
                 organization -- a fresh key always creates a new job,
                 same as leaving this unset.
 
+        confirm_rerun: a command that matches one of your pending, running or completed jobs is refused
+        (GconAPIError, status_code 409) so the same work is not run twice by accident; pass True to run it again.
+
         Raises GconAPIError with status_code=400 if the submission is
         rejected by server-side policy (e.g. a `requires`/`verify`
         value over a configured ceiling) -- same clean error shape as
@@ -222,6 +226,8 @@ class GconClient:
             payload["callback_url"] = callback_url
         if verify is not None:
             payload["verify"] = verify
+        if confirm_rerun:
+            payload["confirm_rerun"] = True
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self._request("POST", "/jobs", json=payload, headers=headers)
 

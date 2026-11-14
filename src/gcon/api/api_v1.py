@@ -223,6 +223,13 @@ class JobSubmitRequest(BaseModel):
             "jobs run in a sandbox. A plan with no program list accepts any command line."
         ),
     )
+    confirm_rerun: bool = Field(
+        default=False,
+        description=(
+            "A job whose command is the same as one of your pending, running or completed jobs is refused with "
+            "409 (code duplicate_job) so the same work is not run twice by accident. Send true to run it again on purpose."
+        ),
+    )
     artifacts: Optional[List[str]] = Field(
         default=None, description="Not supported through the API: a non-empty list is refused (400). Use dataset_artifacts."
     )
@@ -1166,6 +1173,20 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
         return {"mode": mode, "enabled": enabled, "description": description, "modes": _POOL_MODE_HELP}
 
     # ---- GCON-hosted workers, leased to this organization ------------------------------------------------
+    class DuplicateJobError(Exception):
+        def __init__(self, existing_job_id, existing_status):
+            self.existing_job_id, self.existing_status = existing_job_id, existing_status
+
+    @app.exception_handler(DuplicateJobError)
+    async def _duplicate_job(request, exc):
+        return JSONResponse(status_code=409, content={
+            "code": "duplicate_job",
+            "detail": (f"You already have a {exc.existing_status} job with this command ({exc.existing_job_id}). "
+                       "To run it again, confirm the rerun."),
+            "existing_job_id": exc.existing_job_id,
+            "existing_status": exc.existing_status,
+        })
+
     @app.exception_handler(WorkersRequiredError)
     async def _workers_required(request, exc):
         # 409: the request is fine; the organization has not claimed (or does not have) workers to run it.
@@ -1546,6 +1567,12 @@ def create_api_v1_app(management, presentation, rate_limiter=None, client_ip=Non
             )
 
         def _do_submit(job_id):
+            # The same command as one of this organization's pending, running or completed jobs is not run twice
+            # unless the caller says so. (A replayed Idempotency-Key never gets here: it returns the first job.)
+            if org_id and not payload.confirm_rerun and presentation.coordinator.control_plane is not None:
+                same = presentation.coordinator.control_plane.jobs.find_same_command(org_id, payload.command)
+                if same is not None:
+                    raise DuplicateJobError(same["job_id"], same["status"])
             try:
                 presentation.submit_job(
                     job_id,
