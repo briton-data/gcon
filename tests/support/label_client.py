@@ -12,8 +12,14 @@ class LabelClient(TestClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ids = {}
+        # Many tests submit the same command over and over on purpose. Unless a test turns this on, POST /jobs
+        # sends confirm_rerun=true so the duplicate-job guard stays out of the way.
+        self.guard_duplicates = False
 
     def request(self, method, url, *args, **kwargs):
+        if (not self.guard_duplicates and method.upper() == "POST" and str(url).split("?")[0] == "/jobs"
+                and isinstance(kwargs.get("json"), dict)):
+            kwargs["json"] = {"confirm_rerun": True, **kwargs["json"]}
         response = super().request(method, url, *args, **kwargs)
         try:
             if method.upper() == "POST" and str(url).split("?")[0] in ("/jobs", "/workflows") \

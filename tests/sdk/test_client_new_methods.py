@@ -259,7 +259,16 @@ def test_submit_job_returns_the_canonical_id_and_the_label_is_a_client_reference
     result = client.submit_job("my-label", "sleep 5")
     assert result["job_id"].startswith("job_") and result["job_id"] != "my-label"
     assert result["client_reference"] == "my-label"
-    explicit = client.submit_job("ignored-label", "sleep 5", client_reference="explicit")
+    explicit = client.submit_job("ignored-label", "sleep 5", client_reference="explicit", confirm_rerun=True)
     assert explicit["client_reference"] == "explicit"
     found = client.list_jobs(client_reference="my-label")
     assert [j["job_id"] for j in found] == [result["job_id"]]
+
+
+def test_a_repeated_command_needs_confirm_rerun(live_server):
+    client, _ = _signup_and_client(live_server)
+    client.submit_job("first", "sleep 7")
+    with pytest.raises(GconAPIError) as refused:
+        client.submit_job("second", "sleep 7")
+    assert refused.value.status_code == 409
+    assert client.submit_job("third", "sleep 7", confirm_rerun=True)["job_id"]
