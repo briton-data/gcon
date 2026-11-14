@@ -31,7 +31,7 @@ GCON attaches that record to the result. Every successful job comes back with a 
 |---|---|---|
 | **Orchestration** | Queues jobs, picks a suitable free worker, retries when a worker drops, and chains jobs into workflows. You say what to run; GCON decides where. | Available |
 | **Execution** | Runs the command on a worker node and measures runtime, CPU, memory and GPU use. A job can require a GPU, GPU memory or CPU cores. | Available |
-| **Verification** | For jobs where a wrong answer is costly, runs the same job on several independent nodes and compares the results. | Optional |
+| **Verification** | For jobs where a wrong answer is costly, runs the same job on several independent nodes and compares the results. | Optional, depends on your plan |
 | **Evidence and receipts** | Records every successful run as a stored receipt: hashes of the command and output, the node, timing and signatures. | Automatic |
 | **Assurance** | Combines the signature checks, the node's own signature, policy limits and replica agreement into one verdict per receipt. | Included with each receipt |
 | **Proof** | Independent proof of what happened on a job. | Not available yet |
@@ -48,6 +48,8 @@ You need an account and an API key. You can work from the website or from a term
 2. Open **Submit Job**. Enter a job name and the command to run. Optionally set minimum GPU memory, minimum CPU cores, or the number of verification workers.
 3. Choose **Submit job**, then open the job to follow its status.
 4. Open **Evidence** to read the receipt and the checks for each successful job.
+
+Before your first job, open **Workers** and request a GCON-hosted worker. A job needs a worker that belongs to your organization, and a new account has none yet.
 
 Create an API key under **API Keys** when you want to use the API or the SDK.
 
@@ -73,7 +75,20 @@ The response contains your API key. It is shown once, so save it.
 export GCON_KEY="gcon_..."
 ```
 
-**2. Submit a job**
+**2. Request a worker**
+
+Jobs run on workers that belong to your organization. Lease a GCON-hosted one (it runs your jobs, and only yours, until you release it):
+
+```bash
+curl -X POST $GCON_URL/api/v1/workers/leases \
+  -H "Authorization: Bearer $GCON_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"count":1}'
+```
+
+`403` means your plan includes no hosted workers or you are at its limit. `409` means fewer than `count` are free right now. You can also enroll your own workers instead.
+
+**3. Submit a job**
 
 ```bash
 curl -X POST $GCON_URL/api/v1/jobs \
@@ -88,9 +103,9 @@ The response contains the `job_id` GCON generated. Use it to follow the job:
 curl $GCON_URL/api/v1/jobs/<job_id> -H "Authorization: Bearer $GCON_KEY"
 ```
 
-A job goes `pending`, then `running`, then `completed` or `failed`. A successful job has a `receipt_id`.
+A job goes `pending`, then `running`, then `completed` or `failed`. While it is `pending`, `waiting_reason` says why it has not started, for example that no worker is available. A successful job has a `receipt_id`.
 
-**3. Read the receipt**
+**4. Read the receipt**
 
 ```bash
 curl $GCON_URL/api/v1/receipts/<receipt_id> -H "Authorization: Bearer $GCON_KEY"
@@ -106,6 +121,8 @@ pip install -e sdk/
 from gcon_sdk import GconClient
 
 client = GconClient(api_key="gcon_...", base_url="<your GCON service URL>")
+
+client.request_workers(1)  # once: lease a GCON-hosted worker
 
 submitted = client.submit_job("hello-1", "echo hello from GCON")  # "hello-1" is your own label
 job = client.get_job(submitted["job_id"])
@@ -205,6 +222,12 @@ client.retry_job(job_id)
 ```
 
 For a replicated job, replicas agree only if their output is identical. A disputed job still has status `completed`, so check `job["verification"]["outcome"]` (`"agreed"`, `"disputed"` or `"unavailable"`) before using the result.
+
+## Plans and billing
+
+Your organization is on the Standard, Pro or Enterprise plan. The plan sets your request rate, how many jobs can be pending or running at once, which programs a job may start with, the longest a job may run, how many workers you can enroll or lease, and whether verification is available. `GET /api/v1/account/plan` (SDK: `client.get_plan()`) shows your limits and current usage.
+
+Usage and invoices are readable through the API (`/billing/usage`, `/billing/invoices`; SDK: `get_usage()`, `list_invoices()`) and on the website.
 
 ## Status
 
